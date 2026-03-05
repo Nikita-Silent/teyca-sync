@@ -1,0 +1,41 @@
+# Editable install
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+build/
+dist/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+
+# Env (secrets)
+.env
+!.env.example
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS / logs
+.DS_Store
+*.log

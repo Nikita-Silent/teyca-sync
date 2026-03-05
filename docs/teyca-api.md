@@ -1,0 +1,61 @@
+# API Teyca — выжимка для teyca-sync
+
+**Источник:** Postman-коллекция [teyca-api.json](../teyca-api.json).
+
+**Базовый URL:** `https://api.teyca.ru`
+
+**Авторизация:** заголовок `Authorization` с основным ключом API. Входящий webhook от Teyca верифицируется статическим токеном в том же заголовке (ENV: `WEBHOOK_AUTH_TOKEN`).
+
+---
+
+## Входящие вызовы (Teyca → наш сервис)
+
+Teyca шлёт webhook на наш URL (POST). В теле запроса:
+
+- `type` — тип события: `CREATE` | `UPDATE` | `DELETE`
+- `pass` — объект карты лояльности: `user_id`, `email`, `phone`, `first_name`, `last_name`, `pat_name`, `birthday`, `gender`, `barcode`, `discount`, `bonus`, `loyalty_level`, `summ`, `summ_all`, `summ_last`, `visits`, `visits_all`, `date_last`, `city` и др. (схема в `app/schemas/webhook.py`).
+
+---
+
+## Исходящие вызовы (наш сервис → Teyca)
+
+Во всех запросах в path нужен `token` (ENV: `TEYCA_API_KEY`, `TEYCA_TOKEN`). Авторизация: заголовок `Authorization` с основным ключом API.
+
+### Карты (passes)
+
+| Действие | Метод | Путь | Примечание |
+|----------|--------|------|------------|
+| Получение карты по `user_id` | GET | `/v1/{token}/passes/userid/{user_id}` | Чтение актуальной карты. |
+| Создание карты | POST | `/v1/{token}/passes` | Body: `template`, `first_name`, `last_name`, `pat_name`, `phone`, `email`, `birthday`, `gender`, `barcode`, `discount`, `bonus`, `loyalty_level`. |
+| Обновление карты (в т.ч. merge) | PUT | `/v1/{token}/passes/{user_id}` | Установка полей карты (не начисление). Body: `bonus`, `loyalty_level`, `summ`, `summ_all`, `key2` и др. Пример: `{"bonus": 300, "loyalty_level": "Золотой"}`. |
+| Удаление карты | DELETE | `/v1/{token}/passes/{user_id}` | — |
+
+### Начисление бонусов: механизм в FastAPI (teyca-sync)
+
+В сервисе (FastAPI) бонусы участвуют так:
+
+1. **Входящий webhook** — Teyca присылает POST на наш `/webhook` с телом `{ "type": "CREATE"|"UPDATE"|"DELETE", "pass": { ... } }`. В `pass.bonus` приходит **уже актуальный баланс** бонусов по карте (Teyca сама начисляет/списывает при покупках и т.д.). Сервис парсит payload, проверяет Authorization, публикует сообщение в RabbitMQ в очередь по `type` (CREATE/UPDATE/DELETE). Consumers сохраняют данные в Postgres и синхронизируют Listmonk; поле `bonus` хранится в таблице `users` как часть профиля.
+
+2. **Когда нужно начислить бонусы из нашего сервиса** (например при merge с кассовой БД или по внутреннему правилу) — вызываем **API Teyca**, а не выставляем число через PUT карты:
+   - **POST** `https://api.teyca.ru/v1/{token}/passes/{user_id}/bonuses`  
+   - Body: `{ "bonus": [ { "value": "500.0", "active_from": "2025-07-19T11:21:35.779+00:00", "expires_at": "2025-08-03T11:21:35.779+00:00" }, ... ] }`  
+   Каждый элемент массива — одна операция начисления: сумма `value` и период действия `active_from`, `expires_at`. Teyca добавляет их к балансу и ведёт историю. В коде (consumers или отдельный клиент) использовать httpx и конфиг `TEYCA_TOKEN`, `TEYCA_API_KEY`.
+
+3. **Получение истории бонусов** — **GET** `https://api.teyca.ru/v1/{token}/passes/{user_id}/bonuses` (без body). Нужно для отчётов или проверки.
+
+4. **PUT карты** (`/v1/{token}/passes/{user_id}`) с полем `bonus` — это **не начисление**, а установка итогового значения поля на карте (например после merge: сложили бонусы из кассы и CRM и один раз обновили карту). Для добавления новой операции начисления используется только POST `.../bonuses` с массивом.
+
+| Действие | Метод | Путь | Body |
+|----------|--------|------|------|
+| История бонусов | GET | `/v1/{token}/passes/{user_id}/bonuses` | — |
+| Начисление бонусов | POST | `/v1/{token}/passes/{user_id}/bonuses` | `{ "bonus": [ { "value": "...", "active_from": "ISO8601", "expires_at": "ISO8601" } ] }` |
+
+---
+
+## Webhook в Teyca (управление подписками)
+
+- GET `/v1/{token}/webhook` — список вебхуков
+- POST `/v1/{token}/webhook` — создание (body: `type`, `url`), например `{"type": "CREATE", "url": "https://example.com/webhook/create"}`
+- PUT/DELETE по `hook_id` — обновление/удаление
+
+Нужны для настройки доставки событий CREATE/UPDATE/DELETE на наш POST /webhook.
