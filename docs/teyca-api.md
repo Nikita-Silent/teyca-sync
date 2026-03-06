@@ -34,7 +34,7 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 
 В сервисе (FastAPI) бонусы участвуют так:
 
-1. **Входящий webhook** — Teyca присылает POST на наш `/webhook` с телом `{ "type": "CREATE"|"UPDATE"|"DELETE", "pass": { ... } }`. В `pass.bonus` приходит **уже актуальный баланс** бонусов по карте (Teyca сама начисляет/списывает при покупках и т.д.). Сервис парсит payload, проверяет Authorization, публикует сообщение в RabbitMQ в очередь по `type` (CREATE/UPDATE/DELETE). Consumers сохраняют данные в Postgres и синхронизируют Listmonk; поле `bonus` хранится в таблице `users` как часть профиля.
+1. **Входящий webhook** — Teyca присылает POST на наш путь из `WEBHOOK` (по умолчанию `/webhook`) с телом `{ "type": "CREATE"|"UPDATE"|"DELETE", "pass": { ... } }`. В `pass.bonus` приходит **уже актуальный баланс** бонусов по карте (Teyca сама начисляет/списывает при покупках и т.д.). Сервис парсит payload, проверяет Authorization, публикует сообщение в RabbitMQ в очередь по `type` (CREATE/UPDATE/DELETE). Consumers сохраняют данные в Postgres и синхронизируют Listmonk; поле `bonus` хранится в таблице `users` как часть профиля.
 
 2. **Когда нужно начислить бонусы из нашего сервиса** (например при merge с кассовой БД или по внутреннему правилу) — вызываем **API Teyca**, а не выставляем число через PUT карты:
    - **POST** `https://api.teyca.ru/v1/{token}/passes/{user_id}/bonuses`  
@@ -58,4 +58,4 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 - POST `/v1/{token}/webhook` — создание (body: `type`, `url`), например `{"type": "CREATE", "url": "https://example.com/webhook/create"}`
 - PUT/DELETE по `hook_id` — обновление/удаление
 
-Нужны для настройки доставки событий CREATE/UPDATE/DELETE на наш POST /webhook.
+Нужны для настройки доставки событий CREATE/UPDATE/DELETE на наш POST путь из `WEBHOOK` (по умолчанию `/webhook`).

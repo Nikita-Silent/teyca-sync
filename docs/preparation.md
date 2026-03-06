@@ -8,10 +8,10 @@
 
 | # | Что | Статус | Примечание |
 |---|-----|--------|------------|
-| 1.1 | **pyproject.toml** | ⬜ | Зависимости: FastAPI, uvicorn, sqlalchemy[asyncio], alembic, asyncpg или psycopg, pika/aio-pika (RabbitMQ), httpx, pydantic-settings, structlog, python-jose/cryptography (JWT), listmonk SDK. Dev: pytest, pytest-asyncio, respx, testcontainers. `[tool.pytest.ini_options] asyncio_mode = "auto"`. |
+| 1.1 | **pyproject.toml** | ⬜ | Зависимости: FastAPI, uvicorn, sqlalchemy[asyncio], alembic, asyncpg или psycopg, pika/aio-pika (RabbitMQ), httpx, pydantic-settings, structlog, listmonk SDK. Dev: pytest, pytest-asyncio, respx, testcontainers. `[tool.pytest.ini_options] asyncio_mode = "auto"`. |
 | 1.2 | **Docker: compose.yaml** | ⬜ | Сервисы: app (FastAPI), postgres (17+), rabbitmq (4+). Сети и переменные для подключения. |
 | 1.3 | **Makefile** | ⬜ | `up`, `down`, `migrate`, `test`, `test-unit`, `test-integration` по AGENTS.md. |
-| 1.4 | **.env.example** | ⬜ | DATABASE_URL, RABBITMQ_URL, LISTMONK_*, JWT секрет/настройки, TEYCA_API_KEY, TEYCA_TOKEN, URL старой БД (export_db), при необходимости Loki. Все переменные, которые читает app/config. |
+| 1.4 | **.env.example** | ⬜ | DATABASE_URL, RABBITMQ_URL, LISTMONK_*, WEBHOOK_AUTH_TOKEN, TEYCA_API_KEY, TEYCA_TOKEN, URL старой БД (export_db), при необходимости Loki. Все переменные, которые читает app/config. |
 | 1.5 | **Alembic** | ⬜ | `migrations/` и env для async Postgres. Миграции создавать только через `--autogenerate` после изменения `app/db/models.py`. |
 
 После 1.1–1.5: `make up` и `make migrate` должны выполняться без ошибок.
@@ -24,14 +24,14 @@
 
 | # | Что | Статус | Примечание |
 |---|-----|--------|------------|
-| 2.1 | **app/config.py** | ⬜ | Pydantic-settings: чтение ENV (DATABASE_URL, RABBITMQ_*, LISTMONK_*, JWT_*, EXPORT_DB_URL и т.д.). |
+| 2.1 | **app/config.py** | ⬜ | Pydantic-settings: чтение ENV (DATABASE_URL, RABBITMQ_*, LISTMONK_*, WEBHOOK_AUTH_TOKEN, EXPORT_DB_URL и т.д.). |
 | 2.2 | **app/mq/queues.py** | ⬜ | Константы имён очередей, например: `QUEUE_CREATE = "queue-create"`, `QUEUE_UPDATE = "queue-update"`, `QUEUE_DELETE = "queue-delete"`. Использовать только их, не строки в коде. |
 | 2.3 | **app/db/models.py** | ⬜ | ORM-модели: `User` (users), `ListmonkUser` (listmonk_users), `MergeLog` (merge_log) по описанию из roadmap.md. Без CASCADE на удаление. |
 | 2.4 | **app/schemas/webhook.py** | ⬜ | Pydantic-модели входящего payload: тип события (`type`: CREATE/UPDATE/DELETE) и тело `pass` (user_id, email, fio, summ, check_summ и др.). Минимум для роутинга и Среза 1: `type`, `pass.user_id`. |
-| 2.5 | **app/api/webhook.py** | ⬜ | Роут POST /webhook: приём JSON, валидация JWT, парсинг body в схему, публикация в RabbitMQ в очередь по `type`. Пока без consumers — только публикация. |
+| 2.5 | **app/api/webhook.py** | ⬜ | Роут POST на путь из `WEBHOOK` (по умолчанию `/webhook`): приём JSON, валидация `Authorization` header (token), парсинг body в схему, публикация в RabbitMQ в очередь по `type`. |
 | 2.6 | **app/main.py** | ⬜ | Подключить роут webhook, при необходимости CORS/middleware. |
 
-После 2.1–2.6: POST /webhook с валидным JWT и body `{"type": "CREATE", "pass": {"user_id": 1, ...}}` должен публиковать сообщение в нужную очередь (проверка через RabbitMQ Management или тест).
+После 2.1–2.6: POST на путь из `WEBHOOK` (по умолчанию `/webhook`) с валидным `Authorization` token и body `{\"type\": \"CREATE\", \"pass\": {\"user_id\": 1, ...}}` должен публиковать сообщение в нужную очередь (проверка через RabbitMQ Management или тест).
 
 ---
 

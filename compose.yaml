@@ -1,4 +1,19 @@
 services:
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://teyca:teyca@postgres:5432/teyca
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: alembic upgrade head
+    restart: "no"
+
   app:
     build: .
     ports:
@@ -13,7 +28,57 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  consumers:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://teyca:teyca@postgres:5432/teyca
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.workers.run_queue_consumers
+
+  consent-sync:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://teyca:teyca@postgres:5432/teyca
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: /bin/sh -c 'while true; do python -m app.workers.run_consent_sync; sleep 60; done'
+
+  reconcile:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://teyca:teyca@postgres:5432/teyca
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: /bin/sh -c 'while true; do python -m app.workers.run_listmonk_reconcile; sleep 300; done'
 
   postgres:
     image: postgres:17-alpine

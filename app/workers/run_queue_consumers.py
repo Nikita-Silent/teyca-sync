@@ -1,0 +1,165 @@
+"""Run RabbitMQ consumers for CREATE/UPDATE/DELETE queues."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import dataclass
+from typing import Any
+
+import aio_pika
+import structlog
+from aio_pika.abc import AbstractIncomingMessage
+
+from app.clients.listmonk import ListmonkSDKClient
+from app.clients.teyca import TeycaClient
+from app.config import Settings, get_settings
+from app.consumers.create_user import CreateConsumerDeps, handle as handle_create
+from app.consumers.delete_user import DeleteConsumerDeps, handle as handle_delete
+from app.consumers.update_user import UpdateConsumerDeps, handle as handle_update
+from app.db.session import SessionLocal
+from app.mq.queues import QUEUE_CREATE, QUEUE_DELETE, QUEUE_UPDATE
+from app.repositories.bonus_accrual import BonusAccrualRepository
+from app.repositories.listmonk_users import ListmonkUsersRepository
+from app.repositories.merge_log import MergeLogRepository
+from app.repositories.old_db import OldDBRepository
+from app.repositories.users import UsersRepository
+
+logger = structlog.get_logger()
+
+
+@dataclass(slots=True)
+class ConsumersRunner:
+    """Queue consumers lifecycle manager."""
+
+    settings: Settings
+    listmonk_client: ListmonkSDKClient
+    teyca_client: TeycaClient
+    old_db_repo: OldDBRepository
+
+    async def _parse_payload(self, message: AbstractIncomingMessage) -> dict[str, Any]:
+        try:
+            return json.loads(message.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid message body JSON") from exc
+
+    async def _consume_create(self, payload: dict[str, Any]) -> None:
+        async with SessionLocal() as session:
+            deps = CreateConsumerDeps(
+                settings=self.settings,
+                users_repo=UsersRepository(session),
+                listmonk_repo=ListmonkUsersRepository(session),
+                merge_repo=MergeLogRepository(session),
+                old_db_repo=self.old_db_repo,
+                listmonk_client=self.listmonk_client,
+                teyca_client=self.teyca_client,
+            )
+            try:
+                await handle_create(payload, deps=deps)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def _consume_update(self, payload: dict[str, Any]) -> None:
+        async with SessionLocal() as session:
+            deps = UpdateConsumerDeps(
+                settings=self.settings,
+                users_repo=UsersRepository(session),
+                listmonk_repo=ListmonkUsersRepository(session),
+                merge_repo=MergeLogRepository(session),
+                old_db_repo=self.old_db_repo,
+                listmonk_client=self.listmonk_client,
+                teyca_client=self.teyca_client,
+            )
+            try:
+                await handle_update(payload, deps=deps)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def _consume_delete(self, payload: dict[str, Any]) -> None:
+        async with SessionLocal() as session:
+            deps = DeleteConsumerDeps(
+                users_repo=UsersRepository(session),
+                listmonk_repo=ListmonkUsersRepository(session),
+                merge_repo=MergeLogRepository(session),
+                bonus_accrual_repo=BonusAccrualRepository(session),
+                listmonk_client=self.listmonk_client,
+                session=session,
+            )
+            try:
+                await handle_delete(payload, deps=deps)
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def _process(self, message: AbstractIncomingMessage, queue_name: str) -> None:
+        payload = await self._parse_payload(message)
+        if queue_name == QUEUE_CREATE:
+            await self._consume_create(payload)
+            return
+        if queue_name == QUEUE_UPDATE:
+            await self._consume_update(payload)
+            return
+        if queue_name == QUEUE_DELETE:
+            await self._consume_delete(payload)
+            return
+        raise ValueError(f"Unsupported queue: {queue_name}")
+
+    async def _callback(self, message: AbstractIncomingMessage, queue_name: str) -> None:
+        try:
+            await self._process(message, queue_name)
+            await message.ack()
+            logger.info("consumer_message_acked", queue_name=queue_name)
+        except Exception as exc:
+            logger.error(
+                "consumer_message_failed",
+                queue_name=queue_name,
+                error=str(exc),
+            )
+            await message.reject(requeue=True)
+
+    async def run(self) -> None:
+        """Connect to RabbitMQ and consume all queues indefinitely."""
+        connection = await aio_pika.connect_robust(self.settings.rabbitmq_url)
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=32)
+
+        queue_create = await channel.declare_queue(QUEUE_CREATE, durable=True)
+        queue_update = await channel.declare_queue(QUEUE_UPDATE, durable=True)
+        queue_delete = await channel.declare_queue(QUEUE_DELETE, durable=True)
+
+        await queue_create.consume(lambda msg: self._callback(msg, QUEUE_CREATE))
+        await queue_update.consume(lambda msg: self._callback(msg, QUEUE_UPDATE))
+        await queue_delete.consume(lambda msg: self._callback(msg, QUEUE_DELETE))
+
+        logger.info(
+            "consumers_started",
+            queues=[QUEUE_CREATE, QUEUE_UPDATE, QUEUE_DELETE],
+        )
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await self.old_db_repo.close()
+            await connection.close()
+
+
+async def _run() -> None:
+    settings = get_settings()
+    runner = ConsumersRunner(
+        settings=settings,
+        listmonk_client=ListmonkSDKClient(settings),
+        teyca_client=TeycaClient(settings),
+        old_db_repo=OldDBRepository(settings.export_db_url),
+    )
+    await runner.run()
+
+
+def main() -> None:
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    main()

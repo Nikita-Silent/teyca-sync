@@ -1,7 +1,7 @@
-.PHONY: up down migrate test test-unit test-integration consent-sync-once
+.PHONY: up down migrate test test-unit test-integration consent-sync-once reconcile-once consumers
 
 up:
-	docker compose up -d
+	docker compose up -d --build
 
 down:
 	docker compose down
@@ -19,4 +19,10 @@ test-integration:
 	pytest tests/integration/ -v
 
 consent-sync-once:
-	python -m app.workers.run_consent_sync
+	docker compose run --rm app python -m app.workers.run_consent_sync
+
+reconcile-once:
+	docker compose run --rm app python -m app.workers.run_listmonk_reconcile
+
+consumers:
+	docker compose run --rm app python -m app.workers.run_queue_consumers

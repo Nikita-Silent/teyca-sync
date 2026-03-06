@@ -3,7 +3,7 @@
 from datetime import datetime, UTC
 from typing import Any
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +52,45 @@ class BonusAccrualRepository:
         )
         await self._session.execute(stmt)
 
+    async def save_progress(
+        self,
+        *,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        status: str = "pending",
+        error_text: str | None = None,
+    ) -> None:
+        """Persist intermediate step progress in payload."""
+        stmt = (
+            update(BonusAccrualLog)
+            .where(BonusAccrualLog.idempotency_key == idempotency_key)
+            .values(
+                status=status,
+                payload=payload,
+                error_text=error_text,
+            )
+        )
+        await self._session.execute(stmt)
+
+    async def mark_done_with_payload(
+        self,
+        *,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Mark operation as done and persist final payload state."""
+        stmt = (
+            update(BonusAccrualLog)
+            .where(BonusAccrualLog.idempotency_key == idempotency_key)
+            .values(
+                status="done",
+                payload=payload,
+                error_text=None,
+                processed_at=datetime.now(UTC),
+            )
+        )
+        await self._session.execute(stmt)
+
     async def mark_failed(self, *, idempotency_key: str, error_text: str) -> None:
         """Mark operation as failed with diagnostic text."""
         stmt = (
@@ -71,3 +110,8 @@ class BonusAccrualRepository:
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def delete_by_user_id(self, *, user_id: int) -> None:
+        """Delete all bonus accrual rows for user."""
+        stmt = delete(BonusAccrualLog).where(BonusAccrualLog.user_id == user_id)
+        await self._session.execute(stmt)

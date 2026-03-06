@@ -31,7 +31,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="teyca-sync", lifespan=lifespan)
-app.include_router(webhook_router)
+webhook_path = get_settings().webhook.strip() or "/webhook"
+if not webhook_path.startswith("/"):
+    webhook_path = f"/{webhook_path}"
+app.include_router(webhook_router, prefix=webhook_path)
 
 
 @app.get("/")

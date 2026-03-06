@@ -4,7 +4,7 @@
 ## Контекст и роли
 
 **Инициатор:** CRM
-**Триггер:** Webhook в FastAPI (CREATE/UPDATE/DELETE). Верификация запроса — **JWT токен** (заголовок или параметр).
+**Триггер:** Webhook в FastAPI (CREATE/UPDATE/DELETE).
 **Транспорт:** FastAPI принимает webhook, публикует payload в RabbitMQ в очередь по типу события; обработка — асинхронно в consumers.
 **Очереди RabbitMQ:** имена только через константы (см. `app/mq/queues.py`). Роутинг: CREATE → `queue-create`, UPDATE → `queue-update`, DELETE → `queue-delete`.
 **Сторедж:** Postgres (ACID транзакции)
@@ -18,9 +18,10 @@
 * признак merge = **в `merge_log`**
 * merge-правило для `summ/check_summ` и подобных = **всегда сложение**
 * merge-правило для бонусов из старой БД: переносим в Teyca **операциями начисления** через `POST /v1/{token}/passes/{user_id}/bonuses`, а не через `PUT /passes/{user_id}`.
+* при успешном merge в CREATE/UPDATE выставляется `key2` в Teyca: `merge DD.MM.YYYY HH:MM`
 * Listmonk list_id **не из CRM**, а берётся из **ENV/конфига** (то есть маппинг "куда подписывать" — системный)
-* **Верификация webhook:** входящий запрос проверяется по **JWT токену** (настройка в ENV). Без валидного токена запрос отклоняется.
 * Источник истины по согласию на email-рассылку — **Listmonk** (статус подписчика в целевом `list_id`), а не webhook payload CRM.
+* при `blocked` в Listmonk в Teyca выставляется `key1=blocked`; при confirmed/active — `key1=confirmed`
 * Начисление бонусов за согласие на email-рассылку выполняется отдельной операцией в Teyca `POST /v1/{token}/passes/{user_id}/bonuses` после подтверждения согласия в Listmonk.
 * Webhook от Listmonk не используется: подтверждение consent обрабатывает отдельный `sync-worker` периодическим опросом Listmonk.
 * Любое начисление бонусов должно быть идемпотентным (уникальный ключ операции в БД, чтобы не начислить повторно при ретраях).
@@ -110,6 +111,7 @@ Webhook `CREATE` от CRM с данными пользователя и `user.id
 9. Если шаг 3 вернул историю и merge реально применился:
 
    * выполнить начисление бонусов из старой БД в Teyca через `POST /v1/{token}/passes/{user_id}/bonuses` (пакет операций `bonus[]`)
+   * обновить `key2` в Teyca: `merge DD.MM.YYYY HH:MM`
    * вставить запись в `merge_log` (user_id, merged_at=now()).
 10. Если пользователь подлежит проверке consent, пометить его как `consent_pending` для фоновой обработки `sync-worker`.
 11. `COMMIT`.
@@ -149,9 +151,10 @@ Webhook `UPDATE` от CRM с `user.id` и данными.
 
    * прочитать старую БД по `user.id`
    * применить merge-правило **сложения** для заданных полей
+   * обновить `key2` в Teyca: `merge DD.MM.YYYY HH:MM`
    * вставить `merge_log` с timestamp
 6. Обновить `users` итоговыми данными (CRM + merged поля).
-7. Обновить subscriber в Listmonk через SDK (`PATCH`/update), применить list_ids из ENV.
+7. Обновить subscriber в Listmonk через SDK (update с сохранением текущего status), применить list_ids из ENV.
 8. Если пользователь подлежит проверке consent, пометить его как `consent_pending` для фоновой обработки `sync-worker`.
 9. Обновить `listmonk_users`.
 10. `COMMIT`.
@@ -162,25 +165,35 @@ Webhook `UPDATE` от CRM с `user.id` и данными.
 
 ### Вход
 
-Периодический запуск воркера (например, каждые N минут) + пользователи со статусом `consent_pending`.
+Периодический запуск воркера (например, каждые N минут) + watermark в `sync_state` для каждого `list_id`.
 
 ### Выход
 
 * подтверждённые consent получают бонус через `POST /v1/{token}/passes/{user_id}/bonuses`
 * начисления не дублируются (идемпотентность)
 * `consent_pending` очищается для обработанных пользователей
+* в логах есть агрегированная метрика по запуску и детализация по каждому `list_id`
 
 ### Шаги
 
-1. Выбрать батч пользователей `consent_pending`.
-2. Для каждого `user_id` взять lock/идемпотентный reservation.
-3. Через Listmonk SDK прочитать актуальный статус подписчика в целевом `list_id`.
-4. Если status не подтверждён — оставить `consent_pending`, перейти к следующему.
-5. Если status подтверждён и начисление `email_consent` ещё не выполнялось:
-   * вызвать Teyca `POST /v1/{token}/passes/{user_id}/bonuses`
-   * записать журнал начисления (`reason=email_consent`)
-   * снять `consent_pending`.
-6. При ошибке Teyca сохранить ошибку, оставить запись для следующего ретрая без потери идемпотентности.
+1. Для каждого `list_id` прочитать watermark из `sync_state`.
+2. Через Listmonk SDK выбрать только подписчиков, изменившихся после watermark.
+3. Для каждой записи сопоставить `subscriber_id -> user_id` через `listmonk_users`.
+4. Если status `blocked`:
+   * вызвать Teyca `PUT /v1/{token}/passes/{user_id}` с `key1=blocked`
+   * сохранить `status` в `listmonk_users`, снять `consent_pending`
+   * при ошибке Teyca оставить `consent_pending=true` для ретрая.
+5. Если status не подтверждён — оставить `consent_pending`, перейти к следующему.
+6. Если status подтверждён/active:
+   * использовать `bonus_accrual_log` с шагами `bonus_done` и `key1_done`
+   * если `bonus_done=false` → вызвать Teyca `POST /v1/{token}/passes/{user_id}/bonuses`, сохранить шаг
+   * если `key1_done=false` → вызвать Teyca `PUT /v1/{token}/passes/{user_id}` с `key1=confirmed`, сохранить шаг
+   * после обоих шагов: `bonus_accrual_log.status=done`, снять `consent_pending`.
+7. Сдвинуть watermark в `sync_state` до последней успешно просмотренной записи `(updated_at, subscriber_id)`.
+8. При ошибке Teyca сохранить текущий прогресс шагов и оставить запись для следующего ретрая без потери идемпотентности.
+9. Логировать observability-события:
+   * `consent_sync_list_processed` (per list_id, deltas, watermark)
+   * `consent_sync_metrics` (агрегированные счётчики запуска: processed, deltas_fetched, confirmed_done, teyca_errors и т.д.)
 
 ---
 
@@ -239,6 +252,10 @@ Webhook `DELETE` от CRM с `user.id`.
   * Минимальное решение: сохранять статус синка в `listmonk_users` (`sync_status`, `last_error`, `last_try_at`) и ретраить.
   * “Правильное” решение: outbox + воркер.
 
+* Если в consent-sync встречаются `subscriber` без маппинга (`consent_sync_subscriber_not_mapped`):
+  * запускать отдельный reconcile-воркер, который восстанавливает связи в `listmonk_users` по `attributes.user_id` и по уникальному `email`.
+  * небезопасные случаи (несколько пользователей на один email / отсутствующий user_id) не маппить автоматически, а логировать для ручной обработки.
+
 ---
 
 # Срезы реализации
@@ -247,7 +264,7 @@ Webhook `DELETE` от CRM с `user.id`.
 
 | Срез | Содержание | Критерий закрытия |
 |------|-------------|-------------------|
-| **Срез 1** | Точка входа: webhook API, JWT-верификация, публикация в RabbitMQ (очереди CREATE/UPDATE/DELETE). Константы очередей в `app/mq/queues.py`. | POST /webhook принимает payload, проверяет JWT, публикует в нужную очередь; тесты на роутинг и отказ без токена. |
+| **Срез 1** | Точка входа: webhook API, публикация в RabbitMQ (очереди CREATE/UPDATE/DELETE). Константы очередей в `app/mq/queues.py`. | POST на путь из `WEBHOOK` (по умолчанию `/webhook`) принимает payload, публикует в нужную очередь; тесты на роутинг и отказ без токена. |
 | **Срез 2** | Consumer CREATE: блокировка по `user_id`, чтение старой БД, merge, upsert `users`, синхронизация Listmonk, `listmonk_users`, `merge_log`, начисление бонусов из старой БД через `POST .../bonuses`. | Все шаги бизнес-процесса 1 покрыты; unit-тесты на ветки (есть/нет история, есть/нет subscriber) и на начисление merge-бонусов. |
 | **Срез 3** | Consumer UPDATE: блокировка, проверка `users`/создание при отсутствии, проверка `merge_log`, условный merge, обновление `users` и Listmonk, постановка `consent_pending`. | Все шаги бизнес-процесса 2 покрыты; тесты на «merge уже был»/«merge не был» и «пользователь поставлен в consent_pending». |
 | **Срез 4** | Consumer DELETE: блокировка, чтение `subscriber_id`, явное удаление из всех таблиц master DB (без CASCADE), затем удаление в Listmonk. | Все шаги бизнес-процесса 3 покрыты; тесты на порядок удаления и вызов Listmonk после commit. |
@@ -255,6 +272,17 @@ Webhook `DELETE` от CRM с `user.id`.
 | **Срез 6** | Идемпотентность начислений бонусов (merge + consent): журнал операций начисления, защита от дублей, ретраи. | Повторная доставка события или повторный запуск worker не приводит к повторному начислению; есть unit/integration тесты на дедупликацию. |
 
 Дальнейшие срезы (по необходимости): retry/outbox для Listmonk, мониторинг, доработки по результатам эксплуатации.
+
+## Статус на 2026-03-06
+
+| Срез | Статус | Комментарий |
+|------|--------|-------------|
+| **Срез 1** | ✅ реализован | Webhook принимает `Authorization` header, валидирует token, публикует в очереди CREATE/UPDATE/DELETE. |
+| **Срез 2** | ✅ реализован | CREATE consumer реализован: lock, merge, upsert `users`, upsert Listmonk, `merge_log`, merge-бонусы, `consent_pending`. |
+| **Срез 3** | ✅ реализован | UPDATE consumer реализован: lock, проверка `merge_log`, условный merge, upsert, `consent_pending`. |
+| **Срез 4** | ✅ реализован | DELETE consumer реализован: явные delete из таблиц master DB, удаление subscriber в Listmonk после commit. |
+| **Срез 5** | ✅ реализован | Consent sync-worker и начисление `email_consent` с idempotency работают, покрыты unit-тестами. |
+| **Срез 6** | ⚠️ частично | Для consent реализована step-based идемпотентность (`bonus_done/key1_done` в `bonus_accrual_log.payload`); требуется отдельная фиксация идемпотентности merge-начислений + integration-тесты дедупликации. |
 
 **Подготовка к реализации:** чек-лист инфраструктуры, каркаса приложения и данных — в [docs/preparation.md](preparation.md).
 
@@ -347,7 +375,7 @@ BEGIN TRANSACTION
 Update users
         │
         ▼
-PATCH subscriber
+UPDATE subscriber (preserve current status)
         │
         ▼
 Update listmonk_users
@@ -474,7 +502,7 @@ Consumer
  ▼
 Postgres
  │
- │ PATCH subscriber
+ │ UPDATE subscriber (preserve current status)
  ▼
 Listmonk
  │
@@ -527,7 +555,7 @@ END
 ```
         CRM
          │
-         │ webhook (JWT)
+         │ webhook
          ▼
       FastAPI
          │

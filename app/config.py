@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # Webhook auth: Teyca sends this value in Authorization header (no JWT)
     webhook_auth_token: str = ""
+    webhook: str = "/webhook"
 
     # Teyca API (outgoing)
     teyca_base_url: str = "https://api.teyca.ru"
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     listmonk_user: str = ""
     listmonk_password: str = ""
     listmonk_list_ids: str = ""
-    consent_bonus_value: str = "100.0"
+    consent_bonus_amount: str = "100.0"
     consent_bonus_ttl_days: int = 30
     consent_sync_batch_size: int = 500
 

@@ -1,4 +1,4 @@
-"""POST /webhook: static token auth, parse body, publish to RabbitMQ by type."""
+"""Webhook endpoint: static token auth, parse body, publish to RabbitMQ by type."""
 
 import structlog
 from fastapi import APIRouter, Depends, Request
@@ -16,7 +16,7 @@ def get_mq_publisher(request: Request) -> MQPublisher:
     return request.app.state.mq_publisher
 
 
-@router.post("/webhook")
+@router.post("")
 async def webhook(
     request: Request,
     publisher: MQPublisher = Depends(get_mq_publisher),
