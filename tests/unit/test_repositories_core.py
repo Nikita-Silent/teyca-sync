@@ -47,7 +47,17 @@ async def test_listmonk_users_repository_paths() -> None:
 
     session.execute.return_value = SimpleNamespace(scalar_one_or_none=lambda: "row")
     assert await repo.get_by_user_id(user_id=1) == "row"
+    session.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["row"]))
     assert await repo.get_by_subscriber_id(subscriber_id=10) == "row"
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(user_id=2),
+                SimpleNamespace(user_id=1),
+            ]
+        )
+    )
+    assert (await repo.get_by_subscriber_id(subscriber_id=10)).user_id == 2
 
     await repo.upsert(
         user_id=1,

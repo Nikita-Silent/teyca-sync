@@ -2,11 +2,14 @@
 
 from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import Select, delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ListmonkUser
+
+logger = structlog.get_logger()
 
 
 class ListmonkUsersRepository:
@@ -34,9 +37,19 @@ class ListmonkUsersRepository:
         """Return listmonk state by subscriber_id."""
         stmt: Select[tuple[ListmonkUser]] = select(ListmonkUser).where(
             ListmonkUser.subscriber_id == subscriber_id
-        )
+        ).order_by(ListmonkUser.updated_at.desc().nullslast(), ListmonkUser.user_id.desc()).limit(2)
         result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        rows = list(result.scalars().all())
+        if not rows:
+            return None
+        if len(rows) > 1:
+            logger.warning(
+                "listmonk_users_duplicate_subscriber_id",
+                subscriber_id=subscriber_id,
+                duplicate_rows=len(rows),
+                picked_user_id=int(rows[0].user_id),
+            )
+        return rows[0]
 
     async def upsert(
         self,
