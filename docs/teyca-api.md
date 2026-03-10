@@ -17,6 +17,18 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 
 ---
 
+## Синхронизация с Listmonk (важно для CREATE/UPDATE)
+
+- Работа с Listmonk идёт через Python SDK (без прямого HTTP).
+- Перед upsert:
+  - `email` нормализуется (`strip`),
+  - `list_ids` берутся из ENV и нормализуются (dedup, только положительные id).
+- Если при update/create в Listmonk возникает конфликт уникальности email (`subscribers_email_key` / `409 conflict`), сервис делает fallback:
+  - `subscriber_by_email(email)` -> `update_subscriber` найденного subscriber.
+- Если `LISTMONK_LIST_IDS` пустой/невалидный, upsert не выполняется (ошибка конфигурации).
+
+---
+
 ## Исходящие вызовы (наш сервис → Teyca)
 
 Во всех запросах в path нужен `token` (ENV: `TEYCA_API_KEY`, `TEYCA_TOKEN`). Авторизация: заголовок `Authorization` с основным ключом API.

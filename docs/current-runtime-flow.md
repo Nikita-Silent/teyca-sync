@@ -66,6 +66,10 @@ sequenceDiagram
     end
     alt email valid
         C->>LM: upsert subscriber (preserve current status)
+        alt update/create returned email conflict (subscribers_email_key/409)
+            C->>LM: subscriber_by_email(email)
+            C->>LM: update found subscriber by email
+        end
         C->>DB: upsert listmonk_users
         C->>DB: set consent_pending=true
     else email invalid
@@ -104,6 +108,10 @@ sequenceDiagram
     end
     alt email valid
         U->>LM: upsert subscriber (preserve current status)
+        alt update/create returned email conflict (subscribers_email_key/409)
+            U->>LM: subscriber_by_email(email)
+            U->>LM: update found subscriber by email
+        end
         U->>DB: upsert listmonk_users
         U->>DB: set consent_pending=true
     else email invalid
@@ -205,6 +213,7 @@ sequenceDiagram
 Дополнительные логи:
 - `consent_sync_list_processed` — сколько deltas обработано по конкретному `list_id` и до какого watermark дошли.
 - `consent_sync_subscriber_not_mapped` — в Listmonk есть subscriber, но нет связи с `user_id` в нашей БД.
+- `listmonk_upsert_subscriber_request` / `listmonk_upsert_subscriber_done` — upsert subscriber в Listmonk (включая fallback по email при конфликте `subscribers_email_key`).
 
 ## 7) Sequence: listmonk reconcile-worker
 
