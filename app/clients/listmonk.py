@@ -193,22 +193,31 @@ class ListmonkSDKClient:
     ) -> SubscriberState:
         """Create or update subscriber via SDK and return normalized state."""
         await self._ensure_login()
-        if subscriber_id is None and not email:
+        normalized_email = _normalize_email(email)
+        normalized_list_ids = _normalize_list_ids(list_ids)
+        if not normalized_list_ids:
+            raise ListmonkClientError("LISTMONK_LIST_IDS is empty or invalid")
+        if subscriber_id is None and not normalized_email:
             raise ListmonkClientError("Subscriber email is required to create subscriber")
+        resolved_name = _build_subscriber_name(
+            attributes=attributes,
+            fallback_email=normalized_email,
+        )
         _safe_info(
             "listmonk_upsert_subscriber_request",
             subscriber_id=subscriber_id,
-            email=email,
-            list_ids=list_ids,
+            email=normalized_email,
+            name=resolved_name,
+            list_ids=normalized_list_ids,
         )
 
         request_kwargs: dict[str, Any] = {
-            "email": email,
-            "name": attributes.get("fio") or email or "",
+            "email": normalized_email,
+            "name": resolved_name,
             "attribs": attributes,
             "subscriber_id": subscriber_id,
             "id": subscriber_id,
-            "list_ids": list_ids,
+            "list_ids": normalized_list_ids,
         }
         if subscriber_id is not None:
             try:
@@ -218,16 +227,17 @@ class ListmonkSDKClient:
             subscriber = await asyncio.to_thread(listmonk.subscriber_by_id, subscriber_id)
             if subscriber is None:
                 # Subscriber was removed from Listmonk, recreate by email.
-                if not email:
+                if not normalized_email:
                     raise ListmonkClientError(
                         f"subscriber_id={subscriber_id} not found and email is empty"
                     )
                 return await self.upsert_subscriber(
-                    email=email,
-                    list_ids=list_ids,
+                    email=normalized_email,
+                    list_ids=normalized_list_ids,
                     attributes=attributes,
                     subscriber_id=None,
                 )
+            effective_subscriber_id = subscriber_id
             _apply_subscriber_update_fields(
                 subscriber=subscriber,
                 email=request_kwargs["email"],
@@ -235,14 +245,41 @@ class ListmonkSDKClient:
                 attribs=request_kwargs["attribs"],
             )
             current_status = getattr(subscriber, "status", None) or "enabled"
-            response = await asyncio.to_thread(
-                listmonk.update_subscriber,
-                subscriber,
-                set(list_ids),
-                None,
-                current_status,
-            )
-            state = await self.get_subscriber_state(subscriber_id=subscriber_id)
+            try:
+                response = await asyncio.to_thread(
+                    listmonk.update_subscriber,
+                    subscriber,
+                    set(normalized_list_ids),
+                    None,
+                    current_status,
+                )
+            except Exception as exc:
+                if not _is_conflict_error(exc) or not normalized_email:
+                    raise
+                # subscriber_id may point to stale/mismatched record; fallback by unique email.
+                existing_by_email = await asyncio.to_thread(listmonk.subscriber_by_email, normalized_email)
+                if existing_by_email is None:
+                    raise ListmonkClientError(
+                        f"Listmonk returned email conflict for subscriber_id={subscriber_id}, "
+                        f"but subscriber_by_email returned None for email={normalized_email}"
+                    ) from exc
+                existing_id = _extract_subscriber_id(existing_by_email)
+                if existing_id is not None:
+                    effective_subscriber_id = existing_id
+                _apply_subscriber_update_fields(
+                    subscriber=existing_by_email,
+                    email=request_kwargs["email"],
+                    name=request_kwargs["name"],
+                    attribs=request_kwargs["attribs"],
+                )
+                response = await asyncio.to_thread(
+                    listmonk.update_subscriber,
+                    existing_by_email,
+                    set(normalized_list_ids),
+                    None,
+                    getattr(existing_by_email, "status", None) or "enabled",
+                )
+            state = await self.get_subscriber_state(subscriber_id=effective_subscriber_id)
             if state is not None:
                 _safe_info(
                     "listmonk_upsert_subscriber_done",
@@ -253,13 +290,17 @@ class ListmonkSDKClient:
                 )
                 return state
             status = _extract_status(response) or str(current_status)
-            state = SubscriberState(subscriber_id=subscriber_id, status=status, list_ids=list_ids)
+            state = SubscriberState(
+                subscriber_id=effective_subscriber_id,
+                status=status,
+                list_ids=normalized_list_ids,
+            )
             _safe_info(
                 "listmonk_upsert_subscriber_done",
                 mode="update",
                 subscriber_id=state.subscriber_id,
                 status=state.status,
-                list_ids=state.list_ids,
+                list_ids=normalized_list_ids,
             )
             return state
 
@@ -272,7 +313,7 @@ class ListmonkSDKClient:
                 listmonk.create_subscriber,
                 request_kwargs["email"],
                 request_kwargs["name"],
-                set(list_ids),
+                set(normalized_list_ids),
                 False,
                 request_kwargs["attribs"],
             )
@@ -295,7 +336,7 @@ class ListmonkSDKClient:
             response = await asyncio.to_thread(
                 listmonk.update_subscriber,
                 existing,
-                set(list_ids),
+                set(normalized_list_ids),
                 None,
                 getattr(existing, "status", None) or "enabled",
             )
@@ -313,7 +354,7 @@ class ListmonkSDKClient:
             )
             return state
         status = _extract_status(response) or "enabled"
-        state = SubscriberState(subscriber_id=created_id, status=status, list_ids=list_ids)
+        state = SubscriberState(subscriber_id=created_id, status=status, list_ids=normalized_list_ids)
         _safe_info(
             "listmonk_upsert_subscriber_done",
             mode="create",
@@ -630,7 +671,13 @@ def _is_conflict_error(exc: Exception) -> bool:
     if response is not None and getattr(response, "status_code", None) == httpx.codes.CONFLICT:
         return True
     text = str(exc).lower()
-    return "409" in text and "conflict" in text
+    if "409" in text and "conflict" in text:
+        return True
+    if "duplicate key value violates unique constraint" in text:
+        return True
+    if "subscribers_email_key" in text:
+        return True
+    return False
 
 
 def _normalize_status_for_restore(status: str | None) -> str | None:
@@ -676,3 +723,39 @@ def _is_blocked_status(status: str) -> bool:
 
 def _is_confirmed_status(status: str) -> bool:
     return status.strip().lower() in {"enabled", "confirmed", "active"}
+
+
+def _normalize_email(email: str | None) -> str | None:
+    if email is None:
+        return None
+    normalized = email.strip()
+    return normalized or None
+
+
+def _normalize_list_ids(list_ids: list[int]) -> list[int]:
+    unique: set[int] = set()
+    for list_id in list_ids:
+        if isinstance(list_id, int) and list_id > 0:
+            unique.add(list_id)
+    return sorted(unique)
+
+
+def _build_subscriber_name(*, attributes: dict[str, object], fallback_email: str | None) -> str:
+    fio = attributes.get("fio")
+    if isinstance(fio, str):
+        normalized_fio = fio.strip()
+        if normalized_fio:
+            return normalized_fio
+
+    # Common Teyca payload path: separate first/last/patronymic names.
+    parts: list[str] = []
+    for key in ("last_name", "first_name", "pat_name"):
+        raw = attributes.get(key)
+        if isinstance(raw, str):
+            normalized = raw.strip()
+            if normalized:
+                parts.append(normalized)
+    if parts:
+        return " ".join(parts)
+
+    return fallback_email or ""

@@ -70,3 +70,16 @@ make test
   - в Teyca отправляется `PUT /passes/{user_id}` с `key1=blocked`,
   - если для `user_id` уже есть запись в `listmonk_users`, локально сохраняется `status=blocked` и `consent_pending=false`.
 - Если email исправили и пришёл следующий `UPDATE` с валидным email, работает обычный flow: `upsert_subscriber` + `set_consent_pending=true`.
+
+## Listmonk Upsert Rules
+
+- Перед вызовом Listmonk SDK:
+  - `email` нормализуется (`strip`),
+  - `list_ids` нормализуются (только положительные `int`, dedup, сортировка).
+- Имя subscriber (`name`) строится по приоритету:
+  - `pass.fio`,
+  - `last_name first_name pat_name`,
+  - fallback: `email`.
+- Если `LISTMONK_LIST_IDS` пустой/невалидный, upsert не выполняется и бросается `ListmonkClientError`.
+- Если при update прилетает конфликт уникальности email (`subscribers_email_key` / `409 conflict`):
+  - выполняется fallback: поиск `subscriber_by_email(email)` и повторный update уже найденного subscriber.

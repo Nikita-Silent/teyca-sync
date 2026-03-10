@@ -11,6 +11,7 @@ from app.clients.listmonk import (
     ListmonkClientError,
     ListmonkSDKClient,
     SubscriberState,
+    _build_subscriber_name,
     _extract_attributes,
     _extract_email,
     _extract_list_ids,
@@ -21,6 +22,8 @@ from app.clients.listmonk import (
     _is_blocked_status,
     _is_conflict_error,
     _is_confirmed_status,
+    _normalize_email,
+    _normalize_list_ids,
     _normalize_status_for_restore,
     _to_utc,
 )
@@ -122,6 +125,20 @@ def test_listmonk_extract_helpers() -> None:
     assert _extract_attributes(SimpleNamespace(attribs={"a": 1})) == {"a": 1}
     assert _extract_attributes(SimpleNamespace(attributes={"a": 1})) == {"a": 1}
     assert _extract_attributes(None) is None
+
+    assert _normalize_email("  x@y.z  ") == "x@y.z"
+    assert _normalize_email("   ") is None
+    assert _normalize_email(None) is None
+    assert _normalize_list_ids([2, 1, 2, 0, -1]) == [1, 2]
+    assert _build_subscriber_name(attributes={"fio": "  Ivan Ivanov  "}, fallback_email="x@y.z") == "Ivan Ivanov"
+    assert (
+        _build_subscriber_name(
+            attributes={"first_name": "Ivan", "last_name": "Ivanov", "pat_name": "Ivanovich"},
+            fallback_email="x@y.z",
+        )
+        == "Ivanov Ivan Ivanovich"
+    )
+    assert _build_subscriber_name(attributes={}, fallback_email="x@y.z") == "x@y.z"
 
     naive = datetime(2026, 3, 6, 12, 0)
     aware = datetime(2026, 3, 6, 12, 0, tzinfo=UTC)
@@ -270,6 +287,7 @@ async def test_upsert_subscriber_create_update_and_conflict_paths() -> None:
             subscriber_id=None,
         )
         assert state.subscriber_id == 77
+        fake.create_subscriber.assert_called_with("x@y.z", "X", {1}, False, {"fio": "X"})
 
         state = await client.upsert_subscriber(
             email="x@y.z",
@@ -299,6 +317,78 @@ async def test_upsert_subscriber_create_update_and_conflict_paths() -> None:
                 attributes={"fio": "X"},
                 subscriber_id=None,
             )
+
+
+@pytest.mark.asyncio
+async def test_upsert_subscriber_normalizes_input_and_requires_list_ids() -> None:
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.subscriber_by_id = MagicMock(return_value=SimpleNamespace(status="enabled", id=77))
+    fake.create_subscriber = MagicMock(return_value={"id": 77, "status": "enabled"})
+    fake.update_subscriber = MagicMock(return_value={"status": "enabled"})
+    fake.subscriber_by_email = MagicMock(return_value=SimpleNamespace(id=88, status="enabled"))
+
+    with patch.dict("sys.modules", {"listmonk": fake}), patch(
+        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    ):
+        client = ListmonkSDKClient(_settings())
+        state = await client.upsert_subscriber(
+            email="  user@example.com  ",
+            list_ids=[2, 1, 2],
+            attributes={"first_name": "Ivan", "last_name": "Ivanov", "pat_name": "Ivanovich"},
+            subscriber_id=None,
+        )
+        assert state.subscriber_id == 77
+        fake.create_subscriber.assert_called_with(
+            "user@example.com",
+            "Ivanov Ivan Ivanovich",
+            {1, 2},
+            False,
+            {"first_name": "Ivan", "last_name": "Ivanov", "pat_name": "Ivanovich"},
+        )
+
+        with pytest.raises(ListmonkClientError):
+            await client.upsert_subscriber(
+                email="user@example.com",
+                list_ids=[],
+                attributes={},
+                subscriber_id=None,
+            )
+
+
+@pytest.mark.asyncio
+async def test_upsert_subscriber_update_conflict_fallbacks_to_subscriber_by_email() -> None:
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.subscriber_by_id = MagicMock(
+        side_effect=[
+            SimpleNamespace(id=10, status="enabled", email="old@example.com"),
+            SimpleNamespace(id=88, status="enabled", email="user@example.com"),
+        ]
+    )
+    fake.create_subscriber = MagicMock(return_value={"id": 77, "status": "enabled"})
+    fake.subscriber_by_email = MagicMock(
+        return_value=SimpleNamespace(id=88, status="enabled", email="user@example.com")
+    )
+    conflict = RuntimeError("pq: duplicate key value violates unique constraint subscribers_email_key")
+    fake.update_subscriber = MagicMock(side_effect=[conflict, {"status": "enabled"}])
+
+    with patch.dict("sys.modules", {"listmonk": fake}), patch(
+        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    ):
+        client = ListmonkSDKClient(_settings())
+        state = await client.upsert_subscriber(
+            email="user@example.com",
+            list_ids=[1],
+            attributes={"fio": "User Name"},
+            subscriber_id=10,
+        )
+
+    assert state.subscriber_id == 88
+    assert fake.subscriber_by_email.call_count == 1
+    assert fake.update_subscriber.call_count == 2
 
 
 @pytest.mark.asyncio
