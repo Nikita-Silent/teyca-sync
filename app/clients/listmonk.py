@@ -143,6 +143,7 @@ class ListmonkSDKClient:
             return None
 
         status_raw = str(getattr(payload, "status", "") or "")
+        normalized_status = _normalize_user_status(status_raw)
         lists_raw = getattr(payload, "lists", [])
         list_ids: list[int] = []
         if isinstance(lists_raw, (list, set, tuple)):
@@ -160,7 +161,7 @@ class ListmonkSDKClient:
                 if isinstance(value, int):
                     list_ids.append(value)
 
-        if not status_raw:
+        if normalized_status is None:
             _safe_info(
                 "listmonk_get_subscriber_state_done",
                 subscriber_id=subscriber_id,
@@ -170,7 +171,7 @@ class ListmonkSDKClient:
             return None
         state = SubscriberState(
             subscriber_id=subscriber_id,
-            status=status_raw,
+            status=normalized_status,
             list_ids=list_ids,
             list_statuses=_extract_list_statuses(payload),
         )
@@ -544,10 +545,10 @@ def _extract_status(payload: object) -> str | None:
     if isinstance(payload, dict):
         value = payload.get("status")
         if isinstance(value, str):
-            return value
+            return _normalize_user_status(value)
     value = getattr(payload, "status", None)
     if isinstance(value, str):
-        return value
+        return _normalize_user_status(value)
     return None
 
 
@@ -681,18 +682,18 @@ def _is_conflict_error(exc: Exception) -> bool:
 
 
 def _normalize_status_for_restore(status: str | None) -> str | None:
+    return _normalize_user_status(status)
+
+
+def _normalize_user_status(status: str | None) -> str | None:
     if status is None:
         return None
     normalized = status.strip().lower()
     if not normalized:
         return None
-    if normalized in {"blocked", "blacklisted"}:
+    if _is_blocked_status(normalized):
         return "blocklisted"
-    # Only explicitly confirmed/active should be restored as confirmed (enabled).
-    if normalized in {"confirmed", "active"}:
-        return "enabled"
-    # Any other non-blocked status is restored as non-confirmed.
-    return "disabled"
+    return "enabled"
 
 
 def _apply_subscriber_update_fields(
@@ -728,7 +729,7 @@ def _is_confirmed_status(status: str) -> bool:
 def _normalize_email(email: str | None) -> str | None:
     if email is None:
         return None
-    normalized = email.strip()
+    normalized = email.strip().lower()
     return normalized or None
 
 

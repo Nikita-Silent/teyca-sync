@@ -53,8 +53,9 @@ async def test_process_pending_user_not_confirmed() -> None:
     accrual_repo = AsyncMock()
     worker.listmonk_client.get_subscriber_state.return_value = SubscriberState(
         subscriber_id=102,
-        status="disabled",
+        status="enabled",
         list_ids=[1],
+        list_statuses={1: "unconfirmed"},
     )
 
     await worker._process_pending_user(

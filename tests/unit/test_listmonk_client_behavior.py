@@ -101,7 +101,7 @@ def test_listmonk_extract_helpers() -> None:
         status = "enabled"
 
     assert _extract_status(_DictObj(status=1)) == "enabled"
-    assert _extract_status(SimpleNamespace(status="confirmed")) == "confirmed"
+    assert _extract_status(SimpleNamespace(status="confirmed")) == "enabled"
     assert _extract_status(SimpleNamespace(status=10)) is None
     assert _extract_status(None) is None
 
@@ -127,6 +127,7 @@ def test_listmonk_extract_helpers() -> None:
     assert _extract_attributes(None) is None
 
     assert _normalize_email("  x@y.z  ") == "x@y.z"
+    assert _normalize_email("  SHteGer.T@GMAIL.COM  ") == "shteger.t@gmail.com"
     assert _normalize_email("   ") is None
     assert _normalize_email(None) is None
     assert _normalize_list_ids([2, 1, 2, 0, -1]) == [1, 2]
@@ -179,7 +180,7 @@ def test_listmonk_extract_helpers() -> None:
 
     assert _normalize_status_for_restore("blocked") == "blocklisted"
     assert _normalize_status_for_restore("confirmed") == "enabled"
-    assert _normalize_status_for_restore("other") == "disabled"
+    assert _normalize_status_for_restore("other") == "enabled"
     assert _normalize_status_for_restore(" ") is None
     assert _normalize_status_for_restore(None) is None
 

@@ -69,6 +69,7 @@ class UsersRepository:
         values: dict[str, Any] = {"user_id": user_id}
         for field in USER_UPSERT_FIELDS:
             values[field] = profile.get(field)
+        values["email"] = _normalize_email(values.get("email"))
 
         insert_stmt = insert(User).values(**values)
         update_fields = {field: values[field] for field in USER_UPSERT_FIELDS}
@@ -82,3 +83,10 @@ class UsersRepository:
         """Delete user by primary key."""
         stmt = delete(User).where(User.user_id == user_id)
         await self._session.execute(stmt)
+
+
+def _normalize_email(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip().lower()
+    return normalized or None

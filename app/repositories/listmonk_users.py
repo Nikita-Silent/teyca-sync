@@ -62,11 +62,12 @@ class ListmonkUsersRepository:
         attributes: dict[str, object] | None,
     ) -> None:
         """Insert/update listmonk state row."""
+        normalized_email = _normalize_email(email)
         list_ids_text = ",".join(str(item) for item in list_ids)
         insert_stmt = insert(ListmonkUser).values(
             user_id=user_id,
             subscriber_id=subscriber_id,
-            email=email,
+            email=normalized_email,
             status=status,
             list_ids=list_ids_text,
             attributes=attributes,
@@ -75,7 +76,7 @@ class ListmonkUsersRepository:
             index_elements=[ListmonkUser.user_id],
             set_={
                 "subscriber_id": subscriber_id,
-                "email": email,
+                "email": normalized_email,
                 "status": status,
                 "list_ids": list_ids_text,
                 "attributes": attributes,
@@ -130,3 +131,10 @@ class ListmonkUsersRepository:
         """Delete listmonk state row."""
         stmt = delete(ListmonkUser).where(ListmonkUser.user_id == user_id)
         await self._session.execute(stmt)
+
+
+def _normalize_email(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip().lower()
+    return normalized or None
