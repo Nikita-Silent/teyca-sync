@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from time import monotonic
 from typing import Callable
+from uuid import uuid4
 
 import httpx
 import structlog
@@ -100,11 +101,14 @@ class TeycaClient:
         headers = self._get_headers()
         url = f"{self._get_pass_url(user_id=user_id)}/bonuses"
         payload = {"bonus": [item.to_dict() for item in bonuses]}
+        request_id = str(uuid4())
         logger.info(
             "teyca_accrue_bonuses_request",
+            request_id=request_id,
             user_id=user_id,
             url=url,
             operation_count=len(bonuses),
+            payload=payload,
         )
         await self._rate_limiter.acquire()
 
@@ -117,8 +121,10 @@ class TeycaClient:
         if response.status_code >= 400:
             logger.error(
                 "teyca_accrue_bonuses_failed",
+                request_id=request_id,
                 user_id=user_id,
                 url=url,
+                payload=payload,
                 status_code=response.status_code,
                 response_body=response.text,
             )
@@ -127,8 +133,10 @@ class TeycaClient:
             )
         logger.info(
             "teyca_accrue_bonuses_done",
+            request_id=request_id,
             user_id=user_id,
             url=url,
+            payload=payload,
             status_code=response.status_code,
         )
 
@@ -136,11 +144,14 @@ class TeycaClient:
         """Call PUT /v1/{token}/passes/{user_id} with partial fields."""
         headers = self._get_headers()
         url = self._get_pass_url(user_id=user_id)
+        request_id = str(uuid4())
         logger.info(
             "teyca_update_pass_request",
+            request_id=request_id,
             user_id=user_id,
             url=url,
             field_names=sorted(str(key) for key in fields.keys()),
+            fields=fields,
         )
         await self._rate_limiter.acquire()
 
@@ -153,8 +164,11 @@ class TeycaClient:
         if response.status_code >= 400:
             logger.error(
                 "teyca_update_pass_failed",
+                request_id=request_id,
                 user_id=user_id,
                 url=url,
+                field_names=sorted(str(key) for key in fields.keys()),
+                fields=fields,
                 status_code=response.status_code,
                 response_body=response.text,
             )
@@ -163,8 +177,11 @@ class TeycaClient:
             )
         logger.info(
             "teyca_update_pass_done",
+            request_id=request_id,
             user_id=user_id,
             url=url,
+            field_names=sorted(str(key) for key in fields.keys()),
+            fields=fields,
             status_code=response.status_code,
         )
 
