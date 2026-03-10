@@ -6,9 +6,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 COPY pyproject.toml .
+COPY README.md .
+COPY app/ app/
 RUN pip install --no-cache-dir -e ".[dev]"
 
-COPY app/ app/
 COPY alembic.ini .
 COPY migrations/ migrations/
 

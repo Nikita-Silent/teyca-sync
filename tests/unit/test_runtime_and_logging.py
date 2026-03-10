@@ -45,6 +45,19 @@ async def test_lifespan_runtime_branch_connects_and_closes_connection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_lifespan_always_shuts_logging_on_error() -> None:
+    app = SimpleNamespace(state=SimpleNamespace())
+    with patch.dict("os.environ", {"TESTING": "1"}, clear=False), patch(
+        "app.main.get_settings", return_value=SimpleNamespace(loki_url=None)
+    ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging") as shutdown_mock:
+        with pytest.raises(RuntimeError, match="boom"):
+            async with app_main.lifespan(app):
+                raise RuntimeError("boom")
+
+    shutdown_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_get_session_yields_session() -> None:
     fake_session = AsyncMock()
     context_manager = AsyncMock()

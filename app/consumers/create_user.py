@@ -22,6 +22,7 @@ from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
 from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.schemas.webhook import WebhookPayload
+from app.utils import to_optional_str
 from app.workers.consent_sync_worker import parse_list_ids
 
 logger = structlog.get_logger()
@@ -45,8 +46,8 @@ class CreateConsumerDeps:
 
 async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
     """Handle CREATE payload."""
-    trace_id = _to_optional_str(payload.get("trace_id"))
-    source_event_id = _to_optional_str(payload.get("source_event_id"))
+    trace_id = to_optional_str(payload.get("trace_id"))
+    source_event_id = to_optional_str(payload.get("source_event_id"))
     event = WebhookPayload.model_validate(payload)
     user_id = event.pass_data.user_id
     logger.info(
@@ -173,10 +174,3 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
         merge_log_exists_before=merged_already,
         merge_reason=BONUS_REASON_MERGE_OLD_DB if merge_needs_write and not merged_already else "none",
     )
-
-
-def _to_optional_str(raw: object) -> str | None:
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip()
-    return value or None

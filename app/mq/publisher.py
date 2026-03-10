@@ -9,6 +9,7 @@ import structlog
 from aio_pika import Message
 
 from app.mq.queues import QUEUE_CREATE, QUEUE_DELETE, QUEUE_UPDATE
+from app.utils import to_optional_str
 
 logger = structlog.get_logger()
 
@@ -29,8 +30,8 @@ class MQPublisher:
         """Publish JSON payload to the named queue. Declares queue if needed."""
         channel = await self._get_channel()
         await channel.declare_queue(queue_name, durable=True)
-        trace_id = _to_optional_str(payload.get("trace_id"))
-        source_event_id = _to_optional_str(payload.get("source_event_id"))
+        trace_id = to_optional_str(payload.get("trace_id"))
+        source_event_id = to_optional_str(payload.get("source_event_id"))
         user_id = _extract_user_id(payload)
         body = json.dumps(payload).encode()
         await channel.default_exchange.publish(
@@ -74,10 +75,3 @@ def _extract_user_id(payload: dict[str, Any]) -> int | None:
     if isinstance(raw, str) and raw.strip().isdigit():
         return int(raw.strip())
     return None
-
-
-def _to_optional_str(raw: object) -> str | None:
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip()
-    return value or None
