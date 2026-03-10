@@ -15,7 +15,11 @@ from app.mq.publisher import MQPublisher
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    configure_logging(loki_url=settings.loki_url)
+    configure_logging(
+        loki_url=settings.loki_url,
+        loki_username=getattr(settings, "loki_username", None),
+        loki_password=getattr(settings, "loki_password", None),
+    )
     if os.environ.get("TESTING"):
         from unittest.mock import AsyncMock
         app.state.mq_publisher = AsyncMock(spec=MQPublisher)

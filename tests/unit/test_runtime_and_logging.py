@@ -14,7 +14,7 @@ import pytest
 from app import main as app_main
 from app.api.webhook import get_mq_publisher
 from app.db import session as db_session
-from app.logging_config import LokiHandler, configure_logging, shutdown_logging
+from app.logging_config import _normalize_loki_url, configure_logging, shutdown_logging
 from app.workers import run_consent_sync, run_listmonk_reconcile
 from app.workers import run_queue_consumers
 from httpx import ASGITransport, AsyncClient
@@ -59,24 +59,25 @@ async def test_get_session_yields_session() -> None:
 
 
 def test_loki_handler_and_logging_config() -> None:
-    handler = LokiHandler("http://loki/", "svc")
-    assert handler._normalize_url("http://loki") == "http://loki/loki/api/v1/push"
-    assert handler._normalize_url("http://loki/loki/api/v1/push") == "http://loki/loki/api/v1/push"
+    assert _normalize_loki_url("http://loki") == "http://loki/loki/api/v1/push"
+    assert _normalize_loki_url("http://loki/loki/api/v1/push") == "http://loki/loki/api/v1/push"
 
-    record = logging.LogRecord("test", logging.INFO, __file__, 1, "msg", (), None)
-    with patch("urllib.request.urlopen"):
-        handler.emit(record)
+    with pytest.raises(RuntimeError):
+        configure_logging(loki_url=None)
 
-    # Force emit error branch.
-    with patch("urllib.request.urlopen", side_effect=RuntimeError("boom")), patch.object(
-        handler, "handleError"
-    ) as error_mock:
-        handler.emit(record)
-    error_mock.assert_called_once()
-
-    configure_logging(loki_url=None)
-    configure_logging(loki_url="http://loki")
+    loki_queue_handler = MagicMock()
+    loki_queue_handler.listener = MagicMock()
+    loki_queue_handler.level = logging.INFO
+    with patch("app.logging_config.logging_loki.LokiQueueHandler", return_value=loki_queue_handler) as cls_mock:
+        configure_logging(loki_url="http://loki", loki_username="user", loki_password="pass")
+        cls_mock.assert_called_once()
+        kwargs = cls_mock.call_args.kwargs
+        assert kwargs["url"] == "http://loki/loki/api/v1/push"
+        assert kwargs["version"] == "2"
+        assert kwargs["auth"] == ("user", "pass")
+        assert kwargs["tags"] == {"service": "teyca-sync"}
     shutdown_logging()
+    loki_queue_handler.listener.stop.assert_called()
 
 
 def test_get_mq_publisher_and_main_guards() -> None:

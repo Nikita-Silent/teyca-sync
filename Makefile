@@ -1,4 +1,4 @@
-.PHONY: up down migrate test test-unit test-integration consent-sync-once reconcile-once consumers
+.PHONY: up down migrate test test-unit test-integration consent-sync-once reconcile-once consumers legacy-import legacy-import-dry-run
 
 up:
 	docker compose up -d --build
@@ -26,3 +26,9 @@ reconcile-once:
 
 consumers:
 	docker compose run --rm app python -m app.workers.run_queue_consumers
+
+legacy-import:
+	docker compose run --rm --build app python -m app.workers.run_legacy_snapshot_import --source-db-url "$$SOURCE_DB_URL" --batch-size "$${BATCH_SIZE:-500}"
+
+legacy-import-dry-run:
+	docker compose run --rm --build app python -m app.workers.run_legacy_snapshot_import --source-db-url "$$SOURCE_DB_URL" --dry-run --batch-size "$${BATCH_SIZE:-500}"

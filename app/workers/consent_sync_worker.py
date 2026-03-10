@@ -160,7 +160,6 @@ class ConsentSyncWorker:
 
         bonus_operation = BonusOperation.one_shot(
             value=self.settings.consent_bonus_amount,
-            ttl_days=self.settings.consent_bonus_ttl_days,
         )
         payload = _normalize_progress_payload(
             raw_payload=operation.payload,

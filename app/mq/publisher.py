@@ -1,12 +1,16 @@
 """Async RabbitMQ publisher. Use queue constants from app.mq.queues."""
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import aio_pika
+import structlog
 from aio_pika import Message
 
 from app.mq.queues import QUEUE_CREATE, QUEUE_DELETE, QUEUE_UPDATE
+
+logger = structlog.get_logger()
 
 
 class MQPublisher:
@@ -25,10 +29,27 @@ class MQPublisher:
         """Publish JSON payload to the named queue. Declares queue if needed."""
         channel = await self._get_channel()
         await channel.declare_queue(queue_name, durable=True)
+        trace_id = _to_optional_str(payload.get("trace_id"))
+        source_event_id = _to_optional_str(payload.get("source_event_id"))
+        user_id = _extract_user_id(payload)
         body = json.dumps(payload).encode()
         await channel.default_exchange.publish(
-            Message(body=body),
+            Message(
+                body=body,
+                content_type="application/json",
+                correlation_id=trace_id,
+                message_id=source_event_id,
+                timestamp=datetime.now(UTC),
+            ),
             routing_key=queue_name,
+        )
+        logger.info(
+            "mq_published",
+            queue_name=queue_name,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            user_id=user_id,
+            payload_bytes=len(body),
         )
 
     async def publish_webhook(self, event_type: str, payload: dict[str, Any]) -> None:
@@ -41,3 +62,22 @@ class MQPublisher:
             await self.publish(QUEUE_DELETE, payload)
         else:
             raise ValueError(f"Unknown event type: {event_type}")
+
+
+def _extract_user_id(payload: dict[str, Any]) -> int | None:
+    pass_obj = payload.get("pass")
+    if not isinstance(pass_obj, dict):
+        return None
+    raw = pass_obj.get("user_id")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw.strip())
+    return None
+
+
+def _to_optional_str(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    return value or None

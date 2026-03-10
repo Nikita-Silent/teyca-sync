@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
+import re
 from typing import Any
 
 from app.repositories.old_db import OldUserData
@@ -11,6 +12,8 @@ from app.schemas.webhook import PassData
 
 SUM_FIELDS: tuple[str, ...] = ("summ", "summ_all", "summ_last", "check_summ")
 INT_FIELDS: tuple[str, ...] = ("visits", "visits_all")
+EMAIL_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+MERGE_TZ = timezone(timedelta(hours=7))
 
 
 @dataclass(slots=True)
@@ -87,8 +90,32 @@ def build_listmonk_attributes(pass_data: PassData) -> dict[str, object]:
 
 def build_merge_key2_value(now: datetime | None = None) -> str:
     """Build human-readable key2 marker for successful merge."""
-    dt = now or datetime.now().astimezone()
+    dt = now or datetime.now(UTC)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    dt = dt.astimezone(MERGE_TZ)
     return f"merge {dt.strftime('%d.%m.%Y %H:%M')}"
+
+
+def is_valid_email(email: str | None) -> bool:
+    """Basic RFC-like validation to avoid sending to malformed addresses."""
+    if email is None:
+        return False
+    normalized = email.strip()
+    if not normalized or len(normalized) > 254 or " " in normalized:
+        return False
+    if normalized.count("@") != 1:
+        return False
+    local_part, domain = normalized.split("@", maxsplit=1)
+    if not local_part or not domain:
+        return False
+    if local_part.startswith(".") or local_part.endswith("."):
+        return False
+    if ".." in local_part or ".." in domain:
+        return False
+    if len(local_part) > 64:
+        return False
+    return EMAIL_RE.fullmatch(normalized) is not None
 
 
 def _to_optional_float(raw: object) -> float | None:

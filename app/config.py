@@ -37,6 +37,8 @@ class Settings(BaseSettings):
 
     # Optional Loki
     loki_url: str | None = None
+    loki_username: str | None = None
+    loki_password: str | None = None
 
 
 def get_settings() -> Settings:

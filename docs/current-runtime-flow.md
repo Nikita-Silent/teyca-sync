@@ -56,8 +56,6 @@ sequenceDiagram
     alt merge absent
         C->>ODB: read historical data
         C->>DB: upsert users (merged profile)
-        C->>LM: upsert subscriber (create pre_confirm=false)
-        C->>DB: upsert listmonk_users
         alt old bonus > 0
             C->>TY: POST /passes/{user_id}/bonuses
         end
@@ -65,10 +63,17 @@ sequenceDiagram
         C->>DB: insert merge_log
     else merge already exists
         C->>DB: upsert users
+    end
+    alt email valid
         C->>LM: upsert subscriber (preserve current status)
         C->>DB: upsert listmonk_users
+        C->>DB: set consent_pending=true
+    else email invalid
+        C->>TY: PUT /passes/{user_id} {key1: "blocked"}
+        opt listmonk_users row already exists
+            C->>DB: mark checked status=blocked, consent_pending=false
+        end
     end
-    C->>DB: set consent_pending=true
     C->>DB: commit
 ```
 
@@ -89,8 +94,6 @@ sequenceDiagram
     alt merge absent
         U->>ODB: read historical data
         U->>DB: upsert users (merged profile)
-        U->>LM: upsert subscriber (preserve current status)
-        U->>DB: upsert listmonk_users
         alt old bonus > 0
             U->>TY: POST /passes/{user_id}/bonuses
         end
@@ -98,10 +101,17 @@ sequenceDiagram
         U->>DB: insert merge_log
     else merge exists
         U->>DB: upsert users
+    end
+    alt email valid
         U->>LM: upsert subscriber (preserve current status)
         U->>DB: upsert listmonk_users
+        U->>DB: set consent_pending=true
+    else email invalid
+        U->>TY: PUT /passes/{user_id} {key1: "blocked"}
+        opt listmonk_users row already exists
+            U->>DB: mark checked status=blocked, consent_pending=false
+        end
     end
-    U->>DB: set consent_pending=true
     U->>DB: commit
 ```
 

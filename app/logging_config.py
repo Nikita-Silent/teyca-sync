@@ -1,70 +1,31 @@
-"""Application logging setup with optional Loki sink."""
+"""Application logging setup: Loki-only sink via python-logging-loki-v2."""
 
 from __future__ import annotations
 
-import json
 import logging
-from logging.handlers import QueueHandler, QueueListener
-from queue import SimpleQueue
-from typing import Any
-from urllib import request
+from queue import Queue
 
+import logging_loki
 import structlog
 
-_listener: QueueListener | None = None
+_loki_queue_handler: logging_loki.LokiQueueHandler | None = None
 
 
-class LokiHandler(logging.Handler):
-    """Send JSON log lines to Loki push API."""
+def configure_logging(
+    loki_url: str | None,
+    service_name: str = "teyca-sync",
+    loki_username: str | None = None,
+    loki_password: str | None = None,
+) -> None:
+    """Configure structlog + stdlib logging with Loki as the only sink."""
+    global _loki_queue_handler
+    if _loki_queue_handler is not None:
+        _loki_queue_handler.listener.stop()
+        _loki_queue_handler.close()
+        _loki_queue_handler = None
 
-    def __init__(self, loki_url: str, service_name: str, timeout: float = 2.0) -> None:
-        super().__init__()
-        self._push_url = self._normalize_url(loki_url)
-        self._service_name = service_name
-        self._timeout = timeout
-
-    @staticmethod
-    def _normalize_url(raw_url: str) -> str:
-        stripped = raw_url.rstrip("/")
-        if stripped.endswith("/loki/api/v1/push"):
-            return stripped
-        return f"{stripped}/loki/api/v1/push"
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            line = self.format(record)
-            timestamp_ns = str(int(record.created * 1_000_000_000))
-            payload = {
-                "streams": [
-                    {
-                        "stream": {
-                            "service": self._service_name,
-                            "logger": record.name,
-                            "level": record.levelname.lower(),
-                        },
-                        "values": [[timestamp_ns, line]],
-                    }
-                ]
-            }
-            body = json.dumps(payload).encode("utf-8")
-            req = request.Request(
-                self._push_url,
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with request.urlopen(req, timeout=self._timeout):
-                return
-        except Exception:
-            self.handleError(record)
-
-
-def configure_logging(loki_url: str | None, service_name: str = "teyca-sync") -> None:
-    """Configure structlog + stdlib logging, optionally with Loki."""
-    global _listener
-    if _listener is not None:
-        _listener.stop()
-        _listener = None
+    if not loki_url:
+        raise RuntimeError("LOKI_URL must be configured (logging sink is Loki-only)")
 
     structlog.configure(
         processors=[
@@ -79,30 +40,38 @@ def configure_logging(loki_url: str | None, service_name: str = "teyca-sync") ->
         cache_logger_on_first_use=True,
     )
 
-    sink_handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if loki_url:
-        sink_handlers.append(LokiHandler(loki_url=loki_url, service_name=service_name))
+    auth: tuple[str, str] | None = None
+    if loki_username:
+        auth = (loki_username, loki_password or "")
 
-    for handler in sink_handlers:
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        handler.setLevel(logging.INFO)
-
-    queue: SimpleQueue[logging.LogRecord] = SimpleQueue()
-    queue_handler = QueueHandler(queue)
-    queue_handler.setLevel(logging.INFO)
+    loki_handler = logging_loki.LokiQueueHandler(
+        Queue(-1),
+        url=_normalize_loki_url(loki_url),
+        tags={"service": service_name},
+        auth=auth,
+        version="2",
+    )
+    loki_handler.setFormatter(logging.Formatter("%(message)s"))
+    loki_handler.setLevel(logging.INFO)
 
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(queue_handler)
-
-    _listener = QueueListener(queue, *sink_handlers, respect_handler_level=True)
-    _listener.start()
+    root_logger.addHandler(loki_handler)
+    _loki_queue_handler = loki_handler
 
 
 def shutdown_logging() -> None:
-    """Flush and stop background log listener."""
-    global _listener
-    if _listener is not None:
-        _listener.stop()
-        _listener = None
+    """Flush and stop background Loki queue listener."""
+    global _loki_queue_handler
+    if _loki_queue_handler is not None:
+        _loki_queue_handler.listener.stop()
+        _loki_queue_handler.close()
+        _loki_queue_handler = None
+
+
+def _normalize_loki_url(raw_url: str) -> str:
+    stripped = raw_url.rstrip("/")
+    if stripped.endswith("/loki/api/v1/push"):
+        return stripped
+    return f"{stripped}/loki/api/v1/push"

@@ -15,6 +15,7 @@ from app.consumers.common import (
     build_listmonk_attributes,
     build_merge_key2_value,
     build_profile_from_pass,
+    is_valid_email,
     merge_profile_with_old_data,
 )
 from app.mq.publisher import MQPublisher
@@ -126,8 +127,11 @@ def test_common_helpers_cover_numeric_and_merge_paths() -> None:
     assert _to_optional_int("bad") is None
     assert _to_optional_int(1.9) == 1
     assert _to_optional_int(object()) is None
+    assert is_valid_email("user@example.com") is True
+    assert is_valid_email("bad..mail@example.com") is False
+    assert is_valid_email("bad.mail@") is False
 
-    assert build_merge_key2_value(datetime(2026, 3, 6, 12, 1, tzinfo=UTC)) == "merge 06.03.2026 12:01"
+    assert build_merge_key2_value(datetime(2026, 3, 6, 12, 1, tzinfo=UTC)) == "merge 06.03.2026 19:01"
 
 
 @pytest.mark.asyncio
@@ -142,7 +146,7 @@ async def test_teyca_client_all_branches_with_injected_http_client() -> None:
     http_client.put.return_value = SimpleNamespace(status_code=200, text="ok")
     client = TeycaClient(settings=settings, http_client=http_client)
 
-    op = BonusOperation.one_shot(value="10", ttl_days=7)
+    op = BonusOperation.one_shot(value="10")
     assert op.to_dict()["value"] == "10"
 
     await client.accrue_bonuses(user_id=10, bonuses=[op])
@@ -185,7 +189,7 @@ async def test_teyca_client_uses_internal_httpx_client_when_not_injected() -> No
     cm.__aexit__.return_value = False
 
     with patch("app.clients.teyca.httpx.AsyncClient", return_value=cm):
-        await client.accrue_bonuses(user_id=1, bonuses=[BonusOperation.one_shot(value="1", ttl_days=1)])
+        await client.accrue_bonuses(user_id=1, bonuses=[BonusOperation.one_shot(value="1")])
         await client.update_pass_fields(user_id=1, fields={"key1": "confirmed"})
 
     assert httpx_client.post.await_count == 1

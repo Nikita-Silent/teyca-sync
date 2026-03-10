@@ -61,6 +61,26 @@ async def test_webhook_accepts_bearer_prefix(mock_publisher: AsyncMock) -> None:
 
 
 @pytest.mark.asyncio
+async def test_webhook_propagates_trace_headers_to_payload(mock_publisher: AsyncMock) -> None:
+    os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
+    payload = {"type": "CREATE", "pass": {"user_id": 4}}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "Authorization": AUTH_TOKEN,
+                "X-Trace-Id": "trace-123",
+                "X-Event-Id": "event-123",
+            },
+        )
+    assert resp.status_code == 200
+    call_args = mock_publisher.publish_webhook.call_args
+    assert call_args[0][1]["trace_id"] == "trace-123"
+    assert call_args[0][1]["source_event_id"] == "event-123"
+
+
+@pytest.mark.asyncio
 async def test_webhook_routes_delete_to_queue_delete(mock_publisher: AsyncMock) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     payload = {"type": "DELETE", "pass": {"user_id": 3}}
@@ -98,4 +118,21 @@ async def test_webhook_rejects_invalid_token(mock_publisher: AsyncMock) -> None:
             headers={"Authorization": "wrong-token"},
         )
     assert resp.status_code == 403
+    mock_publisher.publish_webhook.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_invalid_json_body(mock_publisher: AsyncMock) -> None:
+    os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post(
+            "/webhook",
+            content=b'{"type":"CREATE","pass":{"user_id":1}, bad}',
+            headers={
+                "Authorization": AUTH_TOKEN,
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Invalid JSON body"
     mock_publisher.publish_webhook.assert_not_called()

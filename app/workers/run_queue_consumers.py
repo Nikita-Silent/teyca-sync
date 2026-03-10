@@ -9,6 +9,7 @@ from typing import Any
 
 import aio_pika
 import structlog
+from structlog import contextvars as log_contextvars
 from aio_pika.abc import AbstractIncomingMessage
 
 from app.clients.listmonk import ListmonkSDKClient
@@ -97,27 +98,47 @@ class ConsumersRunner:
 
     async def _process(self, message: AbstractIncomingMessage, queue_name: str) -> None:
         payload = await self._parse_payload(message)
-        if queue_name == QUEUE_CREATE:
-            await self._consume_create(payload)
-            return
-        if queue_name == QUEUE_UPDATE:
-            await self._consume_update(payload)
-            return
-        if queue_name == QUEUE_DELETE:
-            await self._consume_delete(payload)
-            return
-        raise ValueError(f"Unsupported queue: {queue_name}")
+        with log_contextvars.bound_contextvars(
+            trace_id=_resolve_trace_id(payload=payload, message=message),
+            source_event_id=_resolve_source_event_id(payload=payload, message=message),
+            user_id=_extract_user_id(payload),
+            event_type=_to_optional_str(payload.get("type")),
+            queue_name=queue_name,
+        ):
+            logger.info(
+                "consumer_message_processing_started",
+                redelivered=getattr(message, "redelivered", None),
+            )
+            if queue_name == QUEUE_CREATE:
+                await self._consume_create(payload)
+                return
+            if queue_name == QUEUE_UPDATE:
+                await self._consume_update(payload)
+                return
+            if queue_name == QUEUE_DELETE:
+                await self._consume_delete(payload)
+                return
+            raise ValueError(f"Unsupported queue: {queue_name}")
 
     async def _callback(self, message: AbstractIncomingMessage, queue_name: str) -> None:
         try:
             await self._process(message, queue_name)
             await message.ack()
-            logger.info("consumer_message_acked", queue_name=queue_name)
+            logger.info(
+                "consumer_message_acked",
+                queue_name=queue_name,
+                message_id=getattr(message, "message_id", None),
+                correlation_id=getattr(message, "correlation_id", None),
+                delivery_tag=getattr(message, "delivery_tag", None),
+            )
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "consumer_message_failed",
                 queue_name=queue_name,
                 error=str(exc),
+                message_id=getattr(message, "message_id", None),
+                correlation_id=getattr(message, "correlation_id", None),
+                delivery_tag=getattr(message, "delivery_tag", None),
             )
             await message.reject(requeue=True)
 
@@ -144,6 +165,39 @@ class ConsumersRunner:
         finally:
             await self.old_db_repo.close()
             await connection.close()
+
+
+def _extract_user_id(payload: dict[str, Any]) -> int | None:
+    pass_obj = payload.get("pass")
+    if not isinstance(pass_obj, dict):
+        return None
+    raw = pass_obj.get("user_id")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw.strip())
+    return None
+
+
+def _to_optional_str(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    return value or None
+
+
+def _resolve_trace_id(*, payload: dict[str, Any], message: AbstractIncomingMessage) -> str | None:
+    payload_trace_id = _to_optional_str(payload.get("trace_id"))
+    if payload_trace_id:
+        return payload_trace_id
+    return _to_optional_str(getattr(message, "correlation_id", None))
+
+
+def _resolve_source_event_id(*, payload: dict[str, Any], message: AbstractIncomingMessage) -> str | None:
+    payload_event_id = _to_optional_str(payload.get("source_event_id"))
+    if payload_event_id:
+        return payload_event_id
+    return _to_optional_str(getattr(message, "message_id", None))
 
 
 async def _run() -> None:

@@ -7,12 +7,12 @@ from app.consumers.update_user import UpdateConsumerDeps, handle
 from app.repositories.old_db import OldUserData
 
 
-def _payload(user_id: int = 20) -> dict[str, object]:
+def _payload(user_id: int = 20, email: str = "up@example.com") -> dict[str, object]:
     return {
         "type": "UPDATE",
         "pass": {
             "user_id": user_id,
-            "email": "up@example.com",
+            "email": email,
             "phone": "79039859055",
             "summ": 90,
             "visits": 3,
@@ -24,7 +24,6 @@ def _deps() -> UpdateConsumerDeps:
     return UpdateConsumerDeps(
         settings=SimpleNamespace(
             listmonk_list_ids="3",
-            consent_bonus_ttl_days=30,
         ),
         users_repo=AsyncMock(),
         listmonk_repo=AsyncMock(),
@@ -95,3 +94,38 @@ async def test_update_when_merge_missing_but_old_data_empty() -> None:
     deps.merge_repo.create.assert_not_awaited()
     deps.teyca_client.accrue_bonuses.assert_not_awaited()
     deps.teyca_client.update_pass_fields.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_invalid_email_blocks_and_skips_listmonk() -> None:
+    deps = _deps()
+    deps.merge_repo.exists.return_value = True
+    deps.listmonk_repo.get_by_user_id.return_value = None
+
+    await handle(_payload(email="not-an-email"), deps=deps)
+
+    deps.listmonk_client.upsert_subscriber.assert_not_awaited()
+    deps.listmonk_repo.upsert.assert_not_awaited()
+    deps.listmonk_repo.set_consent_pending.assert_not_awaited()
+    deps.listmonk_repo.mark_checked.assert_not_awaited()
+    deps.teyca_client.update_pass_fields.assert_awaited_once_with(
+        user_id=20,
+        fields={"key1": "blocked"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_invalid_email_blocks_and_marks_existing_subscriber() -> None:
+    deps = _deps()
+    deps.merge_repo.exists.return_value = True
+    deps.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=902)
+
+    await handle(_payload(email="bad@"), deps=deps)
+
+    deps.listmonk_client.upsert_subscriber.assert_not_awaited()
+    deps.listmonk_repo.mark_checked.assert_awaited_once_with(
+        user_id=20,
+        pending=False,
+        confirmed=False,
+        status="blocked",
+    )
