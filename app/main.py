@@ -1,6 +1,7 @@
 """FastAPI app: webhook router, RabbitMQ lifecycle."""
 
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import aio_pika
@@ -13,7 +14,7 @@ from app.mq.publisher import MQPublisher
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(
         loki_url=settings.loki_url,
@@ -21,18 +22,21 @@ async def lifespan(app: FastAPI):
         loki_password=getattr(settings, "loki_password", None),
         component=getattr(settings, "log_component", "app"),
     )
-    if os.environ.get("TESTING"):
-        from unittest.mock import AsyncMock
-        app.state.mq_publisher = AsyncMock(spec=MQPublisher)
-        yield
-    else:
-        connection = await aio_pika.connect_robust(settings.rabbitmq_url)
-        app.state.mq_publisher = MQPublisher(connection)
-        try:
+    try:
+        if os.environ.get("TESTING"):
+            from unittest.mock import AsyncMock
+
+            app.state.mq_publisher = AsyncMock(spec=MQPublisher)
             yield
-        finally:
-            await connection.close()
-    shutdown_logging()
+        else:
+            connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+            app.state.mq_publisher = MQPublisher(connection)
+            try:
+                yield
+            finally:
+                await connection.close()
+    finally:
+        shutdown_logging()
 
 
 app = FastAPI(title="teyca-sync", lifespan=lifespan)

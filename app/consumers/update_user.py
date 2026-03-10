@@ -22,6 +22,7 @@ from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
 from app.schemas.webhook import WebhookPayload
+from app.utils import to_optional_str
 from app.workers.consent_sync_worker import parse_list_ids
 
 logger = structlog.get_logger()
@@ -43,8 +44,8 @@ class UpdateConsumerDeps:
 
 async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
     """Handle UPDATE payload."""
-    trace_id = _to_optional_str(payload.get("trace_id"))
-    source_event_id = _to_optional_str(payload.get("source_event_id"))
+    trace_id = to_optional_str(payload.get("trace_id"))
+    source_event_id = to_optional_str(payload.get("source_event_id"))
     event = WebhookPayload.model_validate(payload)
     user_id = event.pass_data.user_id
     logger.info(
@@ -172,10 +173,3 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
         merge_applied_this_event=merge_applied,
         merge_log_exists_before=merged_already,
     )
-
-
-def _to_optional_str(raw: object) -> str | None:
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip()
-    return value or None

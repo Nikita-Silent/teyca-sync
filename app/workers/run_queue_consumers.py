@@ -26,6 +26,7 @@ from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
+from app.utils import to_optional_str
 
 logger = structlog.get_logger()
 
@@ -103,7 +104,7 @@ class ConsumersRunner:
             trace_id=_resolve_trace_id(payload=payload, message=message),
             source_event_id=_resolve_source_event_id(payload=payload, message=message),
             user_id=_extract_user_id(payload),
-            event_type=_to_optional_str(payload.get("type")),
+            event_type=to_optional_str(payload.get("type")),
             queue_name=queue_name,
         ):
             logger.info(
@@ -180,25 +181,18 @@ def _extract_user_id(payload: dict[str, Any]) -> int | None:
     return None
 
 
-def _to_optional_str(raw: object) -> str | None:
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip()
-    return value or None
-
-
 def _resolve_trace_id(*, payload: dict[str, Any], message: AbstractIncomingMessage) -> str | None:
-    payload_trace_id = _to_optional_str(payload.get("trace_id"))
+    payload_trace_id = to_optional_str(payload.get("trace_id"))
     if payload_trace_id:
         return payload_trace_id
-    return _to_optional_str(getattr(message, "correlation_id", None))
+    return to_optional_str(getattr(message, "correlation_id", None))
 
 
 def _resolve_source_event_id(*, payload: dict[str, Any], message: AbstractIncomingMessage) -> str | None:
-    payload_event_id = _to_optional_str(payload.get("source_event_id"))
+    payload_event_id = to_optional_str(payload.get("source_event_id"))
     if payload_event_id:
         return payload_event_id
-    return _to_optional_str(getattr(message, "message_id", None))
+    return to_optional_str(getattr(message, "message_id", None))
 
 
 async def _run() -> None:
