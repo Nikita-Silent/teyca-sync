@@ -1,7 +1,47 @@
+"""FastAPI app: webhook router, RabbitMQ lifecycle."""
+
+import os
+from contextlib import asynccontextmanager
+
+import aio_pika
 from fastapi import FastAPI
 
-app = FastAPI()
+from app.api.webhook import router as webhook_router
+from app.config import get_settings
+from app.logging_config import configure_logging, shutdown_logging
+from app.mq.publisher import MQPublisher
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    configure_logging(
+        loki_url=settings.loki_url,
+        loki_username=getattr(settings, "loki_username", None),
+        loki_password=getattr(settings, "loki_password", None),
+        component=getattr(settings, "log_component", "app"),
+    )
+    if os.environ.get("TESTING"):
+        from unittest.mock import AsyncMock
+        app.state.mq_publisher = AsyncMock(spec=MQPublisher)
+        yield
+    else:
+        connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+        app.state.mq_publisher = MQPublisher(connection)
+        try:
+            yield
+        finally:
+            await connection.close()
+    shutdown_logging()
+
+
+app = FastAPI(title="teyca-sync", lifespan=lifespan)
+webhook_path = get_settings().webhook.strip() or "/webhook"
+if not webhook_path.startswith("/"):
+    webhook_path = f"/{webhook_path}"
+app.include_router(webhook_router, prefix=webhook_path)
+
 
 @app.get("/")
-def read_root():
+async def read_root() -> dict:
     return {"message": "Hello, World!"}

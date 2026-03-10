@@ -2,46 +2,6 @@
 
 ---
 
-## Контекст проекта
-
-`teyca-sync` — Python/FastAPI сервис, который заменяет n8n-воркфлоу `Current-Loyalty`.
-Он принимает вебхуки от Teyca (CRM лояльности), обрабатывает их через RabbitMQ и синхронизирует данные между PostgreSQL и Listmonk (email-рассылки).
-
-**Три потока данных:** CREATE → UPDATE → DELETE пользователей.
-**Главное правило разработки:** срез не закрыт без тестов. Не предлагай PR без покрытия.
-
-Подробный roadmap — в `docs/roadmap.md`.
-
----
-
-## Агенты и их роли
-
-В этом проекте работают три логических агента. Каждый отвечает за свою зону — не залезай в чужую без явной задачи.
-
----
-
-### Агент 1 — `implementer`
-
-**Роль:** Пишет бизнес-логику: consumers, репозитории, клиенты API, схемы.
-
-**Зона ответственности:**
-- `app/consumers/` — вся логика обработки очередей
-- `app/repositories/` — SQL-запросы через SQLAlchemy
-- `app/clients/` — HTTP-клиенты Teyca, Listmonk, export_db
-- `app/schemas/` — Pydantic-модели
-- `app/mq/` — publisher, runner, константы очередей
-
-**Инструменты:**
-- Чтение и запись файлов в `app/`
-- Запуск `make test` для проверки после изменений
-- Запуск `make migrate` после изменений в моделях
-
-**Чего не делать:**
-- Не трогать `tests/` — это зона `tester`
-- Не трогать `docker-compose.yml` и `Makefile` — это зона `infra`
-- Не писать inline SQL — только через репозитории
-- Не создавать новые очереди RabbitMQ без обновления `app/mq/queues.py`
-
 **System prompt:**
 ```
 Ты — implementer агент проекта teyca-sync.
@@ -50,6 +10,7 @@
 После написания кода: убедись что `make test` зелёный.
 Стиль кода: async/await везде, type hints везде, без bare except.
 Именование очередей — только через константы из app/mq/queues.py, никогда строками напрямую.
+Listmonk — только через Python SDK; прямые HTTP-вызовы к Listmonk API не использовать.
 Если задача не входит в текущий срез — зафиксируй в TODO-комментарии и не реализуй.
 ```
 
@@ -72,7 +33,7 @@
 
 **Стек тестирования:**
 - `pytest` + `pytest-asyncio` (asyncio_mode = "auto")
-- `respx` — мок HTTP-запросов к Teyca и Listmonk
+- `respx` — мок HTTP к Teyca; Listmonk — мок SDK-клиента (не HTTP)
 - `unittest.mock.AsyncMock` — мок репозиториев и publisher
 - `testcontainers` — реальный Postgres и RabbitMQ в integration-тестах
 
@@ -168,8 +129,6 @@ await publisher.publish("quue-request-to-merge", payload)
 from app.mq.queues import QUEUE_MERGE
 await publisher.publish(QUEUE_MERGE, payload)
 ```
-
-Очередь `quue-request-to-merge` написана с опечаткой намеренно — это имя существующей очереди в продакшне. Не исправлять.
 
 ### Async везде
 Весь код — async/await. Нет синхронных SQL-запросов, нет `requests`, нет `time.sleep`.
@@ -283,7 +242,7 @@ app/
   api/webhook.py          # POST /webhook — точка входа
   consumers/              # обработчики очередей RabbitMQ
   repositories/           # SQL через SQLAlchemy (только здесь)
-  clients/                # HTTP-клиенты внешних API
+  clients/                # HTTP-клиенты (Teyca и др.); Listmonk — только через SDK
   mq/queues.py            # ← константы очередей, читать перед любой работой с MQ
   db/models.py            # ← ORM-модели, читать перед любой работой с БД
   schemas/webhook.py      # ← Pydantic-схемы входящих данных
@@ -292,4 +251,5 @@ tests/
   integration/            # реальная инфра, моки только HTTP
 docs/
   roadmap.md              # детальный план по срезам
+  teyca-api.md            # выжимка API Teyca (исходник: teyca-api.json)
 ```

@@ -1,0 +1,79 @@
+services:
+  migrate:
+    build: .
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: migrate
+    env_file:
+      - .env
+    command: alembic upgrade head
+    restart: "no"
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: app
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  consumers:
+    build: .
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: consumers
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.workers.run_queue_consumers
+
+  consent-sync:
+    build: .
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: consent-sync
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: /bin/sh -c 'while true; do python -m app.workers.run_consent_sync; sleep 60; done'
+
+  reconcile:
+    build: .
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: reconcile
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: /bin/sh -c 'while true; do python -m app.workers.run_listmonk_reconcile; sleep 300; done'
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

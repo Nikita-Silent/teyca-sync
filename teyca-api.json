@@ -1,0 +1,1301 @@
+{
+    "info": {
+      "_postman_id": "bfa5370b-87cd-4bb0-9fa1-61186e0b0f55",
+      "name": "API TEYCA",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+      "_exporter_id": "28823877"
+    },
+    "item": [
+      {
+        "name": "/v1/authorization (список доступных токенов)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/authorization",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              "authorization"
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/authorization (создание токена))",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"identifier\": \"ул. Миславского 9\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/authorization",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              "authorization"
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/authorization (удаление токена)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "DELETE",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n            \"identifier\": \"ул. Миславского 9\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/authorization",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              "authorization"
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes?{search}&{limit}&{offset} (список карт с возможностью поиска)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes?search=phone=79876543211,template=Макет1&limit=25&offset=0",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes"
+            ],
+            "query": [
+              {
+                "key": "search",
+                "value": "phone=79876543211,template=Макет1"
+              },
+              {
+                "key": "limit",
+                "value": "25"
+              },
+              {
+                "key": "offset",
+                "value": "0"
+              }
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes/userid/{user_id} (получение карты по user_id)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes/userid/:user_id",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes",
+              "userid",
+              ":user_id"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "user_id",
+                "value": "2996042"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes/barcode/{barcode} (получение карты по barcode)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes/barcode/:barcode",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes",
+              "barcode",
+              ":barcode"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "barcode",
+                "value": "7770000016"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes/telegram_chat_id/{chat_id} (получение карты по chat_id)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes/telegram_chat_id/:chat_id",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes",
+              "telegram_chat_id",
+              ":chat_id"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "chat_id",
+                "value": ""
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes/{user_id} (получение истории бонусов)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes/:user_id/bonuses",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes",
+              ":user_id",
+              "bonuses"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "user_id",
+                "value": "2996042"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes/{user_id} (начисление бонусов)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n    \"bonus\": [\n        { \n        \"value\": \"500.0\",\n        \"active_from\": \"2025-07-19T11:21:35.779+00:00\",\n        \"expires_at\": \"2025-08-03T11:21:35.779+00:00\"\n        },\n        { \n        \"value\": \"400.0\",\n        \"active_from\": \"2025-07-19T11:21:35.779+00:00\",\n        \"expires_at\": \"2025-08-03T11:21:35.779+00:00\"\n        },\n        { \n        \"value\": \"300.0\",\n        \"active_from\": \"2025-07-19T11:21:35.779+00:00\",\n        \"expires_at\": \"2025-08-03T11:21:35.779+00:00\"\n        }\n    ]\n} \n",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes/:user_id/bonuses",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes",
+              ":user_id",
+              "bonuses"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "user_id",
+                "value": "2996042"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes (создание карты)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"template\": \"Макет 1\",\n  \"first_name\": \"Иван\",\n  \"last_name\": \"Иванов\",\n  \"pat_name\": \"Иванович\",\n  \"phone\": \"79876543211\",\n  \"email\": \"support@teyca.ru\",\n  \"birthday\": \"01.03.1990\",\n  \"gender\": \"м\",\n  \"barcode\": \"0000001\",\n  \"discount\": \"10%\",\n  \"bonus\": 200,\n  \"loyalty_level\": \"GOLD\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes/{user_id} (обновление карты)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "PUT",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"bonus\": 300,\n  \"loyalty_level\": \"Золотой\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes/:user_id",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes",
+              ":user_id"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "user_id",
+                "value": "3113625"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/passes/{user_id} (удаление карты)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "DELETE",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/passes/:user_id",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "passes",
+              ":user_id"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "user_id",
+                "value": "3113625"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/send/sms (отправка ссылки на карту по смс)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"user_id\": \"17234\",\n  \"phone\": \"89872831234\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/send/sms",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "send",
+              "sms"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/send/email (отправка ссылки на карту по email)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"user_id\": \"17234\",\n  \"email\": \"support@teyca.ru\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/send/email",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "send",
+              "email"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/message/push (отправка push-рассылки)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"user_id\": \"17145,15897,15970\",\n  \"date_start\": \"2022-12-31T10:00:00.000Z\",\n  \"push_message\": \"Только сегодня скидка 10% на все товары!\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/message/push",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "message",
+              "push"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/message/sms (отправка смс-рассылки)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"user_ids\": \"17145,15897,15970\",\n  \"sms_message\": \"Только сегодня скидка 10% на все товары!\",\n  \"date_start\": \"2022-12-31T10:00:00.000Z\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/message/sms",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "message",
+              "sms"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/message/email (отправка email-рассылки)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "formdata",
+            "formdata": [
+              {
+                "key": "html",
+                "type": "file",
+                "value": null
+              },
+              {
+                "key": "user_ids",
+                "value": "17145,15897,15970",
+                "type": "text"
+              },
+              {
+                "key": "email_subject",
+                "value": "Тема письма",
+                "type": "text"
+              },
+              {
+                "key": "date_start",
+                "value": "2022-12-31T10:00:00.000Z",
+                "type": "text"
+              }
+            ]
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/message/email",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "message",
+              "email"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/message/telegram (отправка telegram-рассылки)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"user_ids\": \"2996042\",\n  \"telegram_message\": \"Только %first_name% сегодня скидка 10% на все товары!\",\n  \"telegram_media_url\": \"https://example.com/example.jpg\",\n  \"telegram_body\": {\n    \"text\": \"1234567\",\n    \"reply_markup\": {\n       \"keyboard\": [\n          [\"Написать отзыв\"],\n          [\"Мои купоны\", \"Мои заказы\"],\n          [\"Контакты\", \"FAQ\"],\n          [\"Программа лояльности\"]\n        ],\n        \"resize_keyboard\": true,\n        \"one_time_keyboard\": true\n    }\n  }\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/message/telegram",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "message",
+              "telegram"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/message_sending_info (получение сведений по рассылке)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"id\": 43769\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/message_sending_info",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "message_sending_info"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/webhook (список подключенных вебхуков)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/webhook",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "webhook"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/webhook/{hook_id} (получение информации по отдельному вебхуку)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/webhook/:hook_id",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "webhook",
+              ":hook_id"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "hook_id",
+                "value": "8457657324a938ce5359fd640e63545a"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/webhook (создание вебхука)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"type\": \"CREATE\",\n  \"url\": \"https://example.cccom/webhook/create\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/webhook",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "webhook"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/webhook/{hook_id} (обновление вебхука)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "PUT",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/webhook/:hook_id",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "webhook",
+              ":hook_id"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "hook_id",
+                "value": "8457657324a938ce5359fd640e63545a"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/webhook/{hook_id} (удаление вебхука)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "DELETE",
+          "header": [],
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/webhook/:hook_id",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "webhook",
+              ":hook_id"
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "hook_id",
+                "value": "8457657324a938ce5359fd640e63545a"
+              }
+            ]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "/v1/{token}/operations?{limit}&{offset} (список операций с возможностью фильтрации)",
+        "request": {
+          "auth": {
+            "type": "apikey",
+            "apikey": [
+              {
+                "key": "value",
+                "value": "{{Основной ключ авторизации}}",
+                "type": "string"
+              },
+              {
+                "key": "key",
+                "value": "Authorization",
+                "type": "string"
+              }
+            ]
+          },
+          "method": "POST",
+          "header": [],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n    \"filters\": {\n        \"operation_ids\": [],\n        \"data_since\": null,\n        \"data_last\": null,\n        \"integration\": \"rmk\",\n        \"operation_type\": \"purchase\",\n        \"user_ids\": [],\n        \"promotion_uuids\": [],\n        \"store_ids\": []\n    },\n    \"order\": \"desc\"\n}",
+            "options": {
+              "raw": {
+                "language": "json"
+              }
+            }
+          },
+          "url": {
+            "raw": "https://api.teyca.ru/v1/:token/operations?offset=0&limit=100",
+            "protocol": "https",
+            "host": [
+              "api",
+              "teyca",
+              "ru"
+            ],
+            "path": [
+              "v1",
+              ":token",
+              "operations"
+            ],
+            "query": [
+              {
+                "key": "offset",
+                "value": "0"
+              },
+              {
+                "key": "limit",
+                "value": "100"
+              }
+            ],
+            "variable": [
+              {
+                "key": "token",
+                "value": "{{token}}"
+              }
+            ]
+          }
+        },
+        "response": []
+      }
+    ],
+    "variable": [
+      {
+        "key": "token",
+        "value": "123abc456def789gih101112jkl13141"
+      },
+      {
+        "key": "Основной ключ авторизации",
+        "value": "1a2b3c4e5d6e7f8g9h10i11g12k13l14"
+      }
+    ]
+  }
