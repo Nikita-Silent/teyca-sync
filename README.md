@@ -27,11 +27,32 @@ make test
 ## Env
 
 - `CONSENT_BONUS_AMOUNT` — количество бонусов за подтверждённый consent в sync-worker.
+- `WEBHOOK_AUTH_ENABLED` — включает/выключает проверку `Authorization` для webhook (`true`/`false`).
 - `WEBHOOK` — HTTP path входящего webhook (по умолчанию `/webhook`).
 - `DATABASE_URL` — внешняя Postgres БД (в compose локальная postgres больше не поднимается).
 - `LOKI_URL` — URL Loki (обязателен, логирование только в Loki).
 - `LOKI_USERNAME` / `LOKI_PASSWORD` — Basic Auth для Loki.
 - `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `reconcile`, `consent-sync`).
+
+## Teyca API limits
+
+- Исходящие вызовы в Teyca ограничиваются в клиенте скользящими окнами:
+  - `5` запросов в секунду
+  - `150` запросов в минуту
+  - `1000` запросов в час
+  - `5000` запросов в день
+- При достижении лимита запрос не падает, а ждёт до освобождения окна и отправляется позже.
+
+## Ошибки Teyca API
+
+- Если Teyca вернул `4xx/5xx`, `TeycaClient` бросает `TeycaAPIError`.
+- В queue-consumers (`CREATE/UPDATE/DELETE`):
+  - DB транзакция откатывается,
+  - сообщение `reject(requeue=true)` и будет обработано повторно.
+- В `consent-sync`:
+  - ошибка логируется,
+  - пользователь остаётся `consent_pending=true`,
+  - обработка повторяется в следующих запусках.
 
 ## Tracing
 

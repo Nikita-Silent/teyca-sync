@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.auth import verify_webhook_token
-from app.clients.teyca import BonusOperation, TeycaAPIError, TeycaClient
+from app.clients.teyca import BonusOperation, SlidingWindowRateLimiter, TeycaAPIError, TeycaClient
 from app.consumers.common import (
     _to_optional_float,
     _to_optional_int,
@@ -26,22 +26,40 @@ from app.workers import run_consent_sync, run_listmonk_reconcile
 
 @pytest.mark.asyncio
 async def test_verify_webhook_token_all_branches() -> None:
-    with patch("app.api.auth.get_settings", return_value=SimpleNamespace(webhook_auth_token="")):
+    with patch(
+        "app.api.auth.get_settings",
+        return_value=SimpleNamespace(webhook_auth_enabled=False, webhook_auth_token=""),
+    ):
+        assert await verify_webhook_token(None) is None
+
+    with patch(
+        "app.api.auth.get_settings",
+        return_value=SimpleNamespace(webhook_auth_enabled=True, webhook_auth_token=""),
+    ):
         with pytest.raises(HTTPException) as exc:
             await verify_webhook_token("x")
         assert exc.value.status_code == 503
 
-    with patch("app.api.auth.get_settings", return_value=SimpleNamespace(webhook_auth_token="secret")):
+    with patch(
+        "app.api.auth.get_settings",
+        return_value=SimpleNamespace(webhook_auth_enabled=True, webhook_auth_token="secret"),
+    ):
         with pytest.raises(HTTPException) as exc:
             await verify_webhook_token(None)
         assert exc.value.status_code == 401
 
-    with patch("app.api.auth.get_settings", return_value=SimpleNamespace(webhook_auth_token="secret")):
+    with patch(
+        "app.api.auth.get_settings",
+        return_value=SimpleNamespace(webhook_auth_enabled=True, webhook_auth_token="secret"),
+    ):
         with pytest.raises(HTTPException) as exc:
             await verify_webhook_token("wrong")
         assert exc.value.status_code == 403
 
-    with patch("app.api.auth.get_settings", return_value=SimpleNamespace(webhook_auth_token="secret")):
+    with patch(
+        "app.api.auth.get_settings",
+        return_value=SimpleNamespace(webhook_auth_enabled=True, webhook_auth_token="secret"),
+    ):
         assert await verify_webhook_token("Bearer secret") is None
 
 
@@ -144,7 +162,8 @@ async def test_teyca_client_all_branches_with_injected_http_client() -> None:
     http_client = AsyncMock()
     http_client.post.return_value = SimpleNamespace(status_code=200, text="ok")
     http_client.put.return_value = SimpleNamespace(status_code=200, text="ok")
-    client = TeycaClient(settings=settings, http_client=http_client)
+    rate_limiter = AsyncMock()
+    client = TeycaClient(settings=settings, http_client=http_client, rate_limiter=rate_limiter)
 
     op = BonusOperation.one_shot(value="10")
     assert op.to_dict()["value"] == "10"
@@ -159,6 +178,8 @@ async def test_teyca_client_all_branches_with_injected_http_client() -> None:
     http_client.put.return_value = SimpleNamespace(status_code=500, text="bad")
     with pytest.raises(TeycaAPIError):
         await client.update_pass_fields(user_id=10, fields={"k": "v"})
+
+    assert rate_limiter.acquire.await_count == 4
 
 
 def test_teyca_client_settings_validation() -> None:
@@ -194,6 +215,30 @@ async def test_teyca_client_uses_internal_httpx_client_when_not_injected() -> No
 
     assert httpx_client.post.await_count == 1
     assert httpx_client.put.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_teyca_sliding_window_rate_limiter_waits_when_limit_is_reached() -> None:
+    now = 0.0
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        sleep_calls.append(seconds)
+        now += seconds
+
+    limiter = SlidingWindowRateLimiter(
+        limits=((1.0, 2),),
+        clock=lambda: now,
+    )
+
+    with patch("app.clients.teyca.asyncio.sleep", side_effect=fake_sleep):
+        await limiter.acquire()
+        await limiter.acquire()
+        await limiter.acquire()
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(1.0)
 
 
 def test_run_entrypoints_call_asyncio_run() -> None:
