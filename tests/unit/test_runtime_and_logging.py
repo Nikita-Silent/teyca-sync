@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app import main as app_main
@@ -302,6 +303,27 @@ async def test_run_single_iteration_workers_log() -> None:
         builder.return_value = worker
         await run_listmonk_reconcile._run()
     logger.info.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_single_iteration_workers_handle_listmonk_transient_errors() -> None:
+    with patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder, patch(
+        "app.workers.run_consent_sync.logger"
+    ) as logger:
+        worker = AsyncMock()
+        worker.run_once.side_effect = httpx.ReadTimeout("timed out")
+        builder.return_value = worker
+        await run_consent_sync._run()
+    logger.error.assert_called_once()
+
+    with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
+        "app.workers.run_listmonk_reconcile.logger"
+    ) as logger:
+        worker = AsyncMock()
+        worker.run_once.side_effect = httpx.ReadTimeout("timed out")
+        builder.return_value = worker
+        await run_listmonk_reconcile._run()
+    logger.error.assert_called_once()
 
 
 @pytest.mark.asyncio

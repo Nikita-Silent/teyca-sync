@@ -2,9 +2,11 @@
 
 import asyncio
 
+import httpx
 import structlog
 
 from app.config import get_settings
+from app.clients.listmonk import ListmonkClientError
 from app.logging_config import configure_logging, shutdown_logging
 from app.workers.listmonk_reconcile_worker import build_listmonk_reconcile_worker
 
@@ -21,8 +23,15 @@ async def _run() -> None:
     )
     worker = build_listmonk_reconcile_worker()
     try:
-        restored = await worker.run_once()
-        logger.info("listmonk_reconcile_run_completed", restored=restored)
+        try:
+            restored = await worker.run_once()
+            logger.info("listmonk_reconcile_run_completed", restored=restored)
+        except (ListmonkClientError, httpx.HTTPError) as exc:
+            logger.error(
+                "listmonk_reconcile_run_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
     finally:
         shutdown_logging()
 
