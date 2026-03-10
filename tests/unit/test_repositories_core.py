@@ -31,9 +31,13 @@ async def test_users_repository_paths() -> None:
     assert ids == [1, 2]
     assert await repo.get_user_ids_by_email(email="  ") == []
 
-    await repo.upsert(user_id=1, profile={"email": "x@y.z", "summ": 10})
+    session.execute.reset_mock()
+    await repo.upsert(user_id=1, profile={"email": "  X@Y.Z  ", "summ": 10})
+    users_upsert_stmt = session.execute.await_args_list[0].args[0]
+    assert users_upsert_stmt.compile().params["email"] == "x@y.z"
+
     await repo.delete_by_user_id(user_id=1)
-    assert session.execute.await_count >= 4
+    assert session.execute.await_count >= 2
 
 
 @pytest.mark.asyncio
@@ -59,14 +63,17 @@ async def test_listmonk_users_repository_paths() -> None:
     )
     assert (await repo.get_by_subscriber_id(subscriber_id=10)).user_id == 2
 
+    session.execute.reset_mock()
     await repo.upsert(
         user_id=1,
         subscriber_id=10,
-        email="u@example.com",
+        email="  U@Example.COM  ",
         status="enabled",
         list_ids=[1, 2],
         attributes={"user_id": 1},
     )
+    listmonk_upsert_stmt = session.execute.await_args_list[0].args[0]
+    assert listmonk_upsert_stmt.compile().params["email"] == "u@example.com"
 
     session.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["a", "b"]))
     assert await repo.get_pending_batch(limit=10) == ["a", "b"]

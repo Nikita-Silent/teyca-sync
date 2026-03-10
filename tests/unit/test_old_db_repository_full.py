@@ -59,11 +59,13 @@ async def test_get_user_data_early_returns() -> None:
 @pytest.mark.asyncio
 async def test_get_user_data_returns_row_and_handles_errors() -> None:
     repo = OldDBRepository("postgresql://x")
-    repo._columns_cache = {"phone", "balance", "summ", "check_count"}
+    repo._columns_cache = {"phone", "balance", "summ", "check_sum", "check_count"}
 
     row = {
         "balance": 2330,
         "summ": "199",
+        "check_sum": "100.9",
+        "visits": "1",
         "check_count": "4",
     }
     result_obj = SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: row))
@@ -81,7 +83,8 @@ async def test_get_user_data_returns_row_and_handles_errors() -> None:
 
     assert data is not None
     assert data.bonus == 23.0
-    assert data.summ == 1.0
+    assert data.summ == 199.0
+    assert data.check_summ == 100.9
     assert data.visits == 4
 
     conn.execute.side_effect = SQLAlchemyError("boom")

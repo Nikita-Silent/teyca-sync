@@ -69,7 +69,7 @@ class OldDBRepository:
             "summ_all": ("summ_all",),
             "summ_last": ("summ_last", "average_check"),
             "check_summ": ("check_summ", "check_sum"),
-            "visits": ("visits", "check_count"),
+            "visits": ("check_count", "visits"),
             "visits_all": ("visits_all",),
         }
         selected_columns = sorted(
@@ -107,11 +107,11 @@ class OldDBRepository:
             return None
         return OldUserData(
             bonus=_to_optional_scaled_float(_pick_first(row, "bonus", "balance")),
-            summ=_to_optional_scaled_float(_pick_first(row, "summ")),
-            summ_all=_to_optional_scaled_float(_pick_first(row, "summ_all")),
-            summ_last=_to_optional_scaled_float(_pick_first(row, "summ_last", "average_check")),
-            check_summ=_to_optional_scaled_float(_pick_first(row, "check_summ", "check_sum")),
-            visits=_to_optional_int(_pick_first(row, "visits", "check_count")),
+            summ=_to_optional_float(_pick_first(row, "summ")),
+            summ_all=_to_optional_float(_pick_first(row, "summ_all")),
+            summ_last=_to_optional_float(_pick_first(row, "summ_last", "average_check")),
+            check_summ=_to_optional_float(_pick_first(row, "check_summ", "check_sum")),
+            visits=_to_optional_int(_pick_first(row, "check_count", "visits")),
             visits_all=_to_optional_int(_pick_first(row, "visits_all")),
         )
 

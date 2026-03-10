@@ -83,3 +83,16 @@ make test
 - Если `LISTMONK_LIST_IDS` пустой/невалидный, upsert не выполняется и бросается `ListmonkClientError`.
 - Если при update прилетает конфликт уникальности email (`subscribers_email_key` / `409 conflict`):
   - выполняется fallback: поиск `subscriber_by_email(email)` и повторный update уже найденного subscriber.
+
+## Grafana Dashboard
+
+- Готовый dashboard JSON для Loki: [docs/grafana/teyca-sync-overview-dashboard.json](docs/grafana/teyca-sync-overview-dashboard.json)
+- Импорт:
+  - Grafana -> Dashboards -> New -> Import
+  - вставь JSON из файла и выбери Loki datasource.
+- Панели включают:
+  - webhook по типам `CREATE/UPDATE/DELETE`
+  - ошибки consumers
+  - success/fail rate для `teyca_update_pass_*`
+  - метрики `consent_sync_metrics`
+  - top пользователей по количеству `PUT` в Teyca.
