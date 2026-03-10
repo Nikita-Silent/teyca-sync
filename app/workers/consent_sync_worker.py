@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import structlog
+from structlog import contextvars as log_contextvars
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.listmonk import ListmonkSDKClient, SubscriberDelta, SubscriberState
@@ -61,180 +62,190 @@ class ConsentSyncWorker:
         user_id = int(pending.user_id)
         subscriber_id = int(pending.subscriber_id)
         idempotency_key = f"{BONUS_REASON_EMAIL_CONSENT}:{user_id}"
+        trace_id = f"consent-sync:{user_id}:{subscriber_id}"
+        source_event_id = f"consent-sync:{subscriber_id}"
 
-        subscriber = subscriber_override or await self.listmonk_client.get_subscriber_state(
-            subscriber_id=subscriber_id
+        log_contextvars.bind_contextvars(
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            user_id=user_id,
         )
-        if subscriber is None:
-            _inc(metrics, "subscriber_not_found")
-            await listmonk_repo.mark_checked(
-                user_id=user_id,
-                pending=True,
-                confirmed=False,
+        try:
+            subscriber = subscriber_override or await self.listmonk_client.get_subscriber_state(
+                subscriber_id=subscriber_id
             )
-            logger.info(
-                "consent_sync_subscriber_not_found",
-                user_id=user_id,
-                subscriber_id=subscriber_id,
-            )
-            return
-
-        normalized_status = subscriber.status.strip().lower()
-        blocked_in_targets = subscriber.has_blocked_for_any(target_list_ids=target_list_ids)
-        if normalized_status in {"blocked", "blocklisted", "blacklisted"} or blocked_in_targets:
-            try:
-                await self.teyca_client.update_pass_fields(
-                    user_id=user_id,
-                    fields={"key1": TEYCA_KEY1_BLOCKED},
-                )
-                _inc(metrics, "blocked_done")
-                await listmonk_repo.mark_checked(
-                    user_id=user_id,
-                    pending=False,
-                    confirmed=False,
-                    status=TEYCA_KEY1_BLOCKED,
-                )
-                logger.info(
-                    "consent_sync_blocked",
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    status=subscriber.status,
-                )
-            except TeycaAPIError as exc:
+            if subscriber is None:
+                _inc(metrics, "subscriber_not_found")
                 await listmonk_repo.mark_checked(
                     user_id=user_id,
                     pending=True,
                     confirmed=False,
-                    status=TEYCA_KEY1_BLOCKED,
+                )
+                logger.info(
+                    "consent_sync_subscriber_not_found",
+                    user_id=user_id,
+                    subscriber_id=subscriber_id,
+                )
+                return
+
+            normalized_status = subscriber.status.strip().lower()
+            blocked_in_targets = subscriber.has_blocked_for_any(target_list_ids=target_list_ids)
+            if normalized_status in {"blocked", "blocklisted", "blacklisted"} or blocked_in_targets:
+                try:
+                    await self.teyca_client.update_pass_fields(
+                        user_id=user_id,
+                        fields={"key1": TEYCA_KEY1_BLOCKED},
+                    )
+                    _inc(metrics, "blocked_done")
+                    await listmonk_repo.mark_checked(
+                        user_id=user_id,
+                        pending=False,
+                        confirmed=False,
+                        status=TEYCA_KEY1_BLOCKED,
+                    )
+                    logger.info(
+                        "consent_sync_blocked",
+                        user_id=user_id,
+                        subscriber_id=subscriber_id,
+                        status=subscriber.status,
+                    )
+                except TeycaAPIError as exc:
+                    await listmonk_repo.mark_checked(
+                        user_id=user_id,
+                        pending=True,
+                        confirmed=False,
+                        status=TEYCA_KEY1_BLOCKED,
+                    )
+                    _inc(metrics, "teyca_errors")
+                    logger.error(
+                        "consent_sync_blocked_key1_update_failed",
+                        user_id=user_id,
+                        subscriber_id=subscriber_id,
+                        error=str(exc),
+                    )
+                return
+
+            confirmed = subscriber.is_confirmed_for_all(target_list_ids=target_list_ids)
+            if not confirmed:
+                _inc(metrics, "not_confirmed")
+                await listmonk_repo.mark_checked(
+                    user_id=user_id,
+                    pending=True,
+                    confirmed=False,
+                    status="unconfirmed",
+                )
+                logger.info(
+                    "consent_sync_not_confirmed",
+                    user_id=user_id,
+                    subscriber_id=subscriber_id,
+                    status="unconfirmed",
+                )
+                return
+
+            reserved = await accrual_repo.reserve(
+                user_id=user_id,
+                reason=BONUS_REASON_EMAIL_CONSENT,
+                idempotency_key=idempotency_key,
+                payload=_initial_consent_payload(subscriber_id=subscriber_id, list_ids=subscriber.list_ids),
+            )
+            if not reserved:
+                _inc(metrics, "accrual_resumed")
+            operation = await accrual_repo.get_by_key(idempotency_key=idempotency_key)
+            if operation is None:
+                logger.error(
+                    "consent_sync_operation_missing",
+                    user_id=user_id,
+                    subscriber_id=subscriber_id,
+                    idempotency_key=idempotency_key,
+                )
+                _inc(metrics, "operation_missing")
+                await listmonk_repo.mark_checked(
+                    user_id=user_id,
+                    pending=True,
+                    confirmed=False,
+                    status=subscriber.status,
+                )
+                return
+
+            bonus_operation = BonusOperation.one_shot(
+                value=self.settings.consent_bonus_amount,
+            )
+            payload = _normalize_progress_payload(
+                raw_payload=operation.payload,
+                subscriber_id=subscriber_id,
+                list_ids=subscriber.list_ids,
+            )
+
+            try:
+                if not payload["bonus_done"]:
+                    await self.teyca_client.accrue_bonuses(
+                        user_id=user_id,
+                        bonuses=[bonus_operation],
+                    )
+                    payload["bonus_done"] = True
+                    await accrual_repo.save_progress(
+                        idempotency_key=idempotency_key,
+                        payload=payload,
+                        status="pending",
+                        error_text=None,
+                    )
+
+                if not payload["key1_done"]:
+                    await self.teyca_client.update_pass_fields(
+                        user_id=user_id,
+                        fields={"key1": TEYCA_KEY1_CONFIRMED},
+                    )
+                    payload["key1_done"] = True
+                    await accrual_repo.save_progress(
+                        idempotency_key=idempotency_key,
+                        payload=payload,
+                        status="pending",
+                        error_text=None,
+                    )
+
+                await accrual_repo.mark_done_with_payload(
+                    idempotency_key=idempotency_key,
+                    payload=payload,
+                )
+                await listmonk_repo.mark_checked(
+                    user_id=user_id,
+                    pending=False,
+                    confirmed=True,
+                    status=TEYCA_KEY1_CONFIRMED,
+                )
+                _inc(metrics, "confirmed_done")
+                logger.info(
+                    "consent_sync_confirmed_done",
+                    user_id=user_id,
+                    subscriber_id=subscriber_id,
+                    reserved=reserved,
+                    bonus_done=payload["bonus_done"],
+                    key1_done=payload["key1_done"],
+                )
+            except TeycaAPIError as exc:
+                await accrual_repo.save_progress(
+                    idempotency_key=idempotency_key,
+                    payload=payload,
+                    status="failed",
+                    error_text=str(exc),
+                )
+                await listmonk_repo.mark_checked(
+                    user_id=user_id,
+                    pending=True,
+                    confirmed=False,
+                    status=subscriber.status,
                 )
                 _inc(metrics, "teyca_errors")
                 logger.error(
-                    "consent_sync_blocked_key1_update_failed",
+                    "consent_sync_confirmed_step_failed",
                     user_id=user_id,
                     subscriber_id=subscriber_id,
                     error=str(exc),
+                    bonus_done=payload["bonus_done"],
+                    key1_done=payload["key1_done"],
                 )
-            return
-
-        confirmed = subscriber.is_confirmed_for_all(target_list_ids=target_list_ids)
-        if not confirmed:
-            _inc(metrics, "not_confirmed")
-            await listmonk_repo.mark_checked(
-                user_id=user_id,
-                pending=True,
-                confirmed=False,
-                status="unconfirmed",
-            )
-            logger.info(
-                "consent_sync_not_confirmed",
-                user_id=user_id,
-                subscriber_id=subscriber_id,
-                status="unconfirmed",
-            )
-            return
-
-        reserved = await accrual_repo.reserve(
-            user_id=user_id,
-            reason=BONUS_REASON_EMAIL_CONSENT,
-            idempotency_key=idempotency_key,
-            payload=_initial_consent_payload(subscriber_id=subscriber_id, list_ids=subscriber.list_ids),
-        )
-        if not reserved:
-            _inc(metrics, "accrual_resumed")
-        operation = await accrual_repo.get_by_key(idempotency_key=idempotency_key)
-        if operation is None:
-            logger.error(
-                "consent_sync_operation_missing",
-                user_id=user_id,
-                subscriber_id=subscriber_id,
-                idempotency_key=idempotency_key,
-            )
-            _inc(metrics, "operation_missing")
-            await listmonk_repo.mark_checked(
-                user_id=user_id,
-                pending=True,
-                confirmed=False,
-                status=subscriber.status,
-            )
-            return
-
-        bonus_operation = BonusOperation.one_shot(
-            value=self.settings.consent_bonus_amount,
-        )
-        payload = _normalize_progress_payload(
-            raw_payload=operation.payload,
-            subscriber_id=subscriber_id,
-            list_ids=subscriber.list_ids,
-        )
-
-        try:
-            if not payload["bonus_done"]:
-                await self.teyca_client.accrue_bonuses(
-                    user_id=user_id,
-                    bonuses=[bonus_operation],
-                )
-                payload["bonus_done"] = True
-                await accrual_repo.save_progress(
-                    idempotency_key=idempotency_key,
-                    payload=payload,
-                    status="pending",
-                    error_text=None,
-                )
-
-            if not payload["key1_done"]:
-                await self.teyca_client.update_pass_fields(
-                    user_id=user_id,
-                    fields={"key1": TEYCA_KEY1_CONFIRMED},
-                )
-                payload["key1_done"] = True
-                await accrual_repo.save_progress(
-                    idempotency_key=idempotency_key,
-                    payload=payload,
-                    status="pending",
-                    error_text=None,
-                )
-
-            await accrual_repo.mark_done_with_payload(
-                idempotency_key=idempotency_key,
-                payload=payload,
-            )
-            await listmonk_repo.mark_checked(
-                user_id=user_id,
-                pending=False,
-                confirmed=True,
-                status=TEYCA_KEY1_CONFIRMED,
-            )
-            _inc(metrics, "confirmed_done")
-            logger.info(
-                "consent_sync_confirmed_done",
-                user_id=user_id,
-                subscriber_id=subscriber_id,
-                reserved=reserved,
-                bonus_done=payload["bonus_done"],
-                key1_done=payload["key1_done"],
-            )
-        except TeycaAPIError as exc:
-            await accrual_repo.save_progress(
-                idempotency_key=idempotency_key,
-                payload=payload,
-                status="failed",
-                error_text=str(exc),
-            )
-            _inc(metrics, "teyca_errors")
-            await listmonk_repo.mark_checked(
-                user_id=user_id,
-                pending=True,
-                confirmed=False,
-                status=subscriber.status,
-            )
-            logger.error(
-                "consent_sync_confirmed_step_failed",
-                user_id=user_id,
-                subscriber_id=subscriber_id,
-                error=str(exc),
-                bonus_done=payload["bonus_done"],
-                key1_done=payload["key1_done"],
-            )
+        finally:
+            log_contextvars.unbind_contextvars("trace_id", "source_event_id", "user_id")
 
     async def run_once(self) -> int:
         """Process one incremental batch. Returns processed count."""
