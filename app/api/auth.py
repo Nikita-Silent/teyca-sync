@@ -8,8 +8,10 @@ from app.config import get_settings
 async def verify_webhook_token(
     authorization: str | None = Header(default=None),
 ) -> None:
-    """Accept request only if Authorization matches WEBHOOK_AUTH_TOKEN. 401 if missing, 403 if wrong."""
+    """Validate webhook auth token when WEBHOOK_AUTH_ENABLED is true."""
     settings = get_settings()
+    if not settings.webhook_auth_enabled:
+        return None
     if not settings.webhook_auth_token:
         raise HTTPException(status_code=503, detail="Webhook auth not configured")
     if not authorization:

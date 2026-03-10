@@ -14,7 +14,9 @@ class Settings(BaseSettings):
     # RabbitMQ
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
 
-    # Webhook auth: Teyca sends this value in Authorization header (no JWT)
+    # Webhook auth
+    webhook_auth_enabled: bool = True
+    # Teyca sends this value in Authorization header (no JWT)
     webhook_auth_token: str = ""
     webhook: str = "/webhook"
 

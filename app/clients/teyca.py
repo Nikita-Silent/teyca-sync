@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections import deque
 from dataclasses import dataclass
+from time import monotonic
+from typing import Callable
 
 import httpx
 import structlog
@@ -31,12 +35,65 @@ class BonusOperation:
         return BonusOperation(value=value)
 
 
+class SlidingWindowRateLimiter:
+    """Async sliding-window rate limiter for multiple windows."""
+
+    def __init__(
+        self,
+        *,
+        limits: tuple[tuple[float, int], ...],
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self._limits = limits
+        self._clock = clock
+        self._lock = asyncio.Lock()
+        self._requests_by_window: dict[float, deque[float]] = {
+            window_seconds: deque() for window_seconds, _ in limits
+        }
+
+    async def acquire(self) -> None:
+        """Wait until request can be executed for all configured windows."""
+        while True:
+            wait_seconds: float = 0.0
+            async with self._lock:
+                now = self._clock()
+                for window_seconds, max_requests in self._limits:
+                    requests = self._requests_by_window[window_seconds]
+                    cutoff = now - window_seconds
+                    while requests and requests[0] <= cutoff:
+                        requests.popleft()
+
+                    if len(requests) >= max_requests:
+                        wait_seconds = max(wait_seconds, (requests[0] + window_seconds) - now)
+
+                if wait_seconds <= 0:
+                    for requests in self._requests_by_window.values():
+                        requests.append(now)
+                    return
+
+            logger.info("teyca_rate_limited", wait_seconds=round(wait_seconds, 3))
+            await asyncio.sleep(wait_seconds)
+
+
 class TeycaClient:
     """HTTP client for Teyca bonuses endpoints."""
 
-    def __init__(self, settings: Settings, http_client: httpx.AsyncClient | None = None) -> None:
+    _DEFAULT_LIMITS: tuple[tuple[float, int], ...] = (
+        (1.0, 5),
+        (60.0, 150),
+        (3600.0, 1000),
+        (86400.0, 5000),
+    )
+
+    def __init__(
+        self,
+        settings: Settings,
+        http_client: httpx.AsyncClient | None = None,
+        rate_limiter: SlidingWindowRateLimiter | None = None,
+    ) -> None:
         self._settings = settings
         self._client = http_client
+        self._rate_limiter = rate_limiter or SlidingWindowRateLimiter(limits=self._DEFAULT_LIMITS)
 
     async def accrue_bonuses(self, *, user_id: int, bonuses: list[BonusOperation]) -> None:
         """Call POST /v1/{token}/passes/{user_id}/bonuses."""
@@ -49,6 +106,7 @@ class TeycaClient:
             url=url,
             operation_count=len(bonuses),
         )
+        await self._rate_limiter.acquire()
 
         if self._client is None:
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -84,6 +142,7 @@ class TeycaClient:
             url=url,
             field_names=sorted(str(key) for key in fields.keys()),
         )
+        await self._rate_limiter.acquire()
 
         if self._client is None:
             async with httpx.AsyncClient(timeout=15.0) as client:
