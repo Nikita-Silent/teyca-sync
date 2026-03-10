@@ -16,6 +16,7 @@ def configure_logging(
     service_name: str = "teyca-sync",
     loki_username: str | None = None,
     loki_password: str | None = None,
+    component: str = "app",
 ) -> None:
     """Configure structlog + stdlib logging with Loki as the only sink."""
     global _loki_queue_handler
@@ -47,7 +48,7 @@ def configure_logging(
     loki_handler = logging_loki.LokiQueueHandler(
         Queue(-1),
         url=_normalize_loki_url(loki_url),
-        tags={"service": service_name},
+        tags={"service": service_name, "component": component},
         auth=auth,
         version="2",
     )

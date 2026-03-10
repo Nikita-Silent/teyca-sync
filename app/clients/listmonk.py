@@ -8,12 +8,23 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import structlog
 
 from app.config import Settings
+
+logger = structlog.get_logger()
 
 
 class ListmonkClientError(Exception):
     """Raised when listmonk SDK is unavailable or returns unexpected payload."""
+
+
+def _safe_info(event: str, **kwargs: object) -> None:
+    """Best-effort logging that never affects business flow."""
+    try:
+        logger.info(event, **kwargs)
+    except Exception:
+        return
 
 
 @dataclass(slots=True)
@@ -118,8 +129,17 @@ class ListmonkSDKClient:
             raise ListmonkClientError("listmonk package is not installed") from exc
 
         await self._ensure_login()
+        _safe_info(
+            "listmonk_get_subscriber_state_request",
+            subscriber_id=subscriber_id,
+        )
         payload = await asyncio.to_thread(listmonk.subscriber_by_id, subscriber_id)
         if payload is None:
+            _safe_info(
+                "listmonk_get_subscriber_state_done",
+                subscriber_id=subscriber_id,
+                found=False,
+            )
             return None
 
         status_raw = str(getattr(payload, "status", "") or "")
@@ -141,13 +161,27 @@ class ListmonkSDKClient:
                     list_ids.append(value)
 
         if not status_raw:
+            _safe_info(
+                "listmonk_get_subscriber_state_done",
+                subscriber_id=subscriber_id,
+                found=False,
+                reason="empty_status",
+            )
             return None
-        return SubscriberState(
+        state = SubscriberState(
             subscriber_id=subscriber_id,
             status=status_raw,
             list_ids=list_ids,
             list_statuses=_extract_list_statuses(payload),
         )
+        _safe_info(
+            "listmonk_get_subscriber_state_done",
+            subscriber_id=subscriber_id,
+            found=True,
+            status=state.status,
+            list_ids=state.list_ids,
+        )
+        return state
 
     async def upsert_subscriber(
         self,
@@ -161,6 +195,12 @@ class ListmonkSDKClient:
         await self._ensure_login()
         if subscriber_id is None and not email:
             raise ListmonkClientError("Subscriber email is required to create subscriber")
+        _safe_info(
+            "listmonk_upsert_subscriber_request",
+            subscriber_id=subscriber_id,
+            email=email,
+            list_ids=list_ids,
+        )
 
         request_kwargs: dict[str, Any] = {
             "email": email,
@@ -204,9 +244,24 @@ class ListmonkSDKClient:
             )
             state = await self.get_subscriber_state(subscriber_id=subscriber_id)
             if state is not None:
+                _safe_info(
+                    "listmonk_upsert_subscriber_done",
+                    mode="update",
+                    subscriber_id=state.subscriber_id,
+                    status=state.status,
+                    list_ids=state.list_ids,
+                )
                 return state
             status = _extract_status(response) or str(current_status)
-            return SubscriberState(subscriber_id=subscriber_id, status=status, list_ids=list_ids)
+            state = SubscriberState(subscriber_id=subscriber_id, status=status, list_ids=list_ids)
+            _safe_info(
+                "listmonk_upsert_subscriber_done",
+                mode="update",
+                subscriber_id=state.subscriber_id,
+                status=state.status,
+                list_ids=state.list_ids,
+            )
+            return state
 
         try:
             import listmonk  # type: ignore
@@ -249,9 +304,24 @@ class ListmonkSDKClient:
             raise ListmonkClientError("Listmonk SDK did not return subscriber id for create")
         state = await self.get_subscriber_state(subscriber_id=created_id)
         if state is not None:
+            _safe_info(
+                "listmonk_upsert_subscriber_done",
+                mode="create",
+                subscriber_id=state.subscriber_id,
+                status=state.status,
+                list_ids=state.list_ids,
+            )
             return state
         status = _extract_status(response) or "enabled"
-        return SubscriberState(subscriber_id=created_id, status=status, list_ids=list_ids)
+        state = SubscriberState(subscriber_id=created_id, status=status, list_ids=list_ids)
+        _safe_info(
+            "listmonk_upsert_subscriber_done",
+            mode="create",
+            subscriber_id=state.subscriber_id,
+            status=state.status,
+            list_ids=state.list_ids,
+        )
+        return state
 
     async def restore_subscriber(
         self,
@@ -262,6 +332,12 @@ class ListmonkSDKClient:
         desired_status: str | None,
     ) -> SubscriberState:
         """Create subscriber if missing and try to apply desired status."""
+        _safe_info(
+            "listmonk_restore_subscriber_request",
+            email=email,
+            list_ids=list_ids,
+            desired_status=desired_status,
+        )
         if not email:
             raise ListmonkClientError("Cannot restore subscriber without email")
 
@@ -273,6 +349,13 @@ class ListmonkSDKClient:
         )
         target_status = _normalize_status_for_restore(desired_status)
         if target_status is None:
+            _safe_info(
+                "listmonk_restore_subscriber_done",
+                subscriber_id=state.subscriber_id,
+                status=state.status,
+                list_ids=state.list_ids,
+                status_changed=False,
+            )
             return state
 
         try:
@@ -291,21 +374,44 @@ class ListmonkSDKClient:
         )
         refreshed = await self.get_subscriber_state(subscriber_id=state.subscriber_id)
         if refreshed is not None:
+            _safe_info(
+                "listmonk_restore_subscriber_done",
+                subscriber_id=refreshed.subscriber_id,
+                status=refreshed.status,
+                list_ids=refreshed.list_ids,
+                status_changed=True,
+            )
             return refreshed
-        return SubscriberState(
+        restored = SubscriberState(
             subscriber_id=state.subscriber_id,
             status=target_status,
             list_ids=list_ids,
         )
+        _safe_info(
+            "listmonk_restore_subscriber_done",
+            subscriber_id=restored.subscriber_id,
+            status=restored.status,
+            list_ids=restored.list_ids,
+            status_changed=True,
+        )
+        return restored
 
     async def delete_subscriber(self, *, subscriber_id: int) -> None:
         """Delete subscriber via SDK by id."""
+        _safe_info(
+            "listmonk_delete_subscriber_request",
+            subscriber_id=subscriber_id,
+        )
         await self._ensure_login()
         try:
             import listmonk  # type: ignore
         except ModuleNotFoundError as exc:
             raise ListmonkClientError("listmonk package is not installed") from exc
         await asyncio.to_thread(listmonk.delete_subscriber, None, subscriber_id)
+        _safe_info(
+            "listmonk_delete_subscriber_done",
+            subscriber_id=subscriber_id,
+        )
 
     async def get_updated_subscribers(
         self,
@@ -316,6 +422,13 @@ class ListmonkSDKClient:
         limit: int,
     ) -> list[SubscriberDelta]:
         """Fetch incremental subscriber changes from Listmonk for one list."""
+        _safe_info(
+            "listmonk_get_updated_subscribers_request",
+            list_id=list_id,
+            watermark_updated_at=watermark_updated_at.isoformat() if watermark_updated_at else None,
+            watermark_subscriber_id=watermark_subscriber_id,
+            limit=limit,
+        )
         try:
             import listmonk  # type: ignore
         except ModuleNotFoundError as exc:
@@ -350,7 +463,15 @@ class ListmonkSDKClient:
             )
 
         deltas.sort(key=lambda item: (item.updated_at, item.subscriber_id))
-        return deltas[: max(1, limit)]
+        result = deltas[: max(1, limit)]
+        _safe_info(
+            "listmonk_get_updated_subscribers_done",
+            list_id=list_id,
+            count=len(result),
+            first_subscriber_id=result[0].subscriber_id if result else None,
+            last_subscriber_id=result[-1].subscriber_id if result else None,
+        )
+        return result
 
 
 def _extract_subscriber_id(payload: object) -> int | None:

@@ -19,6 +19,7 @@ async def lifespan(app: FastAPI):
         loki_url=settings.loki_url,
         loki_username=getattr(settings, "loki_username", None),
         loki_password=getattr(settings, "loki_password", None),
+        component=getattr(settings, "log_component", "app"),
     )
     if os.environ.get("TESTING"):
         from unittest.mock import AsyncMock

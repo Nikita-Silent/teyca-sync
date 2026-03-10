@@ -19,6 +19,7 @@ from app.consumers.create_user import CreateConsumerDeps, handle as handle_creat
 from app.consumers.delete_user import DeleteConsumerDeps, handle as handle_delete
 from app.consumers.update_user import UpdateConsumerDeps, handle as handle_update
 from app.db.session import SessionLocal
+from app.logging_config import configure_logging, shutdown_logging
 from app.mq.queues import QUEUE_CREATE, QUEUE_DELETE, QUEUE_UPDATE
 from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.listmonk_users import ListmonkUsersRepository
@@ -202,13 +203,22 @@ def _resolve_source_event_id(*, payload: dict[str, Any], message: AbstractIncomi
 
 async def _run() -> None:
     settings = get_settings()
+    configure_logging(
+        loki_url=getattr(settings, "loki_url", None),
+        loki_username=getattr(settings, "loki_username", None),
+        loki_password=getattr(settings, "loki_password", None),
+        component=getattr(settings, "log_component", "consumers"),
+    )
     runner = ConsumersRunner(
         settings=settings,
         listmonk_client=ListmonkSDKClient(settings),
         teyca_client=TeycaClient(settings),
         old_db_repo=OldDBRepository(settings.export_db_url),
     )
-    await runner.run()
+    try:
+        await runner.run()
+    finally:
+        shutdown_logging()
 
 
 def main() -> None:

@@ -109,6 +109,15 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
         attributes=build_listmonk_attributes(event.pass_data),
         subscriber_id=existing.subscriber_id if existing is not None else None,
     )
+    logger.info(
+        "create_consumer_listmonk_upsert_done",
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+        subscriber_id=subscriber_state.subscriber_id,
+        subscriber_status=subscriber_state.status,
+        list_ids=subscriber_state.list_ids,
+    )
     await deps.listmonk_repo.upsert(
         user_id=user_id,
         subscriber_id=subscriber_state.subscriber_id,

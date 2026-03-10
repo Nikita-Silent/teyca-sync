@@ -31,6 +31,7 @@ make test
 - `DATABASE_URL` — внешняя Postgres БД (в compose локальная postgres больше не поднимается).
 - `LOKI_URL` — URL Loki (обязателен, логирование только в Loki).
 - `LOKI_USERNAME` / `LOKI_PASSWORD` — Basic Auth для Loki.
+- `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `reconcile`, `consent-sync`).
 
 ## Tracing
 

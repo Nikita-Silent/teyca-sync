@@ -75,7 +75,7 @@ def test_loki_handler_and_logging_config() -> None:
         assert kwargs["url"] == "http://loki/loki/api/v1/push"
         assert kwargs["version"] == "2"
         assert kwargs["auth"] == ("user", "pass")
-        assert kwargs["tags"] == {"service": "teyca-sync"}
+        assert kwargs["tags"] == {"service": "teyca-sync", "component": "app"}
     shutdown_logging()
     loki_queue_handler.listener.stop.assert_called()
 
@@ -258,6 +258,8 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
         "app.workers.run_queue_consumers.ListmonkSDKClient"
     ), patch("app.workers.run_queue_consumers.TeycaClient"), patch(
         "app.workers.run_queue_consumers.OldDBRepository"
+    ), patch("app.workers.run_queue_consumers.configure_logging"), patch(
+        "app.workers.run_queue_consumers.shutdown_logging"
     ), patch.object(run_queue_consumers.ConsumersRunner, "run", new=AsyncMock()) as run_mock:
         await run_queue_consumers._run()
     run_mock.assert_awaited_once()

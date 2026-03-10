@@ -3,6 +3,7 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: migrate
     env_file:
       - .env
     command: alembic upgrade head
@@ -14,6 +15,7 @@ services:
       - "8000:8000"
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: app
     env_file:
       - .env
     depends_on:
@@ -27,6 +29,7 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: consumers
     env_file:
       - .env
     depends_on:
@@ -40,6 +43,7 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: consent-sync
     env_file:
       - .env
     depends_on:
@@ -53,6 +57,7 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      LOG_COMPONENT: reconcile
     env_file:
       - .env
     depends_on:
