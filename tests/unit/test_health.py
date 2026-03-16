@@ -134,3 +134,19 @@ async def test_heartbeat_status_detects_stale_file(tmp_path: Path) -> None:
 
     assert result["status"] == "error"
     assert result["fresh"] is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_status_rejects_non_object_payload(tmp_path: Path) -> None:
+    heartbeat_dir = tmp_path / "heartbeats"
+    heartbeat_dir.mkdir(parents=True, exist_ok=True)
+    (heartbeat_dir / "consumers.json").write_text(json.dumps(["bad"]), encoding="utf-8")
+
+    with patch("app.service_health.HEARTBEAT_DIR", heartbeat_dir):
+        result = await heartbeat_status("consumers", max_age_seconds=60)
+
+    assert result == {
+        "status": "error",
+        "error": "heartbeat payload is not an object",
+        "fresh": False,
+    }

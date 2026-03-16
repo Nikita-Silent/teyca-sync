@@ -311,6 +311,28 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
 
 
 @pytest.mark.asyncio
+async def test_app_heartbeat_task_logs_and_survives_write_failure() -> None:
+    sleep_calls = 0
+
+    async def fake_sleep(_: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        raise asyncio.CancelledError()
+
+    task = None
+    with patch("app.main.write_heartbeat", new=AsyncMock(side_effect=RuntimeError("boom"))), patch(
+        "app.main.logger"
+    ) as logger, patch("app.main.asyncio.sleep", side_effect=fake_sleep):
+        task = app_main._start_heartbeat_task("app", interval_seconds=15)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert task is not None
+    assert sleep_calls == 1
+    logger.error.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_run_single_iteration_workers_log() -> None:
     with patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder, patch(
         "app.workers.run_consent_sync.logger"
@@ -331,6 +353,31 @@ async def test_run_single_iteration_workers_log() -> None:
         await run_listmonk_reconcile._run()
     logger.info.assert_called_once()
     assert heartbeat_mock.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_worker_heartbeat_failures_are_best_effort() -> None:
+    heartbeat_mock = AsyncMock(side_effect=[RuntimeError("boom"), None, RuntimeError("boom")])
+    with patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder, patch(
+        "app.workers.run_consent_sync.logger"
+    ) as logger, patch("app.workers.run_consent_sync.write_heartbeat", new=heartbeat_mock):
+        worker = AsyncMock()
+        worker.run_once.return_value = 2
+        builder.return_value = worker
+        await run_consent_sync._run()
+    logger.warning.assert_called()
+    logger.info.assert_called_once()
+
+    heartbeat_mock = AsyncMock(side_effect=[RuntimeError("boom"), None, RuntimeError("boom")])
+    with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
+        "app.workers.run_listmonk_reconcile.logger"
+    ) as logger, patch("app.workers.run_listmonk_reconcile.write_heartbeat", new=heartbeat_mock):
+        worker = AsyncMock()
+        worker.run_once.return_value = 3
+        builder.return_value = worker
+        await run_listmonk_reconcile._run()
+    logger.error.assert_called()
+    logger.info.assert_called_once()
 
 
 @pytest.mark.asyncio

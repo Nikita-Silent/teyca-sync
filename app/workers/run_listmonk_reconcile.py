@@ -14,6 +14,18 @@ from app.workers.listmonk_reconcile_worker import build_listmonk_reconcile_worke
 logger = structlog.get_logger()
 
 
+async def _safe_write_heartbeat(extra: dict[str, object]) -> None:
+    try:
+        await write_heartbeat("reconcile", extra=extra)
+    except Exception as exc:
+        logger.error(
+            "listmonk_reconcile_heartbeat_write_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            stage=extra.get("stage"),
+        )
+
+
 async def _run() -> None:
     settings = get_settings()
     configure_logging(
@@ -24,23 +36,20 @@ async def _run() -> None:
     )
     worker = build_listmonk_reconcile_worker()
     try:
-        await write_heartbeat("reconcile", extra={"stage": "started"})
+        await _safe_write_heartbeat({"stage": "started"})
         task = asyncio.create_task(worker.run_once())
         try:
             while not task.done():
-                await write_heartbeat("reconcile", extra={"stage": "in_progress"})
+                await _safe_write_heartbeat({"stage": "in_progress"})
                 try:
                     await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
                 except asyncio.TimeoutError:
                     continue
             restored = await task
-            await write_heartbeat(
-                "reconcile",
-                extra={"stage": "completed", "restored": restored},
-            )
+            await _safe_write_heartbeat({"stage": "completed", "restored": restored})
             logger.info("listmonk_reconcile_run_completed", restored=restored)
         except (ListmonkClientError, httpx.HTTPError) as exc:
-            await write_heartbeat("reconcile", extra={"stage": "failed"})
+            await _safe_write_heartbeat({"stage": "failed"})
             logger.error(
                 "listmonk_reconcile_run_failed",
                 error=str(exc),

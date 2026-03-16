@@ -42,6 +42,12 @@ async def heartbeat_status(service_name: str, *, max_age_seconds: int) -> dict[s
             "error": str(exc),
             "fresh": False,
         }
+    if not isinstance(payload, dict):
+        return {
+            "status": "error",
+            "error": "heartbeat payload is not an object",
+            "fresh": False,
+        }
 
     raw_timestamp = payload.get("timestamp")
     if not isinstance(raw_timestamp, str):
