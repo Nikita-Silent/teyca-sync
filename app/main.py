@@ -9,7 +9,7 @@ import aio_pika
 import structlog
 from fastapi import FastAPI
 
-from app.api.webhook import router as webhook_router
+from app.api.webhook import health_router, router as webhook_router
 from app.config import get_settings
 from app.logging_config import configure_logging, shutdown_logging
 from app.mq.publisher import MQPublisher
@@ -57,7 +57,9 @@ app = FastAPI(title="teyca-sync", lifespan=lifespan)
 webhook_path = get_settings().webhook.strip() or "/webhook"
 if not webhook_path.startswith("/"):
     webhook_path = f"/{webhook_path}"
+app.include_router(health_router)
 app.include_router(webhook_router, prefix=webhook_path)
+app.include_router(health_router, prefix=webhook_path)
 
 
 @app.get("/")
