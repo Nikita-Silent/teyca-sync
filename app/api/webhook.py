@@ -24,13 +24,14 @@ from app.service_health import heartbeat_status
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="", tags=["webhook"])
+health_router = APIRouter(prefix="", tags=["health"])
 
 
 def get_mq_publisher(request: Request) -> MQPublisher:
     return request.app.state.mq_publisher
 
 
-@router.get("/live")
+@health_router.get("/live")
 async def live() -> JSONResponse:
     live_check = {
         "app": await heartbeat_status("app", max_age_seconds=60),
@@ -49,7 +50,7 @@ async def live() -> JSONResponse:
     )
 
 
-@router.get("/ready")
+@health_router.get("/ready")
 async def ready() -> JSONResponse:
     settings = get_settings()
     database_error = await _check_database_health()
@@ -71,7 +72,7 @@ async def ready() -> JSONResponse:
     )
 
 
-@router.get("/health")
+@health_router.get("/health")
 async def health() -> JSONResponse:
     live_response = await live()
     ready_response = await ready()
