@@ -91,9 +91,8 @@ make test
   - Grafana -> Dashboards -> New -> Import
   - вставь JSON из файла и выбери Loki datasource.
 - Панели включают:
-  - summary stat по `webhook_received`, `consumer_message_failed`, ошибкам Teyca и подтверждённым consent
-  - throughput webhook и consumers по реальным structured log events
-  - done/fail динамику вызовов `teyca_update_pass_*` и `teyca_accrue_bonuses_*`
-  - агрегаты `consent_sync_metrics` и `listmonk_reconcile_metrics`
-  - ленты `Recent Failures` и `Recent Business Events`
-  - top пользователей по количеству успешных `teyca_update_pass_done`.
+  - короткую инструкцию `How To Read This Dashboard`
+  - summary stat: `Total Logs`, `Errors`, `Webhooks`, `Teyca Failures`
+  - `Logs By Component` и `Errors By Event`
+  - агрегированные графики `Consent Sync` и `Reconcile`
+  - лог-панель `Recent Failures` для быстрого дебага.
