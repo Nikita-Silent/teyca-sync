@@ -8,8 +8,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-HEARTBEAT_DIR = Path(os.environ.get("HEARTBEAT_DIR", "/tmp/teyca-sync"))
+from uuid import uuid4
 
 
 def heartbeat_path(service_name: str) -> Path:
@@ -26,9 +25,9 @@ async def write_heartbeat(service_name: str, *, extra: dict[str, Any] | None = N
     await asyncio.to_thread(_write_json, heartbeat_path(service_name), payload)
 
 
-def heartbeat_status(service_name: str, *, max_age_seconds: int) -> dict[str, Any]:
+async def heartbeat_status(service_name: str, *, max_age_seconds: int) -> dict[str, Any]:
     path = heartbeat_path(service_name)
-    if not path.exists():
+    if not await _path_exists(path):
         return {
             "status": "error",
             "error": "heartbeat file is missing",
@@ -36,7 +35,7 @@ def heartbeat_status(service_name: str, *, max_age_seconds: int) -> dict[str, An
         }
 
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(await _read_text(path))
     except (OSError, json.JSONDecodeError) as exc:
         return {
             "status": "error",
@@ -76,10 +75,49 @@ def heartbeat_status(service_name: str, *, max_age_seconds: int) -> dict[str, An
     }
 
 
-def is_heartbeat_fresh(service_name: str, *, max_age_seconds: int) -> bool:
-    return bool(heartbeat_status(service_name, max_age_seconds=max_age_seconds)["fresh"])
+async def is_heartbeat_fresh(service_name: str, *, max_age_seconds: int) -> bool:
+    return bool((await heartbeat_status(service_name, max_age_seconds=max_age_seconds))["fresh"])
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    _ensure_directory(path.parent)
+    temp_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+    try:
+        with temp_path.open("w", encoding="utf-8") as file_obj:
+            json.dump(payload, file_obj)
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _resolve_heartbeat_dir() -> Path:
+    raw_path = os.environ.get("HEARTBEAT_DIR")
+    if raw_path is not None:
+        normalized = raw_path.strip()
+        if not normalized:
+            raise ValueError("HEARTBEAT_DIR must not be empty when set")
+        path = Path(normalized)
+    else:
+        path = Path(os.environ.get("XDG_RUNTIME_DIR", "/var/run")) / "teyca-sync"
+    _ensure_directory(path)
+    return path
+
+
+def _ensure_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+async def _path_exists(path: Path) -> bool:
+    return await asyncio.to_thread(path.exists)
+
+
+async def _read_text(path: Path) -> str:
+    return await asyncio.to_thread(path.read_text, encoding="utf-8")
+
+
+HEARTBEAT_DIR = _resolve_heartbeat_dir()

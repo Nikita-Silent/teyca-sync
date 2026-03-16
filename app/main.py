@@ -41,6 +41,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             finally:
                 if heartbeat_task is not None:
                     heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
                 await connection.close()
     finally:
         shutdown_logging()

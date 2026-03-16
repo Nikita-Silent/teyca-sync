@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from aio_pika.exceptions import CONNECTION_EXCEPTIONS
 
 from app.api.auth import verify_webhook_token
 from app.config import get_settings
@@ -32,15 +33,18 @@ def get_mq_publisher(request: Request) -> MQPublisher:
 @router.get("/live")
 async def live() -> JSONResponse:
     live_check = {
-        "app": heartbeat_status("app", max_age_seconds=60),
+        "app": await heartbeat_status("app", max_age_seconds=60),
     }
-    is_healthy = live_check["app"]["status"] == "ok"
+    checks = {
+        "app": _build_check_payload("app", live_check["app"]),
+    }
+    is_healthy = checks["app"]["status"] == "ok"
     return JSONResponse(
         status_code=200 if is_healthy else 503,
         content={
             "status": "ok" if is_healthy else "error",
             "timestamp": datetime.now(UTC).isoformat(),
-            "checks": live_check,
+            "checks": checks,
         },
     )
 
@@ -52,8 +56,8 @@ async def ready() -> JSONResponse:
     rabbitmq_error = await _check_rabbitmq_health(settings.rabbitmq_url)
 
     checks: dict[str, dict[str, Any]] = {
-        "database": _build_check_payload(database_error),
-        "rabbitmq": _build_check_payload(rabbitmq_error),
+        "database": _build_check_payload("database", database_error),
+        "rabbitmq": _build_check_payload("rabbitmq", rabbitmq_error),
     }
     is_healthy = database_error is None and rabbitmq_error is None
 
@@ -149,17 +153,34 @@ async def _check_database_health() -> str | None:
 async def _check_rabbitmq_health(rabbitmq_url: str) -> str | None:
     try:
         connection = await aio_pika.connect_robust(rabbitmq_url, timeout=5.0)
-    except Exception as exc:
+    except CONNECTION_EXCEPTIONS as exc:
         return str(exc)
 
     await connection.close()
     return None
 
 
-def _build_check_payload(error: str | None) -> dict[str, str]:
-    if error is None:
+def _build_check_payload(check_name: str, result: str | dict[str, Any] | None) -> dict[str, Any]:
+    if result is None:
         return {"status": "ok"}
-    return {"status": "error", "error": error}
+    if isinstance(result, dict):
+        if result.get("status") == "ok":
+            return result
+        logger.error(
+            "health_check_failed",
+            check_name=check_name,
+            error=result.get("error"),
+            payload=result,
+        )
+        sanitized = dict(result)
+        sanitized["error"] = "internal error"
+        return sanitized
+    logger.error(
+        "health_check_failed",
+        check_name=check_name,
+        error=result,
+    )
+    return {"status": "error", "error": "internal error"}
 
 
 def _decode_json_response(response: JSONResponse) -> dict[str, Any]:

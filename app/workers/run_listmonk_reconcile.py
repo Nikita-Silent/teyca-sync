@@ -25,8 +25,15 @@ async def _run() -> None:
     worker = build_listmonk_reconcile_worker()
     try:
         await write_heartbeat("reconcile", extra={"stage": "started"})
+        task = asyncio.create_task(worker.run_once())
         try:
-            restored = await worker.run_once()
+            while not task.done():
+                await write_heartbeat("reconcile", extra={"stage": "in_progress"})
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
+                except asyncio.TimeoutError:
+                    continue
+            restored = await task
             await write_heartbeat(
                 "reconcile",
                 extra={"stage": "completed", "restored": restored},
@@ -39,6 +46,13 @@ async def _run() -> None:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
     finally:
         shutdown_logging()
 

@@ -21,6 +21,18 @@ from app.workers import run_queue_consumers
 from httpx import ASGITransport, AsyncClient
 
 
+class DummyAwaitableTask:
+    def __init__(self) -> None:
+        self.cancel = MagicMock()
+        self.awaited = False
+
+    def __await__(self):  # type: ignore[override]
+        async def _wait() -> None:
+            self.awaited = True
+
+        return _wait().__await__()
+
+
 @pytest.mark.asyncio
 async def test_lifespan_testing_branch_sets_mock_publisher() -> None:
     app = SimpleNamespace(state=SimpleNamespace())
@@ -42,12 +54,13 @@ async def test_lifespan_runtime_branch_connects_and_closes_connection() -> None:
     ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging"), patch(
         "app.main.aio_pika.connect_robust", new=AsyncMock(return_value=connection)
     ), patch("app.main._start_heartbeat_task") as heartbeat_task_mock:
-        heartbeat_task = MagicMock()
+        heartbeat_task = DummyAwaitableTask()
         heartbeat_task_mock.return_value = heartbeat_task
         async with app_main.lifespan(app):
             assert app.state.mq_publisher is not None
     connection.close.assert_awaited_once()
     heartbeat_task.cancel.assert_called_once()
+    assert heartbeat_task.awaited is True
 
 
 @pytest.mark.asyncio
@@ -263,10 +276,14 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
     channel.declare_queue.return_value = queue_obj
     connection = AsyncMock()
     connection.channel.return_value = channel
+    heartbeat_task = DummyAwaitableTask()
 
     with patch("app.workers.run_queue_consumers.aio_pika.connect_robust", new=AsyncMock(return_value=connection)), patch(
         "app.workers.run_queue_consumers.asyncio.Event"
-    ) as event_cls:
+    ) as event_cls, patch(
+        "app.workers.run_queue_consumers._start_heartbeat_task",
+        return_value=heartbeat_task,
+    ):
         waiter = AsyncMock(side_effect=RuntimeError("stop"))
         event_cls.return_value.wait = waiter
         with pytest.raises(RuntimeError):
@@ -274,6 +291,8 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
 
     runner.old_db_repo.close.assert_awaited_once()
     connection.close.assert_awaited_once()
+    heartbeat_task.cancel.assert_called_once()
+    assert heartbeat_task.awaited is True
 
     with patch("app.workers.run_queue_consumers.get_settings", return_value=SimpleNamespace(export_db_url="db")), patch(
         "app.workers.run_queue_consumers.ListmonkSDKClient"
@@ -311,7 +330,7 @@ async def test_run_single_iteration_workers_log() -> None:
         builder.return_value = worker
         await run_listmonk_reconcile._run()
     logger.info.assert_called_once()
-    assert heartbeat_mock.await_count == 2
+    assert heartbeat_mock.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -334,7 +353,7 @@ async def test_single_iteration_workers_handle_listmonk_transient_errors() -> No
         builder.return_value = worker
         await run_listmonk_reconcile._run()
     logger.error.assert_called_once()
-    assert heartbeat_mock.await_count == 2
+    assert heartbeat_mock.await_count == 3
 
 
 @pytest.mark.asyncio

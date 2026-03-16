@@ -168,6 +168,10 @@ class ConsumersRunner:
             await asyncio.Event().wait()
         finally:
             heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             await self.old_db_repo.close()
             await connection.close()
 
@@ -201,7 +205,15 @@ def _resolve_source_event_id(*, payload: dict[str, Any], message: AbstractIncomi
 def _start_heartbeat_task(service_name: str, *, interval_seconds: int) -> asyncio.Task[None]:
     async def _run() -> None:
         while True:
-            await write_heartbeat(service_name)
+            try:
+                await write_heartbeat(service_name)
+            except Exception as exc:
+                logger.error(
+                    "service_heartbeat_write_failed",
+                    service_name=service_name,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
             await asyncio.sleep(interval_seconds)
 
     return asyncio.create_task(_run())
