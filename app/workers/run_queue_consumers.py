@@ -26,6 +26,7 @@ from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
+from app.service_health import write_heartbeat
 from app.utils import to_optional_str
 
 logger = structlog.get_logger()
@@ -145,10 +146,15 @@ class ConsumersRunner:
             await message.reject(requeue=True)
 
     async def run(self) -> None:
-        """Connect to RabbitMQ and consume all queues indefinitely."""
+        """
+        Start RabbitMQ consumers for CREATE, UPDATE, and DELETE queues and run them until shutdown.
+        
+        Declares durable queues, sets channel prefetch to 32, starts a periodic heartbeat task, and registers callbacks to process incoming messages. Waits indefinitely and, on shutdown, cancels the heartbeat task and closes the old DB repository and AMQP connection.
+        """
         connection = await aio_pika.connect_robust(self.settings.rabbitmq_url)
         channel = await connection.channel()
         await channel.set_qos(prefetch_count=32)
+        heartbeat_task = _start_heartbeat_task("consumers", interval_seconds=15)
 
         queue_create = await channel.declare_queue(QUEUE_CREATE, durable=True)
         queue_update = await channel.declare_queue(QUEUE_UPDATE, durable=True)
@@ -165,6 +171,7 @@ class ConsumersRunner:
         try:
             await asyncio.Event().wait()
         finally:
+            heartbeat_task.cancel()
             await self.old_db_repo.close()
             await connection.close()
 
@@ -189,13 +196,45 @@ def _resolve_trace_id(*, payload: dict[str, Any], message: AbstractIncomingMessa
 
 
 def _resolve_source_event_id(*, payload: dict[str, Any], message: AbstractIncomingMessage) -> str | None:
+    """
+    Return the source event identifier used for tracing and logging.
+    
+    Prefers payload["source_event_id"] when present and non-empty; otherwise uses message.message_id. 
+    
+    Returns:
+        source_event_id (str | None): The resolved source event identifier, or `None` if unavailable.
+    """
     payload_event_id = to_optional_str(payload.get("source_event_id"))
     if payload_event_id:
         return payload_event_id
     return to_optional_str(getattr(message, "message_id", None))
 
 
+def _start_heartbeat_task(service_name: str, *, interval_seconds: int) -> asyncio.Task[None]:
+    """
+    Start a background task that periodically writes a heartbeat for the given service.
+    
+    Parameters:
+        service_name (str): Name of the service to report in each heartbeat.
+        interval_seconds (int): Number of seconds to wait between heartbeat writes.
+    
+    Returns:
+        asyncio.Task[None]: An asyncio Task running the heartbeat loop.
+    """
+    async def _run() -> None:
+        while True:
+            await write_heartbeat(service_name)
+            await asyncio.sleep(interval_seconds)
+
+    return asyncio.create_task(_run())
+
+
 async def _run() -> None:
+    """
+    Start the consumers process using application settings, clients, and repositories.
+    
+    Configures logging from settings, instantiates a ConsumersRunner with the Listmonk and Teyca clients and the export database repository, awaits the runner's `run()` coroutine, and ensures logging is shut down on exit.
+    """
     settings = get_settings()
     configure_logging(
         loki_url=getattr(settings, "loki_url", None),

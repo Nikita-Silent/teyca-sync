@@ -192,7 +192,23 @@ class ListmonkSDKClient:
         attributes: dict[str, object],
         subscriber_id: int | None = None,
     ) -> SubscriberState:
-        """Create or update subscriber via SDK and return normalized state."""
+        """
+        Create or update a subscriber in Listmonk and return its normalized SubscriberState.
+        
+        If `subscriber_id` is provided the function attempts to update that subscriber; if the id is missing in Listmonk and `email` is provided it will create a new subscriber by email. If `subscriber_id` is omitted the function creates a new subscriber or, on email conflict, updates the existing subscriber found by email.
+        
+        Parameters:
+            email (str | None): Subscriber email; required when creating a new subscriber (when `subscriber_id` is None).
+            list_ids (list[int]): Target list IDs to subscribe the user to; must contain at least one positive integer.
+            attributes (dict[str, object]): Subscriber attributes to set on create or update.
+            subscriber_id (int | None): Optional Listmonk subscriber id to update.
+        
+        Returns:
+            SubscriberState: Normalized state containing the subscriber id, resolved status, and list ids.
+        
+        Raises:
+            ListmonkClientError: On invalid or empty `list_ids`, missing `email` when creating, when the listmonk SDK is not installed, or when the SDK returns unexpected/missing data (for example a create response with no id).
+        """
         await self._ensure_login()
         normalized_email = _normalize_email(email)
         normalized_list_ids = _normalize_list_ids(list_ids)
@@ -290,7 +306,7 @@ class ListmonkSDKClient:
                     list_ids=state.list_ids,
                 )
                 return state
-            status = _extract_status(response) or str(current_status)
+            status = _extract_raw_status(response) or _extract_status(response) or str(current_status)
             state = SubscriberState(
                 subscriber_id=effective_subscriber_id,
                 status=status,
@@ -540,6 +556,15 @@ def _extract_subscriber_id(payload: object) -> int | None:
 
 
 def _extract_status(payload: object) -> str | None:
+    """
+    Extracts and normalizes a subscriber status from a payload.
+    
+    Parameters:
+        payload (object): A dict or object that may contain a `status` string field or attribute.
+    
+    Returns:
+        str | None: `'enabled'` or `'blocklisted'` if a recognizable status is present, `None` otherwise.
+    """
     if payload is None:
         return None
     if isinstance(payload, dict):
@@ -552,7 +577,40 @@ def _extract_status(payload: object) -> str | None:
     return None
 
 
+def _extract_raw_status(payload: object) -> str | None:
+    """
+    Extracts a raw status string from a payload and returns it normalized to lowercase.
+    
+    Parameters:
+        payload (object): A dict or object that may contain a "status" key or attribute.
+    
+    Returns:
+        str | None: The trimmed, lowercased status if it exists and is a string, `None` otherwise.
+    """
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        value = payload.get("status")
+    else:
+        value = getattr(payload, "status", None)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
 def _extract_updated_at(payload: object) -> datetime:
+    """
+    Extracts the subscriber's last update timestamp and returns it as a UTC-aware datetime.
+    
+    Checks the payload for an `updated_at` attribute and returns that value converted to UTC if present; if `updated_at` is missing or not a datetime, falls back to `created_at`; if neither is a datetime, returns the minimal UTC datetime.
+    
+    Parameters:
+        payload (object): Object that may have `updated_at` or `created_at` attributes (datetime).
+    
+    Returns:
+        datetime: UTC-aware datetime representing the last update time, or the minimal UTC datetime if no valid timestamps are found.
+    """
     value = getattr(payload, "updated_at", None)
     if isinstance(value, datetime):
         return _to_utc(value)
