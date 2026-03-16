@@ -24,6 +24,17 @@ services:
       migrate:
         condition: service_completed_successfully
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - 'import os, urllib.request; path = os.environ.get("WEBHOOK", "/webhook").strip() or "/webhook"; path = path if path.startswith("/") else f"/{path}"; urllib.request.urlopen(f"http://127.0.0.1:8000{path}/live", timeout=5)'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   consumers:
     build: .
@@ -38,6 +49,17 @@ services:
       migrate:
         condition: service_completed_successfully
     command: python -m app.workers.run_queue_consumers
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - 'from app.service_health import is_heartbeat_fresh; raise SystemExit(0 if is_heartbeat_fresh("consumers", max_age_seconds=60) else 1)'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   consent-sync:
     build: .
@@ -52,6 +74,17 @@ services:
       migrate:
         condition: service_completed_successfully
     command: /bin/sh -c 'while true; do python -m app.workers.run_consent_sync; sleep 60; done'
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - 'from app.service_health import is_heartbeat_fresh; raise SystemExit(0 if is_heartbeat_fresh("consent-sync", max_age_seconds=180) else 1)'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   reconcile:
     build: .
@@ -66,9 +99,21 @@ services:
       migrate:
         condition: service_completed_successfully
     command: /bin/sh -c 'while true; do python -m app.workers.run_listmonk_reconcile; sleep 300; done'
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - 'from app.service_health import is_heartbeat_fresh; raise SystemExit(0 if is_heartbeat_fresh("reconcile", max_age_seconds=600) else 1)'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   rabbitmq:
     image: rabbitmq:4-management-alpine
+    restart: unless-stopped
     ports:
       - "127.0.0.1:5672:5672"
       - "127.0.0.1:15672:15672"

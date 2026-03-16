@@ -26,7 +26,9 @@ async def test_lifespan_testing_branch_sets_mock_publisher() -> None:
     app = SimpleNamespace(state=SimpleNamespace())
     with patch.dict("os.environ", {"TESTING": "1"}, clear=False), patch(
         "app.main.get_settings", return_value=SimpleNamespace(loki_url=None)
-    ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging"):
+    ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging"), patch(
+        "app.main.write_heartbeat", new=AsyncMock()
+    ):
         async with app_main.lifespan(app):
             assert hasattr(app.state, "mq_publisher")
 
@@ -39,10 +41,13 @@ async def test_lifespan_runtime_branch_connects_and_closes_connection() -> None:
         "app.main.get_settings", return_value=SimpleNamespace(loki_url="http://loki", rabbitmq_url="amqp://x")
     ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging"), patch(
         "app.main.aio_pika.connect_robust", new=AsyncMock(return_value=connection)
-    ):
+    ), patch("app.main._start_heartbeat_task") as heartbeat_task_mock:
+        heartbeat_task = MagicMock()
+        heartbeat_task_mock.return_value = heartbeat_task
         async with app_main.lifespan(app):
             assert app.state.mq_publisher is not None
     connection.close.assert_awaited_once()
+    heartbeat_task.cancel.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -50,7 +55,9 @@ async def test_lifespan_always_shuts_logging_on_error() -> None:
     app = SimpleNamespace(state=SimpleNamespace())
     with patch.dict("os.environ", {"TESTING": "1"}, clear=False), patch(
         "app.main.get_settings", return_value=SimpleNamespace(loki_url=None)
-    ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging") as shutdown_mock:
+    ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging") as shutdown_mock, patch(
+        "app.main.write_heartbeat", new=AsyncMock()
+    ):
         with pytest.raises(RuntimeError, match="boom"):
             async with app_main.lifespan(app):
                 raise RuntimeError("boom")
@@ -288,42 +295,46 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
 async def test_run_single_iteration_workers_log() -> None:
     with patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder, patch(
         "app.workers.run_consent_sync.logger"
-    ) as logger:
+    ) as logger, patch("app.workers.run_consent_sync.write_heartbeat", new=AsyncMock()) as heartbeat_mock:
         worker = AsyncMock()
         worker.run_once.return_value = 2
         builder.return_value = worker
         await run_consent_sync._run()
     logger.info.assert_called_once()
+    assert heartbeat_mock.await_count == 2
 
     with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
         "app.workers.run_listmonk_reconcile.logger"
-    ) as logger:
+    ) as logger, patch("app.workers.run_listmonk_reconcile.write_heartbeat", new=AsyncMock()) as heartbeat_mock:
         worker = AsyncMock()
         worker.run_once.return_value = 3
         builder.return_value = worker
         await run_listmonk_reconcile._run()
     logger.info.assert_called_once()
+    assert heartbeat_mock.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_single_iteration_workers_handle_listmonk_transient_errors() -> None:
     with patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder, patch(
         "app.workers.run_consent_sync.logger"
-    ) as logger:
+    ) as logger, patch("app.workers.run_consent_sync.write_heartbeat", new=AsyncMock()) as heartbeat_mock:
         worker = AsyncMock()
         worker.run_once.side_effect = httpx.ReadTimeout("timed out")
         builder.return_value = worker
         await run_consent_sync._run()
     logger.error.assert_called_once()
+    assert heartbeat_mock.await_count == 2
 
     with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
         "app.workers.run_listmonk_reconcile.logger"
-    ) as logger:
+    ) as logger, patch("app.workers.run_listmonk_reconcile.write_heartbeat", new=AsyncMock()) as heartbeat_mock:
         worker = AsyncMock()
         worker.run_once.side_effect = httpx.ReadTimeout("timed out")
         builder.return_value = worker
         await run_listmonk_reconcile._run()
     logger.error.assert_called_once()
+    assert heartbeat_mock.await_count == 2
 
 
 @pytest.mark.asyncio

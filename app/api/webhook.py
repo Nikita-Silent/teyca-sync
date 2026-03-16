@@ -1,15 +1,24 @@
 """Webhook endpoint: static token auth, parse body, publish to RabbitMQ by type."""
 
+import json
 from datetime import UTC, datetime
 from json import JSONDecodeError
+from typing import Any
 from uuid import uuid4
 
+import aio_pika
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.auth import verify_webhook_token
+from app.config import get_settings
+from app.db.session import SessionLocal
 from app.mq.publisher import MQPublisher
 from app.schemas.webhook import WebhookPayload
+from app.service_health import heartbeat_status
 
 logger = structlog.get_logger()
 
@@ -18,6 +27,68 @@ router = APIRouter(prefix="", tags=["webhook"])
 
 def get_mq_publisher(request: Request) -> MQPublisher:
     return request.app.state.mq_publisher
+
+
+@router.get("/live")
+async def live() -> JSONResponse:
+    live_check = {
+        "app": heartbeat_status("app", max_age_seconds=60),
+    }
+    is_healthy = live_check["app"]["status"] == "ok"
+    return JSONResponse(
+        status_code=200 if is_healthy else 503,
+        content={
+            "status": "ok" if is_healthy else "error",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "checks": live_check,
+        },
+    )
+
+
+@router.get("/ready")
+async def ready() -> JSONResponse:
+    settings = get_settings()
+    database_error = await _check_database_health()
+    rabbitmq_error = await _check_rabbitmq_health(settings.rabbitmq_url)
+
+    checks: dict[str, dict[str, Any]] = {
+        "database": _build_check_payload(database_error),
+        "rabbitmq": _build_check_payload(rabbitmq_error),
+    }
+    is_healthy = database_error is None and rabbitmq_error is None
+
+    return JSONResponse(
+        status_code=200 if is_healthy else 503,
+        content={
+            "status": "ok" if is_healthy else "error",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "checks": checks,
+        },
+    )
+
+
+@router.get("/health")
+async def health() -> JSONResponse:
+    live_response = await live()
+    ready_response = await ready()
+    live_payload = _decode_json_response(live_response)
+    ready_payload = _decode_json_response(ready_response)
+    checks: dict[str, dict[str, Any]] = {
+        **live_payload["checks"],
+        **ready_payload["checks"],
+    }
+    is_healthy = (
+        live_response.status_code == 200
+        and ready_response.status_code == 200
+    )
+    return JSONResponse(
+        status_code=200 if is_healthy else 503,
+        content={
+            "status": "ok" if is_healthy else "error",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "checks": checks,
+        },
+    )
 
 
 @router.post("")
@@ -64,3 +135,32 @@ def _extract_trace_id(request: Request) -> str:
 def _extract_source_event_id(request: Request) -> str:
     raw = request.headers.get("x-event-id", "").strip()
     return raw or str(uuid4())
+
+
+async def _check_database_health() -> str | None:
+    try:
+        async with SessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        return str(exc)
+    return None
+
+
+async def _check_rabbitmq_health(rabbitmq_url: str) -> str | None:
+    try:
+        connection = await aio_pika.connect_robust(rabbitmq_url, timeout=5.0)
+    except Exception as exc:
+        return str(exc)
+
+    await connection.close()
+    return None
+
+
+def _build_check_payload(error: str | None) -> dict[str, str]:
+    if error is None:
+        return {"status": "ok"}
+    return {"status": "error", "error": error}
+
+
+def _decode_json_response(response: JSONResponse) -> dict[str, Any]:
+    return json.loads(response.body.decode("utf-8"))

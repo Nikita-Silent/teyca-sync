@@ -26,6 +26,7 @@ from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
+from app.service_health import write_heartbeat
 from app.utils import to_optional_str
 
 logger = structlog.get_logger()
@@ -149,6 +150,7 @@ class ConsumersRunner:
         connection = await aio_pika.connect_robust(self.settings.rabbitmq_url)
         channel = await connection.channel()
         await channel.set_qos(prefetch_count=32)
+        heartbeat_task = _start_heartbeat_task("consumers", interval_seconds=15)
 
         queue_create = await channel.declare_queue(QUEUE_CREATE, durable=True)
         queue_update = await channel.declare_queue(QUEUE_UPDATE, durable=True)
@@ -165,6 +167,7 @@ class ConsumersRunner:
         try:
             await asyncio.Event().wait()
         finally:
+            heartbeat_task.cancel()
             await self.old_db_repo.close()
             await connection.close()
 
@@ -193,6 +196,15 @@ def _resolve_source_event_id(*, payload: dict[str, Any], message: AbstractIncomi
     if payload_event_id:
         return payload_event_id
     return to_optional_str(getattr(message, "message_id", None))
+
+
+def _start_heartbeat_task(service_name: str, *, interval_seconds: int) -> asyncio.Task[None]:
+    async def _run() -> None:
+        while True:
+            await write_heartbeat(service_name)
+            await asyncio.sleep(interval_seconds)
+
+    return asyncio.create_task(_run())
 
 
 async def _run() -> None:

@@ -290,7 +290,7 @@ class ListmonkSDKClient:
                     list_ids=state.list_ids,
                 )
                 return state
-            status = _extract_status(response) or str(current_status)
+            status = _extract_raw_status(response) or _extract_status(response) or str(current_status)
             state = SubscriberState(
                 subscriber_id=effective_subscriber_id,
                 status=status,
@@ -550,6 +550,19 @@ def _extract_status(payload: object) -> str | None:
     if isinstance(value, str):
         return _normalize_user_status(value)
     return None
+
+
+def _extract_raw_status(payload: object) -> str | None:
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        value = payload.get("status")
+    else:
+        value = getattr(payload, "status", None)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
 
 
 def _extract_updated_at(payload: object) -> datetime:
