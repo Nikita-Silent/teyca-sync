@@ -25,8 +25,15 @@ async def _run() -> None:
     worker = build_consent_sync_worker()
     try:
         await write_heartbeat("consent-sync", extra={"stage": "started"})
+        task = asyncio.create_task(worker.run_once())
         try:
-            processed = await worker.run_once()
+            while not task.done():
+                await write_heartbeat("consent-sync", extra={"stage": "in_progress"})
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
+                except asyncio.TimeoutError:
+                    continue
+            processed = await task
             await write_heartbeat(
                 "consent-sync",
                 extra={"stage": "completed", "processed": processed},
@@ -39,6 +46,13 @@ async def _run() -> None:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
     finally:
         shutdown_logging()
 

@@ -46,6 +46,7 @@ async def _run() -> None:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
+            raise
         finally:
             if not task.done():
                 task.cancel()

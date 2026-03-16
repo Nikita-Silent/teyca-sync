@@ -320,7 +320,7 @@ async def test_run_single_iteration_workers_log() -> None:
         builder.return_value = worker
         await run_consent_sync._run()
     logger.info.assert_called_once()
-    assert heartbeat_mock.await_count == 2
+    assert heartbeat_mock.await_count == 3
 
     with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
         "app.workers.run_listmonk_reconcile.logger"
@@ -343,7 +343,7 @@ async def test_single_iteration_workers_handle_listmonk_transient_errors() -> No
         builder.return_value = worker
         await run_consent_sync._run()
     logger.error.assert_called_once()
-    assert heartbeat_mock.await_count == 2
+    assert heartbeat_mock.await_count == 3
 
     with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
         "app.workers.run_listmonk_reconcile.logger"
@@ -351,7 +351,8 @@ async def test_single_iteration_workers_handle_listmonk_transient_errors() -> No
         worker = AsyncMock()
         worker.run_once.side_effect = httpx.ReadTimeout("timed out")
         builder.return_value = worker
-        await run_listmonk_reconcile._run()
+        with pytest.raises(httpx.ReadTimeout):
+            await run_listmonk_reconcile._run()
     logger.error.assert_called_once()
     assert heartbeat_mock.await_count == 3
 
