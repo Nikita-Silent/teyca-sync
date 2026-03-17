@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from queue import Queue
+from typing import Any
 
 import logging_loki
 import structlog
 
 _loki_queue_handler: logging_loki.LokiQueueHandler | None = None
+
+
+def _add_static_fields(
+    *, service_name: str, component: str
+) -> Callable[[Any, str, dict[str, Any]], dict[str, Any]]:
+    def _processor(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+        event_dict.setdefault("service", service_name)
+        event_dict.setdefault("component", component)
+        return event_dict
+
+    return _processor
 
 
 def configure_logging(
@@ -31,6 +44,7 @@ def configure_logging(
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
+            _add_static_fields(service_name=service_name, component=component),
             structlog.stdlib.add_logger_name,
             structlog.stdlib.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),

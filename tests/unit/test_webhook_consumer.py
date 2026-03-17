@@ -1,7 +1,7 @@
 """Unit tests: webhook routing by type and static token auth."""
 
 import os
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -173,3 +173,28 @@ async def test_webhook_allows_request_without_auth_when_disabled(mock_publisher:
     call_args = mock_publisher.publish_webhook.call_args
     assert call_args[0][0] == "CREATE"
     assert call_args[0][1]["pass"]["user_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_webhook_logs_validation_failure_without_publishing(
+    mock_publisher: AsyncMock,
+) -> None:
+    os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
+    os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
+    payload = {"type": "UPDATE", "pass": {"user_id": 5757993, "tags": "1,2,3"}}
+    with patch("app.api.webhook.logger") as logger:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            resp = await ac.post(
+                "/webhook",
+                json=payload,
+                headers={"Authorization": AUTH_TOKEN},
+            )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Invalid webhook payload"
+    mock_publisher.publish_webhook.assert_not_called()
+    logger.error.assert_called_once()
+    call = logger.error.call_args
+    assert call.args[0] == "webhook_validation_failed"
+    assert call.kwargs["user_id"] == 5757993
+    assert "pass.tags" in call.kwargs["invalid_fields"]

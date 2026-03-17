@@ -11,14 +11,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from app import main as app_main
 from app.api.webhook import get_mq_publisher
 from app.db import session as db_session
-from app.logging_config import _normalize_loki_url, configure_logging, shutdown_logging
-from app.workers import run_consent_sync, run_listmonk_reconcile
-from app.workers import run_queue_consumers
-from httpx import ASGITransport, AsyncClient
+from app.logging_config import (
+    _add_static_fields,
+    _normalize_loki_url,
+    configure_logging,
+    shutdown_logging,
+)
+from app.workers import run_consent_sync, run_listmonk_reconcile, run_queue_consumers
 
 
 class DummyAwaitableTask:
@@ -36,10 +40,12 @@ class DummyAwaitableTask:
 @pytest.mark.asyncio
 async def test_lifespan_testing_branch_sets_mock_publisher() -> None:
     app = SimpleNamespace(state=SimpleNamespace())
-    with patch.dict("os.environ", {"TESTING": "1"}, clear=False), patch(
-        "app.main.get_settings", return_value=SimpleNamespace(loki_url=None)
-    ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging"), patch(
-        "app.main.write_heartbeat", new=AsyncMock()
+    with (
+        patch.dict("os.environ", {"TESTING": "1"}, clear=False),
+        patch("app.main.get_settings", return_value=SimpleNamespace(loki_url=None)),
+        patch("app.main.configure_logging"),
+        patch("app.main.shutdown_logging"),
+        patch("app.main.write_heartbeat", new=AsyncMock()),
     ):
         async with app_main.lifespan(app):
             assert hasattr(app.state, "mq_publisher")
@@ -49,11 +55,17 @@ async def test_lifespan_testing_branch_sets_mock_publisher() -> None:
 async def test_lifespan_runtime_branch_connects_and_closes_connection() -> None:
     app = SimpleNamespace(state=SimpleNamespace())
     connection = AsyncMock()
-    with patch.dict("os.environ", {}, clear=True), patch(
-        "app.main.get_settings", return_value=SimpleNamespace(loki_url="http://loki", rabbitmq_url="amqp://x")
-    ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging"), patch(
-        "app.main.aio_pika.connect_robust", new=AsyncMock(return_value=connection)
-    ), patch("app.main._start_heartbeat_task") as heartbeat_task_mock:
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch(
+            "app.main.get_settings",
+            return_value=SimpleNamespace(loki_url="http://loki", rabbitmq_url="amqp://x"),
+        ),
+        patch("app.main.configure_logging"),
+        patch("app.main.shutdown_logging"),
+        patch("app.main.aio_pika.connect_robust", new=AsyncMock(return_value=connection)),
+        patch("app.main._start_heartbeat_task") as heartbeat_task_mock,
+    ):
         heartbeat_task = DummyAwaitableTask()
         heartbeat_task_mock.return_value = heartbeat_task
         async with app_main.lifespan(app):
@@ -66,10 +78,12 @@ async def test_lifespan_runtime_branch_connects_and_closes_connection() -> None:
 @pytest.mark.asyncio
 async def test_lifespan_always_shuts_logging_on_error() -> None:
     app = SimpleNamespace(state=SimpleNamespace())
-    with patch.dict("os.environ", {"TESTING": "1"}, clear=False), patch(
-        "app.main.get_settings", return_value=SimpleNamespace(loki_url=None)
-    ), patch("app.main.configure_logging"), patch("app.main.shutdown_logging") as shutdown_mock, patch(
-        "app.main.write_heartbeat", new=AsyncMock()
+    with (
+        patch.dict("os.environ", {"TESTING": "1"}, clear=False),
+        patch("app.main.get_settings", return_value=SimpleNamespace(loki_url=None)),
+        patch("app.main.configure_logging"),
+        patch("app.main.shutdown_logging") as shutdown_mock,
+        patch("app.main.write_heartbeat", new=AsyncMock()),
     ):
         with pytest.raises(RuntimeError, match="boom"):
             async with app_main.lifespan(app):
@@ -102,7 +116,9 @@ def test_loki_handler_and_logging_config() -> None:
     loki_queue_handler = MagicMock()
     loki_queue_handler.listener = MagicMock()
     loki_queue_handler.level = logging.INFO
-    with patch("app.logging_config.logging_loki.LokiQueueHandler", return_value=loki_queue_handler) as cls_mock:
+    with patch(
+        "app.logging_config.logging_loki.LokiQueueHandler", return_value=loki_queue_handler
+    ) as cls_mock:
         configure_logging(loki_url="http://loki", loki_username="user", loki_password="pass")
         cls_mock.assert_called_once()
         kwargs = cls_mock.call_args.kwargs
@@ -112,6 +128,20 @@ def test_loki_handler_and_logging_config() -> None:
         assert kwargs["tags"] == {"service": "teyca-sync", "component": "app"}
     shutdown_logging()
     loki_queue_handler.listener.stop.assert_called()
+
+
+def test_add_static_fields_processor() -> None:
+    processor = _add_static_fields(service_name="svc", component="app")
+
+    assert processor(None, "info", {"event": "x"}) == {
+        "event": "x",
+        "service": "svc",
+        "component": "app",
+    }
+    assert processor(None, "info", {"service": "other", "component": "worker"}) == {
+        "service": "other",
+        "component": "worker",
+    }
 
 
 def test_get_mq_publisher_and_main_guards() -> None:
@@ -147,13 +177,17 @@ async def test_consumers_runner_core_paths() -> None:
     with pytest.raises(ValueError):
         await runner._parse_payload(SimpleNamespace(body=b"not-json"))
 
-    with patch.object(
-        run_queue_consumers.ConsumersRunner, "_consume_create", new=AsyncMock()
-    ) as create_mock, patch.object(
-        run_queue_consumers.ConsumersRunner, "_consume_update", new=AsyncMock()
-    ) as update_mock, patch.object(
-        run_queue_consumers.ConsumersRunner, "_consume_delete", new=AsyncMock()
-    ) as delete_mock:
+    with (
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_create", new=AsyncMock()
+        ) as create_mock,
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_update", new=AsyncMock()
+        ) as update_mock,
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_delete", new=AsyncMock()
+        ) as delete_mock,
+    ):
         await runner._process(msg, run_queue_consumers.QUEUE_CREATE)
         await runner._process(msg, run_queue_consumers.QUEUE_UPDATE)
         await runner._process(msg, run_queue_consumers.QUEUE_DELETE)
@@ -202,61 +236,80 @@ async def test_consumers_runner_consume_commit_and_rollback_paths() -> None:
     cm.__aenter__.return_value = session
     cm.__aexit__.return_value = False
 
-    with patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm), patch(
-        "app.workers.run_queue_consumers.handle_create", new=AsyncMock()
-    ), patch("app.workers.run_queue_consumers.UsersRepository"), patch(
-        "app.workers.run_queue_consumers.ListmonkUsersRepository"
-    ), patch("app.workers.run_queue_consumers.MergeLogRepository"):
+    with (
+        patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm),
+        patch("app.workers.run_queue_consumers.handle_create", new=AsyncMock()),
+        patch("app.workers.run_queue_consumers.UsersRepository"),
+        patch("app.workers.run_queue_consumers.ListmonkUsersRepository"),
+        patch("app.workers.run_queue_consumers.MergeLogRepository"),
+    ):
         await runner._consume_create({"type": "CREATE", "pass": {"user_id": 1}})
     session.commit.assert_awaited_once()
 
     session.reset_mock()
-    with patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm), patch(
-        "app.workers.run_queue_consumers.handle_create", new=AsyncMock(side_effect=RuntimeError("boom"))
-    ), patch("app.workers.run_queue_consumers.UsersRepository"), patch(
-        "app.workers.run_queue_consumers.ListmonkUsersRepository"
-    ), patch("app.workers.run_queue_consumers.MergeLogRepository"):
+    with (
+        patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm),
+        patch(
+            "app.workers.run_queue_consumers.handle_create",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+        patch("app.workers.run_queue_consumers.UsersRepository"),
+        patch("app.workers.run_queue_consumers.ListmonkUsersRepository"),
+        patch("app.workers.run_queue_consumers.MergeLogRepository"),
+    ):
         with pytest.raises(RuntimeError):
             await runner._consume_create({"type": "CREATE", "pass": {"user_id": 1}})
     session.rollback.assert_awaited_once()
 
     session.reset_mock()
-    with patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm), patch(
-        "app.workers.run_queue_consumers.handle_update", new=AsyncMock()
-    ), patch("app.workers.run_queue_consumers.UsersRepository"), patch(
-        "app.workers.run_queue_consumers.ListmonkUsersRepository"
-    ), patch("app.workers.run_queue_consumers.MergeLogRepository"):
+    with (
+        patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm),
+        patch("app.workers.run_queue_consumers.handle_update", new=AsyncMock()),
+        patch("app.workers.run_queue_consumers.UsersRepository"),
+        patch("app.workers.run_queue_consumers.ListmonkUsersRepository"),
+        patch("app.workers.run_queue_consumers.MergeLogRepository"),
+    ):
         await runner._consume_update({"type": "UPDATE", "pass": {"user_id": 1}})
     session.commit.assert_awaited_once()
 
     session.reset_mock()
-    with patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm), patch(
-        "app.workers.run_queue_consumers.handle_update", new=AsyncMock(side_effect=RuntimeError("boom"))
-    ), patch("app.workers.run_queue_consumers.UsersRepository"), patch(
-        "app.workers.run_queue_consumers.ListmonkUsersRepository"
-    ), patch("app.workers.run_queue_consumers.MergeLogRepository"):
+    with (
+        patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm),
+        patch(
+            "app.workers.run_queue_consumers.handle_update",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+        patch("app.workers.run_queue_consumers.UsersRepository"),
+        patch("app.workers.run_queue_consumers.ListmonkUsersRepository"),
+        patch("app.workers.run_queue_consumers.MergeLogRepository"),
+    ):
         with pytest.raises(RuntimeError):
             await runner._consume_update({"type": "UPDATE", "pass": {"user_id": 1}})
     session.rollback.assert_awaited_once()
 
     session.reset_mock()
-    with patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm), patch(
-        "app.workers.run_queue_consumers.handle_delete", new=AsyncMock()
-    ), patch("app.workers.run_queue_consumers.UsersRepository"), patch(
-        "app.workers.run_queue_consumers.ListmonkUsersRepository"
-    ), patch("app.workers.run_queue_consumers.MergeLogRepository"), patch(
-        "app.workers.run_queue_consumers.BonusAccrualRepository"
+    with (
+        patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm),
+        patch("app.workers.run_queue_consumers.handle_delete", new=AsyncMock()),
+        patch("app.workers.run_queue_consumers.UsersRepository"),
+        patch("app.workers.run_queue_consumers.ListmonkUsersRepository"),
+        patch("app.workers.run_queue_consumers.MergeLogRepository"),
+        patch("app.workers.run_queue_consumers.BonusAccrualRepository"),
     ):
         await runner._consume_delete({"type": "DELETE", "pass": {"user_id": 1}})
     session.rollback.assert_not_awaited()
 
     session.reset_mock()
-    with patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm), patch(
-        "app.workers.run_queue_consumers.handle_delete", new=AsyncMock(side_effect=RuntimeError("boom"))
-    ), patch("app.workers.run_queue_consumers.UsersRepository"), patch(
-        "app.workers.run_queue_consumers.ListmonkUsersRepository"
-    ), patch("app.workers.run_queue_consumers.MergeLogRepository"), patch(
-        "app.workers.run_queue_consumers.BonusAccrualRepository"
+    with (
+        patch("app.workers.run_queue_consumers.SessionLocal", return_value=cm),
+        patch(
+            "app.workers.run_queue_consumers.handle_delete",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+        patch("app.workers.run_queue_consumers.UsersRepository"),
+        patch("app.workers.run_queue_consumers.ListmonkUsersRepository"),
+        patch("app.workers.run_queue_consumers.MergeLogRepository"),
+        patch("app.workers.run_queue_consumers.BonusAccrualRepository"),
     ):
         with pytest.raises(RuntimeError):
             await runner._consume_delete({"type": "DELETE", "pass": {"user_id": 1}})
@@ -278,11 +331,16 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
     connection.channel.return_value = channel
     heartbeat_task = DummyAwaitableTask()
 
-    with patch("app.workers.run_queue_consumers.aio_pika.connect_robust", new=AsyncMock(return_value=connection)), patch(
-        "app.workers.run_queue_consumers.asyncio.Event"
-    ) as event_cls, patch(
-        "app.workers.run_queue_consumers._start_heartbeat_task",
-        return_value=heartbeat_task,
+    with (
+        patch(
+            "app.workers.run_queue_consumers.aio_pika.connect_robust",
+            new=AsyncMock(return_value=connection),
+        ),
+        patch("app.workers.run_queue_consumers.asyncio.Event") as event_cls,
+        patch(
+            "app.workers.run_queue_consumers._start_heartbeat_task",
+            return_value=heartbeat_task,
+        ),
     ):
         waiter = AsyncMock(side_effect=RuntimeError("stop"))
         event_cls.return_value.wait = waiter
@@ -294,13 +352,18 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
     heartbeat_task.cancel.assert_called_once()
     assert heartbeat_task.awaited is True
 
-    with patch("app.workers.run_queue_consumers.get_settings", return_value=SimpleNamespace(export_db_url="db")), patch(
-        "app.workers.run_queue_consumers.ListmonkSDKClient"
-    ), patch("app.workers.run_queue_consumers.TeycaClient"), patch(
-        "app.workers.run_queue_consumers.OldDBRepository"
-    ), patch("app.workers.run_queue_consumers.configure_logging"), patch(
-        "app.workers.run_queue_consumers.shutdown_logging"
-    ), patch.object(run_queue_consumers.ConsumersRunner, "run", new=AsyncMock()) as run_mock:
+    with (
+        patch(
+            "app.workers.run_queue_consumers.get_settings",
+            return_value=SimpleNamespace(export_db_url="db"),
+        ),
+        patch("app.workers.run_queue_consumers.ListmonkSDKClient"),
+        patch("app.workers.run_queue_consumers.TeycaClient"),
+        patch("app.workers.run_queue_consumers.OldDBRepository"),
+        patch("app.workers.run_queue_consumers.configure_logging"),
+        patch("app.workers.run_queue_consumers.shutdown_logging"),
+        patch.object(run_queue_consumers.ConsumersRunner, "run", new=AsyncMock()) as run_mock,
+    ):
         await run_queue_consumers._run()
     run_mock.assert_awaited_once()
 
@@ -320,9 +383,11 @@ async def test_app_heartbeat_task_logs_and_survives_write_failure() -> None:
         raise asyncio.CancelledError()
 
     task = None
-    with patch("app.main.write_heartbeat", new=AsyncMock(side_effect=RuntimeError("boom"))), patch(
-        "app.main.logger"
-    ) as logger, patch("app.main.asyncio.sleep", side_effect=fake_sleep):
+    with (
+        patch("app.main.write_heartbeat", new=AsyncMock(side_effect=RuntimeError("boom"))),
+        patch("app.main.logger") as logger,
+        patch("app.main.asyncio.sleep", side_effect=fake_sleep),
+    ):
         task = app_main._start_heartbeat_task("app", interval_seconds=15)
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -334,9 +399,11 @@ async def test_app_heartbeat_task_logs_and_survives_write_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_run_single_iteration_workers_log() -> None:
-    with patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder, patch(
-        "app.workers.run_consent_sync.logger"
-    ) as logger, patch("app.workers.run_consent_sync.write_heartbeat", new=AsyncMock()) as heartbeat_mock:
+    with (
+        patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder,
+        patch("app.workers.run_consent_sync.logger") as logger,
+        patch("app.workers.run_consent_sync.write_heartbeat", new=AsyncMock()) as heartbeat_mock,
+    ):
         worker = AsyncMock()
         worker.run_once.return_value = 2
         builder.return_value = worker
@@ -344,9 +411,13 @@ async def test_run_single_iteration_workers_log() -> None:
     logger.info.assert_called_once()
     assert heartbeat_mock.await_count == 3
 
-    with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
-        "app.workers.run_listmonk_reconcile.logger"
-    ) as logger, patch("app.workers.run_listmonk_reconcile.write_heartbeat", new=AsyncMock()) as heartbeat_mock:
+    with (
+        patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder,
+        patch("app.workers.run_listmonk_reconcile.logger") as logger,
+        patch(
+            "app.workers.run_listmonk_reconcile.write_heartbeat", new=AsyncMock()
+        ) as heartbeat_mock,
+    ):
         worker = AsyncMock()
         worker.run_once.return_value = 3
         builder.return_value = worker
@@ -358,9 +429,11 @@ async def test_run_single_iteration_workers_log() -> None:
 @pytest.mark.asyncio
 async def test_worker_heartbeat_failures_are_best_effort() -> None:
     heartbeat_mock = AsyncMock(side_effect=[RuntimeError("boom"), None, RuntimeError("boom")])
-    with patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder, patch(
-        "app.workers.run_consent_sync.logger"
-    ) as logger, patch("app.workers.run_consent_sync.write_heartbeat", new=heartbeat_mock):
+    with (
+        patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder,
+        patch("app.workers.run_consent_sync.logger") as logger,
+        patch("app.workers.run_consent_sync.write_heartbeat", new=heartbeat_mock),
+    ):
         worker = AsyncMock()
         worker.run_once.return_value = 2
         builder.return_value = worker
@@ -369,9 +442,11 @@ async def test_worker_heartbeat_failures_are_best_effort() -> None:
     logger.info.assert_called_once()
 
     heartbeat_mock = AsyncMock(side_effect=[RuntimeError("boom"), None, RuntimeError("boom")])
-    with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
-        "app.workers.run_listmonk_reconcile.logger"
-    ) as logger, patch("app.workers.run_listmonk_reconcile.write_heartbeat", new=heartbeat_mock):
+    with (
+        patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder,
+        patch("app.workers.run_listmonk_reconcile.logger") as logger,
+        patch("app.workers.run_listmonk_reconcile.write_heartbeat", new=heartbeat_mock),
+    ):
         worker = AsyncMock()
         worker.run_once.return_value = 3
         builder.return_value = worker
@@ -382,9 +457,11 @@ async def test_worker_heartbeat_failures_are_best_effort() -> None:
 
 @pytest.mark.asyncio
 async def test_single_iteration_workers_handle_listmonk_transient_errors() -> None:
-    with patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder, patch(
-        "app.workers.run_consent_sync.logger"
-    ) as logger, patch("app.workers.run_consent_sync.write_heartbeat", new=AsyncMock()) as heartbeat_mock:
+    with (
+        patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder,
+        patch("app.workers.run_consent_sync.logger") as logger,
+        patch("app.workers.run_consent_sync.write_heartbeat", new=AsyncMock()) as heartbeat_mock,
+    ):
         worker = AsyncMock()
         worker.run_once.side_effect = httpx.ReadTimeout("timed out")
         builder.return_value = worker
@@ -392,9 +469,13 @@ async def test_single_iteration_workers_handle_listmonk_transient_errors() -> No
     logger.error.assert_called_once()
     assert heartbeat_mock.await_count == 3
 
-    with patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder, patch(
-        "app.workers.run_listmonk_reconcile.logger"
-    ) as logger, patch("app.workers.run_listmonk_reconcile.write_heartbeat", new=AsyncMock()) as heartbeat_mock:
+    with (
+        patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder,
+        patch("app.workers.run_listmonk_reconcile.logger") as logger,
+        patch(
+            "app.workers.run_listmonk_reconcile.write_heartbeat", new=AsyncMock()
+        ) as heartbeat_mock,
+    ):
         worker = AsyncMock()
         worker.run_once.side_effect = httpx.ReadTimeout("timed out")
         builder.return_value = worker
@@ -415,7 +496,9 @@ async def test_main_uses_webhook_path_from_env() -> None:
         publisher = AsyncMock()
         reloaded_main.app.dependency_overrides[get_mq_publisher] = lambda: publisher
         payload = {"type": "CREATE", "pass": {"user_id": 1}}
-        async with AsyncClient(transport=ASGITransport(app=reloaded_main.app), base_url="http://test") as ac:
+        async with AsyncClient(
+            transport=ASGITransport(app=reloaded_main.app), base_url="http://test"
+        ) as ac:
             resp = await ac.post(
                 "/custom-webhook",
                 json=payload,
