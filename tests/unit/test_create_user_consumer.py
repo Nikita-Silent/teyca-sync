@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.consumers.create_user import CreateConsumerDeps, handle
-from app.repositories.listmonk_users import DuplicateListmonkUserEmailError
 from app.repositories.old_db import OldUserData
 
 
@@ -43,6 +42,7 @@ async def test_create_without_old_data_no_merge() -> None:
     deps.merge_repo.exists.return_value = False
     deps.old_db_repo.get_user_data.return_value = None
     deps.listmonk_repo.get_by_user_id.return_value = None
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = []
     deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
         subscriber_id=500,
         status="enabled",
@@ -71,6 +71,7 @@ async def test_create_with_old_data_and_existing_subscriber() -> None:
         check_summ=5,
     )
     deps.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=777)
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = []
     deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
         subscriber_id=777,
         status="enabled",
@@ -98,6 +99,7 @@ async def test_create_skips_merge_when_merge_already_exists() -> None:
     deps = _deps()
     deps.merge_repo.exists.return_value = True
     deps.listmonk_repo.get_by_user_id.return_value = None
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = []
     deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
         subscriber_id=888,
         status="enabled",
@@ -123,6 +125,7 @@ async def test_create_invalid_email_blocks_and_skips_listmonk() -> None:
 
     deps.listmonk_client.upsert_subscriber.assert_not_awaited()
     deps.listmonk_repo.upsert.assert_not_awaited()
+    deps.listmonk_repo.get_other_user_ids_by_email.assert_not_awaited()
     deps.listmonk_repo.set_consent_pending.assert_not_awaited()
     deps.listmonk_repo.mark_checked.assert_not_awaited()
     deps.teyca_client.update_pass_fields.assert_awaited_once_with(
@@ -140,6 +143,7 @@ async def test_create_invalid_email_blocks_and_marks_existing_subscriber() -> No
     await handle(_payload(email="bad"), deps=deps)
 
     deps.listmonk_client.upsert_subscriber.assert_not_awaited()
+    deps.listmonk_repo.get_other_user_ids_by_email.assert_not_awaited()
     deps.listmonk_repo.mark_checked.assert_awaited_once_with(
         user_id=10,
         pending=False,
@@ -153,16 +157,7 @@ async def test_create_duplicate_email_schedules_repair_and_stops_retry_path() ->
     deps = _deps()
     deps.merge_repo.exists.return_value = True
     deps.listmonk_repo.get_by_user_id.return_value = None
-    deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
-        subscriber_id=901,
-        status="enabled",
-        list_ids=[1, 2],
-    )
-    deps.listmonk_repo.upsert.side_effect = DuplicateListmonkUserEmailError(
-        normalized_email="duplicate@example.com",
-        user_id=10,
-        existing_user_ids=[77, 88],
-    )
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = [77, 88]
 
     await handle(_payload(email="duplicate@example.com"), deps=deps)
 
@@ -183,5 +178,7 @@ async def test_create_duplicate_email_schedules_repair_and_stops_retry_path() ->
         source_event_id=None,
         trace_id=None,
     )
+    deps.listmonk_client.upsert_subscriber.assert_not_awaited()
+    deps.listmonk_repo.upsert.assert_not_awaited()
     deps.listmonk_repo.set_consent_pending.assert_not_awaited()
     deps.merge_repo.create.assert_not_awaited()

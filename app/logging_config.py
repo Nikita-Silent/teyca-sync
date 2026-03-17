@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Callable
 from queue import Queue
 
@@ -30,6 +31,7 @@ def configure_logging(
     loki_username: str | None = None,
     loki_password: str | None = None,
     component: str = "app",
+    console: bool = False,
 ) -> None:
     """Configure structlog + stdlib logging with Loki as the only sink."""
     global _loki_queue_handler
@@ -74,6 +76,11 @@ def configure_logging(
     root_logger.handlers.clear()
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(loki_handler)
+    if console:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter("%(message)s"))
+        console_handler.setLevel(logging.INFO)
+        root_logger.addHandler(console_handler)
     _loki_queue_handler = loki_handler
 
 

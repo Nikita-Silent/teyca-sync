@@ -16,11 +16,12 @@ from app.workers.email_repair_backfill import (
 
 def _backfill() -> DuplicateEmailBackfill:
     session_factory = MagicMock()
+    teyca_client = AsyncMock()
     return DuplicateEmailBackfill(
         settings=SimpleNamespace(),
         session_factory=session_factory,
         listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
+        teyca_client=teyca_client,
     )
 
 
@@ -171,9 +172,14 @@ async def test_sync_teyca_marks_rows_synced() -> None:
         summary = await backfill.sync_teyca(batch_size=10)
 
     assert summary.teyca_synced == 1
-    backfill.teyca_client.update_pass_fields.assert_awaited_once_with(
+    assert backfill.teyca_client.update_pass_fields.await_count == 2
+    backfill.teyca_client.update_pass_fields.assert_any_await(
+        user_id=20,
+        fields={"key6": "bugs"},
+    )
+    backfill.teyca_client.update_pass_fields.assert_any_await(
         user_id=10,
-        fields={"email": None, "key1": "bad email"},
+        fields={"email": None, "key1": "bad email", "key6": "bugs"},
     )
     repair_repo.mark_teyca_synced.assert_awaited_once_with(
         repair_id=1,

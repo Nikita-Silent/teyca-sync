@@ -132,6 +132,33 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
         )
         return
 
+    valid_email = event.pass_data.email
+    assert valid_email is not None
+    conflicting_user_ids = await deps.listmonk_repo.get_other_user_ids_by_email(
+        user_id=user_id,
+        email=valid_email,
+    )
+    if conflicting_user_ids:
+        normalized_email = valid_email.strip().lower()
+        for existing_user_id in conflicting_user_ids:
+            await deps.email_repair_repo.create_pending(
+                normalized_email=normalized_email,
+                incoming_user_id=user_id,
+                existing_user_id=existing_user_id,
+                source_event_type=event.type,
+                source_event_id=source_event_id,
+                trace_id=trace_id,
+            )
+        logger.error(
+            "update_consumer_duplicate_email_scheduled",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            email=normalized_email,
+            existing_user_ids=conflicting_user_ids,
+        )
+        return
+
     logger.info(
         "update_consumer_listmonk_upsert_start",
         user_id=user_id,

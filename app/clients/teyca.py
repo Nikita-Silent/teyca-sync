@@ -150,6 +150,7 @@ class TeycaClient:
             request_id=request_id,
             user_id=user_id,
             url=url,
+            partial=True,
             field_names=sorted(str(key) for key in fields.keys()),
             fields=fields,
         )
@@ -167,6 +168,7 @@ class TeycaClient:
                 request_id=request_id,
                 user_id=user_id,
                 url=url,
+                partial=True,
                 field_names=sorted(str(key) for key in fields.keys()),
                 fields=fields,
                 status_code=response.status_code,
@@ -180,6 +182,7 @@ class TeycaClient:
             request_id=request_id,
             user_id=user_id,
             url=url,
+            partial=True,
             field_names=sorted(str(key) for key in fields.keys()),
             fields=fields,
             status_code=response.status_code,

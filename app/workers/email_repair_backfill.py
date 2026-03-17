@@ -20,6 +20,8 @@ from app.workers.email_repair_worker import EMAIL_REPAIR_MAX_ATTEMPTS, TEYCA_KEY
 
 logger = structlog.get_logger()
 
+TEYCA_KEY6_BUGS = "bugs"
+
 
 @dataclass(slots=True)
 class DuplicateEmailBackfillPlan:
@@ -192,8 +194,16 @@ class DuplicateEmailBackfill:
 
                 try:
                     await self.teyca_client.update_pass_fields(
+                        user_id=winner_user_id,
+                        fields={"key6": TEYCA_KEY6_BUGS},
+                    )
+                    await self.teyca_client.update_pass_fields(
                         user_id=loser_user_id,
-                        fields={"email": None, "key1": TEYCA_KEY1_BAD_EMAIL},
+                        fields={
+                            "email": None,
+                            "key1": TEYCA_KEY1_BAD_EMAIL,
+                            "key6": TEYCA_KEY6_BUGS,
+                        },
                     )
                     await repair_repo.mark_teyca_synced(
                         repair_id=repair_id,

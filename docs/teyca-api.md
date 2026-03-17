@@ -61,8 +61,14 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 |----------|--------|------|------------|
 | Получение карты по `user_id` | GET | `/v1/{token}/passes/userid/{user_id}` | Чтение актуальной карты. |
 | Создание карты | POST | `/v1/{token}/passes` | Body: `template`, `first_name`, `last_name`, `pat_name`, `phone`, `email`, `birthday`, `gender`, `barcode`, `discount`, `bonus`, `loyalty_level`. |
-| Обновление карты (в т.ч. merge) | PUT | `/v1/{token}/passes/{user_id}` | Установка полей карты (не начисление). Body: `bonus`, `loyalty_level`, `summ`, `summ_all`, `key2` и др. Пример: `{"bonus": 300, "loyalty_level": "Золотой"}`. |
+| Обновление карты (в т.ч. merge) | PUT | `/v1/{token}/passes/{user_id}` | Partial update полей карты (не начисление). Body: `bonus`, `loyalty_level`, `summ`, `summ_all`, `key2` и др. Пример: `{"bonus": 300, "loyalty_level": "Золотой"}`. |
 | Удаление карты | DELETE | `/v1/{token}/passes/{user_id}` | — |
+
+Подтверждённое поведение `PUT /passes/{user_id}`:
+
+- На 2026-03-18 поведение проверено живым запросом на тестовой карте `user_id=5722735`.
+- `PUT {"key6":"put-check"}` изменил только `key6`; `email`, `key1`, `bonus`, `key2` и остальные поля сохранились.
+- Для `teyca-sync` это означает, что `PUT /passes/{user_id}` можно использовать как partial update без предварительного `GET`.
 
 ### Начисление бонусов: механизм в FastAPI (teyca-sync)
 
@@ -80,8 +86,9 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 4. **PUT карты** (`/v1/{token}/passes/{user_id}`) с полем `bonus` — это **не начисление**, а установка итогового значения поля на карте (например после merge: сложили бонусы из кассы и CRM и один раз обновили карту). Для добавления новой операции начисления используется только POST `.../bonuses` с массивом.
 
 5. **Duplicate email remediation** — отдельный repair-worker при конфликте email в локальной БД отправляет:
+   - winner'у: `PUT /passes/{user_id}` с `{"key6": "bugs"}`
    - **PUT** `https://api.teyca.ru/v1/{token}/passes/{user_id}`
-   - Body: `{"email": null, "key1": "bad email"}`
+   - loser'у Body: `{"email": null, "key1": "bad email", "key6": "bugs"}`
    Это помечает loser-пользователя как невалидный email-кейс и убирает email из Teyca, чтобы следующий `UPDATE` снова не возвращал конфликт.
 
 | Действие | Метод | Путь | Body |

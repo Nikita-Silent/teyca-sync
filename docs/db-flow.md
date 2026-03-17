@@ -75,9 +75,11 @@
 
 Если локальный email-дубликат:
 1. `users`: upsert уже выполнен
-2. `email_repair_log`: insert `status='pending'`
-3. `listmonk_users`: не обновляется этим сообщением
-4. consumer завершает обработку без `requeue`
+2. проверяется локальный duplicate email в `listmonk_users` до вызова mutating Listmonk API
+3. `email_repair_log`: insert `status='pending'`
+4. `listmonk_users`: не обновляется этим сообщением
+5. Listmonk этим сообщением не мутируется
+6. consumer завершает обработку без `requeue`
 
 Куда смотреть:
 1. `users` (профиль)
@@ -97,6 +99,7 @@
 Если `merge_log` отсутствует, merge выполняется и логируется в `merge_log`.
 При успешном merge дополнительно обновляется `key2` в Teyca.
 Если локальный email-дубликат, вместо бесконечного retry создаётся запись в `email_repair_log`, а сообщение ack-ается.
+Локальный duplicate pre-check выполняется до `listmonk_client.upsert_subscriber(...)`, поэтому сам Listmonk в этом сценарии не успевает обновиться.
 
 Куда смотреть:
 1. `users.updated_at`
@@ -151,14 +154,19 @@
 1. читает `email_repair_log` со статусами `pending` и `failed`, учитывая `next_retry_at`
 2. ищет authoritative subscriber в Listmonk по `normalized_email`
 3. находит winner по совпадению `subscriber_id` с одной из строк в `listmonk_users`
+4. winner'у отправляет Teyca `PUT /passes/{user_id}` с `key6='bugs'`
 4. loser'ам:
 - `users.email = NULL`
 - `listmonk_users.email = NULL`
-- Teyca `PUT /passes/{user_id}` с `email=null`, `key1='bad email'`
+- Teyca `PUT /passes/{user_id}` с `email=null`, `key1='bad email'`, `key6='bugs'`
 5. `email_repair_log.status` меняется:
 - `teyca_synced` при успехе
 - `failed` при очередной retryable ошибке
 - `manual_review` после исчерпания попыток
+
+Подтверждённый контракт Teyca:
+- `PUT /passes/{user_id}` ведёт себя как partial update, не как full replace.
+- Проверка выполнена 2026-03-18 на тестовой карте `user_id=5722735`: `PUT {"key6":"put-check"}` сохранил остальные поля карты без изменений.
 
 Куда смотреть:
 1. `email_repair_log` по `normalized_email` или `incoming_user_id`
