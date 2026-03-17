@@ -51,6 +51,7 @@ async def _run(*, apply: bool, sync_teyca: bool, limit: int | None, batch_size: 
         loki_username=getattr(settings, "loki_username", None),
         loki_password=getattr(settings, "loki_password", None),
         component="email-repair-backfill",
+        console=True,
     )
     try:
         plans, issues = await backfill.collect_plans(limit=limit)

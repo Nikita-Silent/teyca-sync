@@ -69,22 +69,25 @@ sequenceDiagram
         C->>DB: upsert users
     end
     alt email valid
-        C->>LM: upsert subscriber (preserve current status)
-        alt update/create returned email conflict (subscribers_email_key/409)
-            C->>LM: subscriber_by_email(email)
-            C->>LM: update found subscriber by email
+        C->>DB: check local duplicate email in listmonk_users
+        alt local duplicate found
+            C->>DB: insert email_repair_log(status=pending)
+            C->>C: log create_consumer_duplicate_email_scheduled
+            Note over C,DB: consumer exits without requeue and without mutating Listmonk
+        else no local duplicate
+            C->>LM: upsert subscriber (preserve current status)
+            alt update/create returned email conflict (subscribers_email_key/409)
+                C->>LM: subscriber_by_email(email)
+                C->>LM: update found subscriber by email
+            end
+            C->>DB: upsert listmonk_users
+            C->>DB: set consent_pending=true
         end
-        C->>DB: upsert listmonk_users
-        C->>DB: set consent_pending=true
     else email invalid
         C->>TY: PUT /passes/{user_id} {key1: "blocked"}
         opt listmonk_users row already exists
             C->>DB: mark checked status=blocked, consent_pending=false
         end
-    else local duplicate email in listmonk_users
-        C->>DB: insert email_repair_log(status=pending)
-        C->>C: log create_consumer_duplicate_email_scheduled
-        Note over C,DB: consumer exits without requeue
     end
     C->>DB: commit
 ```
@@ -115,22 +118,25 @@ sequenceDiagram
         U->>DB: upsert users
     end
     alt email valid
-        U->>LM: upsert subscriber (preserve current status)
-        alt update/create returned email conflict (subscribers_email_key/409)
-            U->>LM: subscriber_by_email(email)
-            U->>LM: update found subscriber by email
+        U->>DB: check local duplicate email in listmonk_users
+        alt local duplicate found
+            U->>DB: insert email_repair_log(status=pending)
+            U->>U: log update_consumer_duplicate_email_scheduled
+            Note over U,DB: consumer exits without requeue and without mutating Listmonk
+        else no local duplicate
+            U->>LM: upsert subscriber (preserve current status)
+            alt update/create returned email conflict (subscribers_email_key/409)
+                U->>LM: subscriber_by_email(email)
+                U->>LM: update found subscriber by email
+            end
+            U->>DB: upsert listmonk_users
+            U->>DB: set consent_pending=true
         end
-        U->>DB: upsert listmonk_users
-        U->>DB: set consent_pending=true
     else email invalid
         U->>TY: PUT /passes/{user_id} {key1: "blocked"}
         opt listmonk_users row already exists
             U->>DB: mark checked status=blocked, consent_pending=false
         end
-    else local duplicate email in listmonk_users
-        U->>DB: insert email_repair_log(status=pending)
-        U->>U: log update_consumer_duplicate_email_scheduled
-        Note over U,DB: consumer exits without requeue
     end
     U->>DB: commit
 ```
@@ -222,8 +228,9 @@ sequenceDiagram
         alt winner resolved by subscriber_id -> user_id
             E->>DB: clear users.email for losers
             E->>DB: clear listmonk_users.email for losers
+            E->>TY: PUT /passes/{winner_user_id} {key6: "bugs"}
             loop by loser user_id
-                E->>TY: PUT /passes/{user_id} {email: null, key1: "bad email"}
+                E->>TY: PUT /passes/{user_id} {email: null, key1: "bad email", key6: "bugs"}
             end
             E->>DB: mark email_repair_log teyca_synced
         else resolution/Teyca failed
@@ -238,6 +245,11 @@ sequenceDiagram
 ```
 
 ## 7) Метрики и логи (runtime)
+
+Подтверждённый контракт Teyca:
+
+- `PUT /v1/{token}/passes/{user_id}` в живой системе ведёт себя как partial update.
+- Проверка выполнена 2026-03-18 на тестовой карте `user_id=5722735`: запрос `PUT {"key6":"put-check"}` изменил только `key6`, остальные поля карты сохранились.
 
 В конце каждого запуска `consent_sync_worker` пишется агрегированный лог:
 

@@ -97,6 +97,13 @@ class ListmonkUsersRepository:
         result = await self._session.execute(stmt)
         return [str(value) for value in result.scalars().all()]
 
+    async def get_other_user_ids_by_email(self, *, user_id: int, email: str) -> list[int]:
+        """Return other user ids already mapped to the same normalized email."""
+        normalized_email = _normalize_email(email)
+        if normalized_email is None:
+            return []
+        return await self._find_other_user_ids_by_email(user_id=user_id, email=normalized_email)
+
     async def upsert(
         self,
         *,

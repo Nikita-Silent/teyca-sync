@@ -43,6 +43,10 @@ make test
 - `listmonk-reconcile` восстанавливает потерянные связи `subscriber_id -> user_id`.
 - `email-repair` разбирает duplicate email кейсы через `email_repair_log`, определяет winner по Listmonk и очищает loser'ов локально и в Teyca.
 
+Подтверждённый контракт Teyca:
+- `PUT /passes/{user_id}` ведёт себя как partial update.
+- Это проверено живым запросом 2026-03-18 на тестовой карте `user_id=5722735`: `PUT {"key6":"put-check"}` изменил только `key6`, остальные поля сохранились.
+
 ## Teyca API limits
 
 - Исходящие вызовы в Teyca ограничиваются в клиенте скользящими окнами:
@@ -91,11 +95,13 @@ make test
 
 - Если `CREATE/UPDATE` упирается в локальный duplicate email в `listmonk_users`, consumer не делает бесконечный retry.
 - Вместо этого создаётся `email_repair_log` со статусом `pending`.
+- Local duplicate pre-check выполняется до mutating вызова в Listmonk, поэтому в этом сценарии сам Listmonk не успевает обновиться.
 - Отдельный `email-repair` worker:
   - ищет authoritative subscriber в Listmonk по email,
   - выбирает winner по совпавшему `subscriber_id`,
   - loser'ам очищает `email` в `users` и `listmonk_users`,
-  - отправляет в Teyca `PUT /passes/{user_id}` с `email=null` и `key1="bad email"`,
+  - winner'у отправляет в Teyca `PUT /passes/{user_id}` с `key6="bugs"`,
+  - loser'у отправляет в Teyca `PUT /passes/{user_id}` с `email=null`, `key1="bad email"`, `key6="bugs"`,
   - помечает repair как `teyca_synced`, `failed` или `manual_review`.
 - Это нужно, чтобы очередь `queue-update`/`queue-create` не зацикливалась на одном конфликте и данные могли актуализироваться дальше.
 
