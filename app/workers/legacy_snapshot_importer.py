@@ -414,7 +414,7 @@ class LegacySnapshotImporter:
                 .on_conflict_do_nothing(constraint="uq_bonus_accrual_idempotency_key")
             )
             result_target = await self._session.execute(stmt)
-            inserted += int(result_target.rowcount or 0)
+            inserted += int(getattr(result_target, "rowcount", 0) or 0)
         return inserted, skipped
 
     async def _insert_rows_in_chunks(self, *, model: Any, rows: list[dict[str, Any]]) -> None:

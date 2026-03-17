@@ -16,7 +16,7 @@ class MergeLogRepository:
 
     async def exists(self, *, user_id: int) -> bool:
         """Return True when merge record exists for user."""
-        stmt: Select[tuple[MergeLog]] = select(MergeLog.id).where(MergeLog.user_id == user_id).limit(1)
+        stmt: Select[tuple[int]] = select(MergeLog.id).where(MergeLog.user_id == user_id).limit(1)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none() is not None
 

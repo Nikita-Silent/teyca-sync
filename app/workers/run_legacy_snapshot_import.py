@@ -8,13 +8,15 @@ import asyncio
 import structlog
 
 from app.db.session import SessionLocal
-from app.workers.legacy_snapshot_importer import LegacySnapshotImportError, LegacySnapshotImporter
+from app.workers.legacy_snapshot_importer import LegacySnapshotImporter, LegacySnapshotImportError
 
 logger = structlog.get_logger()
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Import legacy users/listmonk/merge snapshot into current DB")
+    parser = argparse.ArgumentParser(
+        description="Import legacy users/listmonk/merge snapshot into current DB"
+    )
     parser.add_argument(
         "--source-db-url",
         required=True,

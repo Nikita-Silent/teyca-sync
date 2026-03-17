@@ -92,7 +92,9 @@ async def test_get_user_data_returns_row_and_handles_errors() -> None:
         await repo.get_user_data(phone="79039859055")
 
     conn.execute.side_effect = None
-    conn.execute.return_value = SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: None))
+    conn.execute.return_value = SimpleNamespace(
+        mappings=lambda: SimpleNamespace(first=lambda: None)
+    )
     assert await repo.get_user_data(phone="79039859055") is None
 
 

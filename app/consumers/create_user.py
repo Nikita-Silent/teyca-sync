@@ -11,16 +11,16 @@ from app.clients.listmonk import ListmonkSDKClient
 from app.clients.teyca import BonusOperation, TeycaClient
 from app.config import Settings
 from app.consumers.common import (
-    build_merge_key2_value,
     build_listmonk_attributes,
+    build_merge_key2_value,
     build_profile_from_pass,
     is_valid_email,
     merge_profile_with_old_data,
 )
+from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
-from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.schemas.webhook import WebhookPayload
 from app.utils import to_optional_str
 from app.workers.consent_sync_worker import parse_list_ids
@@ -138,15 +138,12 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
             user_id=user_id,
             fields={"key2": build_merge_key2_value()},
         )
-        merge_create_kwargs: dict[str, object] = {
-            "user_id": user_id,
-            "source_event_type": event.type,
-        }
-        if source_event_id is not None:
-            merge_create_kwargs["source_event_id"] = source_event_id
-        if trace_id is not None:
-            merge_create_kwargs["trace_id"] = trace_id
-        await deps.merge_repo.create(**merge_create_kwargs)
+        await deps.merge_repo.create(
+            user_id=user_id,
+            source_event_type=event.type,
+            source_event_id=source_event_id,
+            trace_id=trace_id,
+        )
         logger.info(
             "create_merge_applied",
             user_id=user_id,
@@ -172,5 +169,7 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
         source_event_id=source_event_id,
         merge_applied_this_event=merge_needs_write and not merged_already,
         merge_log_exists_before=merged_already,
-        merge_reason=BONUS_REASON_MERGE_OLD_DB if merge_needs_write and not merged_already else "none",
+        merge_reason=(
+            BONUS_REASON_MERGE_OLD_DB if merge_needs_write and not merged_already else "none"
+        ),
     )

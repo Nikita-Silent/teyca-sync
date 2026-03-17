@@ -1,6 +1,6 @@
 """Repository for bonus accrual idempotency and status."""
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Select, delete, select, update
@@ -37,7 +37,7 @@ class BonusAccrualRepository:
             .on_conflict_do_nothing(constraint="uq_bonus_accrual_idempotency_key")
         )
         result = await self._session.execute(stmt)
-        return result.rowcount > 0
+        return int(getattr(result, "rowcount", 0) or 0) > 0
 
     async def mark_done(self, *, idempotency_key: str) -> None:
         """Mark operation as successfully processed."""

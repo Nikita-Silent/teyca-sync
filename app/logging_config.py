@@ -5,18 +5,18 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from queue import Queue
-from typing import Any
 
 import logging_loki
 import structlog
+from structlog.typing import EventDict, WrappedLogger
 
 _loki_queue_handler: logging_loki.LokiQueueHandler | None = None
 
 
 def _add_static_fields(
     *, service_name: str, component: str
-) -> Callable[[Any, str, dict[str, Any]], dict[str, Any]]:
-    def _processor(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+) -> Callable[[WrappedLogger, str, EventDict], EventDict]:
+    def _processor(_: WrappedLogger, __: str, event_dict: EventDict) -> EventDict:
         event_dict.setdefault("service", service_name)
         event_dict.setdefault("component", component)
         return event_dict
@@ -34,7 +34,8 @@ def configure_logging(
     """Configure structlog + stdlib logging with Loki as the only sink."""
     global _loki_queue_handler
     if _loki_queue_handler is not None:
-        _loki_queue_handler.listener.stop()
+        if _loki_queue_handler.listener is not None:
+            _loki_queue_handler.listener.stop()
         _loki_queue_handler.close()
         _loki_queue_handler = None
 
@@ -80,7 +81,8 @@ def shutdown_logging() -> None:
     """Flush and stop background Loki queue listener."""
     global _loki_queue_handler
     if _loki_queue_handler is not None:
-        _loki_queue_handler.listener.stop()
+        if _loki_queue_handler.listener is not None:
+            _loki_queue_handler.listener.stop()
         _loki_queue_handler.close()
         _loki_queue_handler = None
 

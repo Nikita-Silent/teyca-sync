@@ -22,18 +22,25 @@ async def test_root_returns_hello() -> None:
 
 @pytest.mark.asyncio
 async def test_health_returns_ok_when_dependencies_are_available() -> None:
-    with patch(
-        "app.api.webhook._check_database_health",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "app.api.webhook._check_rabbitmq_health",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "app.api.webhook.get_settings",
-        return_value=type("Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"})(),
-    ), patch(
-        "app.api.webhook.heartbeat_status",
-        new=AsyncMock(return_value={"status": "ok", "fresh": True, "service": "app"}),
+    with (
+        patch(
+            "app.api.webhook._check_database_health",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.api.webhook._check_rabbitmq_health",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.api.webhook.get_settings",
+            return_value=type(
+                "Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"}
+            )(),
+        ),
+        patch(
+            "app.api.webhook.heartbeat_status",
+            new=AsyncMock(return_value={"status": "ok", "fresh": True, "service": "app"}),
+        ),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             resp = await ac.get("/health")
@@ -47,18 +54,25 @@ async def test_health_returns_ok_when_dependencies_are_available() -> None:
 
 @pytest.mark.asyncio
 async def test_health_returns_503_when_dependency_fails() -> None:
-    with patch(
-        "app.api.webhook._check_database_health",
-        new=AsyncMock(return_value="db is down"),
-    ), patch(
-        "app.api.webhook._check_rabbitmq_health",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "app.api.webhook.get_settings",
-        return_value=type("Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"})(),
-    ), patch(
-        "app.api.webhook.heartbeat_status",
-        new=AsyncMock(return_value={"status": "ok", "fresh": True, "service": "app"}),
+    with (
+        patch(
+            "app.api.webhook._check_database_health",
+            new=AsyncMock(return_value="db is down"),
+        ),
+        patch(
+            "app.api.webhook._check_rabbitmq_health",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.api.webhook.get_settings",
+            return_value=type(
+                "Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"}
+            )(),
+        ),
+        patch(
+            "app.api.webhook.heartbeat_status",
+            new=AsyncMock(return_value={"status": "ok", "fresh": True, "service": "app"}),
+        ),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             resp = await ac.get("/health")
@@ -71,27 +85,32 @@ async def test_health_returns_503_when_dependency_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_live_and_ready_routes_are_split() -> None:
-    with patch(
-        "app.api.webhook._check_database_health",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "app.api.webhook._check_rabbitmq_health",
-        new=AsyncMock(return_value="rabbit down"),
-    ), patch(
-        "app.api.webhook.get_settings",
-        return_value=type("Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"})(),
-    ), patch(
-        "app.api.webhook.heartbeat_status",
-        new=AsyncMock(return_value={"status": "ok", "fresh": True, "service": "app"}),
+    with (
+        patch(
+            "app.api.webhook._check_database_health",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.api.webhook._check_rabbitmq_health",
+            new=AsyncMock(return_value="rabbit down"),
+        ),
+        patch(
+            "app.api.webhook.get_settings",
+            return_value=type(
+                "Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"}
+            )(),
+        ),
+        patch(
+            "app.api.webhook.heartbeat_status",
+            new=AsyncMock(return_value={"status": "ok", "fresh": True, "service": "app"}),
+        ),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             live_resp = await ac.get("/live")
             ready_resp = await ac.get("/ready")
 
     assert live_resp.status_code == 200
-    assert live_resp.json()["checks"] == {
-        "app": {"status": "ok", "fresh": True, "service": "app"}
-    }
+    assert live_resp.json()["checks"] == {"app": {"status": "ok", "fresh": True, "service": "app"}}
     assert ready_resp.status_code == 503
     assert ready_resp.json()["checks"] == {
         "database": {"status": "ok"},
@@ -103,7 +122,14 @@ async def test_live_and_ready_routes_are_split() -> None:
 async def test_live_returns_503_when_app_heartbeat_is_stale() -> None:
     with patch(
         "app.api.webhook.heartbeat_status",
-        new=AsyncMock(return_value={"status": "error", "fresh": False, "service": "app", "error": "stale"}),
+        new=AsyncMock(
+            return_value={
+                "status": "error",
+                "fresh": False,
+                "service": "app",
+                "error": "stale",
+            }
+        ),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             resp = await ac.get("/live")

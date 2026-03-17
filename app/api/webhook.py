@@ -100,7 +100,7 @@ async def webhook(
     publisher: MQPublisher = Depends(get_mq_publisher),
     _auth: None = Depends(verify_webhook_token),
 ) -> dict:
-    """Accept webhook from Teyca: check Authorization token, parse body, publish to queue by type."""
+    """Accept webhook, validate body, and route event payload to the proper queue."""
     trace_id = _extract_trace_id(request)
     source_event_id = _extract_source_event_id(request)
     try:
@@ -222,4 +222,4 @@ def _build_check_payload(check_name: str, result: str | dict[str, Any] | None) -
 
 
 def _decode_json_response(response: JSONResponse) -> dict[str, Any]:
-    return json.loads(response.body.decode("utf-8"))
+    return json.loads(bytes(response.body).decode("utf-8"))

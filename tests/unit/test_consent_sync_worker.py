@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,8 +7,8 @@ import pytest
 from app.clients.listmonk import SubscriberDelta, SubscriberState
 from app.clients.teyca import TeycaAPIError
 from app.workers.consent_sync_worker import (
-    ConsentSyncWorker,
     ConsentSyncMetrics,
+    ConsentSyncWorker,
     _inc,
     _normalize_progress_payload,
     build_consent_sync_worker,
@@ -425,13 +425,19 @@ async def test_run_once_uses_incremental_deltas_and_updates_watermark() -> None:
         )
     ]
 
-    with patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls, patch(
-        "app.workers.consent_sync_worker.BonusAccrualRepository"
-    ) as accrual_cls, patch("app.workers.consent_sync_worker.SyncStateRepository") as sync_cls, patch.object(
-        ConsentSyncWorker, "_process_pending_user", new_callable=AsyncMock
-    ) as process_mock:
+    with (
+        patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
+        patch("app.workers.consent_sync_worker.BonusAccrualRepository") as accrual_cls,
+        patch("app.workers.consent_sync_worker.SyncStateRepository") as sync_cls,
+        patch.object(
+            ConsentSyncWorker, "_process_pending_user", new_callable=AsyncMock
+        ) as process_mock,
+    ):
         listmonk_repo = AsyncMock()
-        listmonk_repo.get_by_subscriber_id.return_value = SimpleNamespace(user_id=77, subscriber_id=1001)
+        listmonk_repo.get_by_subscriber_id.return_value = SimpleNamespace(
+            user_id=77,
+            subscriber_id=1001,
+        )
         repo_cls.return_value = listmonk_repo
         accrual_cls.return_value = AsyncMock()
 
@@ -484,11 +490,14 @@ async def test_run_once_skips_unmapped_subscribers_but_moves_watermark() -> None
         )
     ]
 
-    with patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls, patch(
-        "app.workers.consent_sync_worker.BonusAccrualRepository"
-    ) as accrual_cls, patch("app.workers.consent_sync_worker.SyncStateRepository") as sync_cls, patch.object(
-        ConsentSyncWorker, "_process_pending_user", new_callable=AsyncMock
-    ) as process_mock:
+    with (
+        patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
+        patch("app.workers.consent_sync_worker.BonusAccrualRepository") as accrual_cls,
+        patch("app.workers.consent_sync_worker.SyncStateRepository") as sync_cls,
+        patch.object(
+            ConsentSyncWorker, "_process_pending_user", new_callable=AsyncMock
+        ) as process_mock,
+    ):
         listmonk_repo = AsyncMock()
         listmonk_repo.get_by_subscriber_id.return_value = None
         repo_cls.return_value = listmonk_repo
@@ -549,9 +558,11 @@ async def test_run_once_skips_empty_deltas() -> None:
     )
     worker.listmonk_client.get_updated_subscribers.return_value = []
 
-    with patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls, patch(
-        "app.workers.consent_sync_worker.BonusAccrualRepository"
-    ) as accrual_cls, patch("app.workers.consent_sync_worker.SyncStateRepository") as sync_cls:
+    with (
+        patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
+        patch("app.workers.consent_sync_worker.BonusAccrualRepository") as accrual_cls,
+        patch("app.workers.consent_sync_worker.SyncStateRepository") as sync_cls,
+    ):
         repo_cls.return_value = AsyncMock()
         accrual_cls.return_value = AsyncMock()
         sync_repo = AsyncMock()
@@ -565,9 +576,14 @@ async def test_run_once_skips_empty_deltas() -> None:
 
 
 def test_build_consent_sync_worker_and_inc_helper() -> None:
-    with patch("app.workers.consent_sync_worker.get_settings", return_value=SimpleNamespace()), patch(
-        "app.workers.consent_sync_worker.ListmonkSDKClient"
-    ), patch("app.workers.consent_sync_worker.TeycaClient"):
+    with (
+        patch(
+            "app.workers.consent_sync_worker.get_settings",
+            return_value=SimpleNamespace(),
+        ),
+        patch("app.workers.consent_sync_worker.ListmonkSDKClient"),
+        patch("app.workers.consent_sync_worker.TeycaClient"),
+    ):
         worker = build_consent_sync_worker()
     assert worker is not None
 
