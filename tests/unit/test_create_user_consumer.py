@@ -83,7 +83,12 @@ async def test_create_with_old_data_and_existing_subscriber() -> None:
     assert call_kwargs["subscriber_id"] == 777
     deps.teyca_client.accrue_bonuses.assert_awaited_once()
     deps.teyca_client.update_pass_fields.assert_awaited_once()
-    deps.merge_repo.create.assert_awaited_once_with(user_id=10, source_event_type="CREATE")
+    deps.merge_repo.create.assert_awaited_once_with(
+        user_id=10,
+        source_event_type="CREATE",
+        source_event_id=None,
+        trace_id=None,
+    )
 
 
 @pytest.mark.asyncio

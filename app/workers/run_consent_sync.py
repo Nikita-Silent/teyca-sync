@@ -43,7 +43,7 @@ async def _run() -> None:
                 await _safe_write_heartbeat({"stage": "in_progress"})
                 try:
                     await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
             processed = await task
             await _safe_write_heartbeat({"stage": "completed", "processed": processed})

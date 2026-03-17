@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 import structlog
@@ -13,6 +14,7 @@ import structlog
 from app.config import Settings
 
 logger = structlog.get_logger()
+T = TypeVar("T")
 
 
 class ListmonkClientError(Exception):
@@ -103,6 +105,60 @@ class ListmonkSDKClient:
         self._settings = settings
         self._logged_in = False
 
+    async def _sdk_call(
+        self,
+        func: Callable[..., T],
+        *args: object,
+        action: str,
+        retryable: bool = True,
+        **kwargs: object,
+    ) -> T:
+        """Run blocking SDK call in thread with timeout and transient retries."""
+        timeout_seconds = max(
+            0.1, float(getattr(self._settings, "listmonk_request_timeout_seconds", 15.0))
+        )
+        max_retries = max(0, int(getattr(self._settings, "listmonk_request_max_retries", 2)))
+        retry_backoff_seconds = max(
+            0.0,
+            float(getattr(self._settings, "listmonk_request_retry_backoff_seconds", 0.5)),
+        )
+
+        attempt = 0
+        while True:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(func, *args, **kwargs),
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError as exc:
+                wrapped = ListmonkClientError(
+                    f"Listmonk SDK call timeout after {timeout_seconds}s: action={action}"
+                )
+                if not retryable or attempt >= max_retries:
+                    raise wrapped from exc
+                logger.warning(
+                    "listmonk_sdk_call_retry",
+                    action=action,
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    error_type="TimeoutError",
+                    timeout_seconds=timeout_seconds,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+                if not retryable or attempt >= max_retries:
+                    raise
+                logger.warning(
+                    "listmonk_sdk_call_retry",
+                    action=action,
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            attempt += 1
+            if retry_backoff_seconds > 0:
+                await asyncio.sleep(retry_backoff_seconds * attempt)
+
     async def _ensure_login(self) -> None:
         if self._logged_in:
             return
@@ -111,11 +167,16 @@ class ListmonkSDKClient:
         except ModuleNotFoundError as exc:
             raise ListmonkClientError("listmonk package is not installed") from exc
 
-        await asyncio.to_thread(listmonk.set_url_base, self._settings.listmonk_url)
-        ok = await asyncio.to_thread(
+        await self._sdk_call(
+            listmonk.set_url_base,
+            self._settings.listmonk_url,
+            action="set_url_base",
+        )
+        ok = await self._sdk_call(
             listmonk.login,
             self._settings.listmonk_user,
             self._settings.listmonk_password,
+            action="login",
         )
         if not ok:
             raise ListmonkClientError("Listmonk SDK login failed")
@@ -133,7 +194,11 @@ class ListmonkSDKClient:
             "listmonk_get_subscriber_state_request",
             subscriber_id=subscriber_id,
         )
-        payload = await asyncio.to_thread(listmonk.subscriber_by_id, subscriber_id)
+        payload = await self._sdk_call(
+            listmonk.subscriber_by_id,
+            subscriber_id,
+            action="subscriber_by_id",
+        )
         if payload is None:
             _safe_info(
                 "listmonk_get_subscriber_state_done",
@@ -225,7 +290,11 @@ class ListmonkSDKClient:
                 import listmonk  # type: ignore
             except ModuleNotFoundError as exc:
                 raise ListmonkClientError("listmonk package is not installed") from exc
-            subscriber = await asyncio.to_thread(listmonk.subscriber_by_id, subscriber_id)
+            subscriber = await self._sdk_call(
+                listmonk.subscriber_by_id,
+                subscriber_id,
+                action="subscriber_by_id",
+            )
             if subscriber is None:
                 # Subscriber was removed from Listmonk, recreate by email.
                 if not normalized_email:
@@ -247,18 +316,24 @@ class ListmonkSDKClient:
             )
             current_status = getattr(subscriber, "status", None) or "enabled"
             try:
-                response = await asyncio.to_thread(
+                response = await self._sdk_call(
                     listmonk.update_subscriber,
                     subscriber,
                     set(normalized_list_ids),
                     None,
                     current_status,
+                    action="update_subscriber",
+                    retryable=False,
                 )
             except Exception as exc:
                 if not _is_conflict_error(exc) or not normalized_email:
                     raise
                 # subscriber_id may point to stale/mismatched record; fallback by unique email.
-                existing_by_email = await asyncio.to_thread(listmonk.subscriber_by_email, normalized_email)
+                existing_by_email = await self._sdk_call(
+                    listmonk.subscriber_by_email,
+                    normalized_email,
+                    action="subscriber_by_email",
+                )
                 if existing_by_email is None:
                     raise ListmonkClientError(
                         f"Listmonk returned email conflict for subscriber_id={subscriber_id}, "
@@ -273,12 +348,14 @@ class ListmonkSDKClient:
                     name=request_kwargs["name"],
                     attribs=request_kwargs["attribs"],
                 )
-                response = await asyncio.to_thread(
+                response = await self._sdk_call(
                     listmonk.update_subscriber,
                     existing_by_email,
                     set(normalized_list_ids),
                     None,
                     getattr(existing_by_email, "status", None) or "enabled",
+                    action="update_subscriber",
+                    retryable=False,
                 )
             state = await self.get_subscriber_state(subscriber_id=effective_subscriber_id)
             if state is not None:
@@ -290,7 +367,9 @@ class ListmonkSDKClient:
                     list_ids=state.list_ids,
                 )
                 return state
-            status = _extract_raw_status(response) or _extract_status(response) or str(current_status)
+            status = (
+                _extract_raw_status(response) or _extract_status(response) or str(current_status)
+            )
             state = SubscriberState(
                 subscriber_id=effective_subscriber_id,
                 status=status,
@@ -310,19 +389,25 @@ class ListmonkSDKClient:
         except ModuleNotFoundError as exc:
             raise ListmonkClientError("listmonk package is not installed") from exc
         try:
-            response = await asyncio.to_thread(
+            response = await self._sdk_call(
                 listmonk.create_subscriber,
                 request_kwargs["email"],
                 request_kwargs["name"],
                 set(normalized_list_ids),
                 False,
                 request_kwargs["attribs"],
+                action="create_subscriber",
+                retryable=False,
             )
         except Exception as exc:
             if not _is_conflict_error(exc) or not request_kwargs["email"]:
                 raise
             # Idempotent behavior: subscriber already exists, switch to update by email.
-            existing = await asyncio.to_thread(listmonk.subscriber_by_email, request_kwargs["email"])
+            existing = await self._sdk_call(
+                listmonk.subscriber_by_email,
+                request_kwargs["email"],
+                action="subscriber_by_email",
+            )
             if existing is None:
                 raise ListmonkClientError(
                     f"Listmonk returned 409 for email={request_kwargs['email']}, "
@@ -334,12 +419,14 @@ class ListmonkSDKClient:
                 name=request_kwargs["name"],
                 attribs=request_kwargs["attribs"],
             )
-            response = await asyncio.to_thread(
+            response = await self._sdk_call(
                 listmonk.update_subscriber,
                 existing,
                 set(normalized_list_ids),
                 None,
                 getattr(existing, "status", None) or "enabled",
+                action="update_subscriber",
+                retryable=False,
             )
         created_id = _extract_subscriber_id(response)
         if created_id is None:
@@ -355,7 +442,9 @@ class ListmonkSDKClient:
             )
             return state
         status = _extract_status(response) or "enabled"
-        state = SubscriberState(subscriber_id=created_id, status=status, list_ids=normalized_list_ids)
+        state = SubscriberState(
+            subscriber_id=created_id, status=status, list_ids=normalized_list_ids
+        )
         _safe_info(
             "listmonk_upsert_subscriber_done",
             mode="create",
@@ -404,15 +493,21 @@ class ListmonkSDKClient:
             import listmonk  # type: ignore
         except ModuleNotFoundError as exc:
             raise ListmonkClientError("listmonk package is not installed") from exc
-        subscriber = await asyncio.to_thread(listmonk.subscriber_by_id, state.subscriber_id)
+        subscriber = await self._sdk_call(
+            listmonk.subscriber_by_id,
+            state.subscriber_id,
+            action="subscriber_by_id",
+        )
         if subscriber is None:
             return state
-        await asyncio.to_thread(
+        await self._sdk_call(
             listmonk.update_subscriber,
             subscriber,
             set(list_ids),
             None,
             target_status,
+            action="update_subscriber",
+            retryable=False,
         )
         refreshed = await self.get_subscriber_state(subscriber_id=state.subscriber_id)
         if refreshed is not None:
@@ -449,7 +544,13 @@ class ListmonkSDKClient:
             import listmonk  # type: ignore
         except ModuleNotFoundError as exc:
             raise ListmonkClientError("listmonk package is not installed") from exc
-        await asyncio.to_thread(listmonk.delete_subscriber, None, subscriber_id)
+        await self._sdk_call(
+            listmonk.delete_subscriber,
+            None,
+            subscriber_id,
+            action="delete_subscriber",
+            retryable=False,
+        )
         _safe_info(
             "listmonk_delete_subscriber_done",
             subscriber_id=subscriber_id,
@@ -477,7 +578,12 @@ class ListmonkSDKClient:
             raise ListmonkClientError("listmonk package is not installed") from exc
 
         await self._ensure_login()
-        subscribers = await asyncio.to_thread(listmonk.subscribers, None, list_id)
+        subscribers = await self._sdk_call(
+            listmonk.subscribers,
+            None,
+            list_id,
+            action="subscribers",
+        )
         deltas: list[SubscriberDelta] = []
         for item in subscribers:
             subscriber_id = _extract_subscriber_id(item)

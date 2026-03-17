@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import structlog
-from structlog import contextvars as log_contextvars
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkSDKClient, SubscriberDelta, SubscriberState
 from app.clients.teyca import BonusOperation, TeycaAPIError, TeycaClient
@@ -57,7 +57,7 @@ class ConsentSyncWorker:
         listmonk_repo: ListmonkUsersRepository,
         accrual_repo: BonusAccrualRepository,
         subscriber_override: SubscriberState | None = None,
-        metrics: "ConsentSyncMetrics | None" = None,
+        metrics: ConsentSyncMetrics | None = None,
     ) -> None:
         user_id = int(pending.user_id)
         subscriber_id = int(pending.subscriber_id)
@@ -146,7 +146,10 @@ class ConsentSyncWorker:
                 user_id=user_id,
                 reason=BONUS_REASON_EMAIL_CONSENT,
                 idempotency_key=idempotency_key,
-                payload=_initial_consent_payload(subscriber_id=subscriber_id, list_ids=subscriber.list_ids),
+                payload=_initial_consent_payload(
+                    subscriber_id=subscriber_id,
+                    list_ids=subscriber.list_ids,
+                ),
             )
             if not reserved:
                 _inc(metrics, "accrual_resumed")
@@ -280,7 +283,9 @@ class ConsentSyncWorker:
                 for delta in deltas:
                     last_updated_at = delta.updated_at
                     last_subscriber_id = delta.subscriber_id
-                    mapped = await listmonk_repo.get_by_subscriber_id(subscriber_id=delta.subscriber_id)
+                    mapped = await listmonk_repo.get_by_subscriber_id(
+                        subscriber_id=delta.subscriber_id
+                    )
                     if mapped is None:
                         metrics.unmapped_subscribers += 1
                         logger.info(
@@ -291,7 +296,10 @@ class ConsentSyncWorker:
                         continue
 
                     processed += 1
-                    pending = SimpleNamespace(user_id=int(mapped.user_id), subscriber_id=delta.subscriber_id)
+                    pending = SimpleNamespace(
+                        user_id=int(mapped.user_id),
+                        subscriber_id=delta.subscriber_id,
+                    )
                     await self._process_pending_user(
                         pending=pending,
                         target_list_ids=target_list_ids,

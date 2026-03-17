@@ -74,7 +74,12 @@ async def test_update_when_merge_missing_and_old_data_exists() -> None:
     deps.old_db_repo.get_user_data.assert_awaited_once_with(phone="79039859055")
     deps.teyca_client.accrue_bonuses.assert_awaited_once()
     deps.teyca_client.update_pass_fields.assert_awaited_once()
-    deps.merge_repo.create.assert_awaited_once_with(user_id=20, source_event_type="UPDATE")
+    deps.merge_repo.create.assert_awaited_once_with(
+        user_id=20,
+        source_event_type="UPDATE",
+        source_event_id=None,
+        trace_id=None,
+    )
 
 
 @pytest.mark.asyncio

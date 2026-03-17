@@ -5,8 +5,8 @@ import asyncio
 import httpx
 import structlog
 
-from app.config import get_settings
 from app.clients.listmonk import ListmonkClientError
+from app.config import get_settings
 from app.logging_config import configure_logging, shutdown_logging
 from app.service_health import write_heartbeat
 from app.workers.listmonk_reconcile_worker import build_listmonk_reconcile_worker
@@ -43,7 +43,7 @@ async def _run() -> None:
                 await _safe_write_heartbeat({"stage": "in_progress"})
                 try:
                     await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
             restored = await task
             await _safe_write_heartbeat({"stage": "completed", "restored": restored})

@@ -21,23 +21,26 @@ class ListmonkUsersRepository:
     async def set_consent_pending(self, *, user_id: int) -> None:
         """Mark user for consent sync worker processing."""
         stmt = (
-            update(ListmonkUser)
-            .where(ListmonkUser.user_id == user_id)
-            .values(consent_pending=True)
+            update(ListmonkUser).where(ListmonkUser.user_id == user_id).values(consent_pending=True)
         )
         await self._session.execute(stmt)
 
     async def get_by_user_id(self, *, user_id: int) -> ListmonkUser | None:
         """Return listmonk state by user_id."""
-        stmt: Select[tuple[ListmonkUser]] = select(ListmonkUser).where(ListmonkUser.user_id == user_id)
+        stmt: Select[tuple[ListmonkUser]] = select(ListmonkUser).where(
+            ListmonkUser.user_id == user_id
+        )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def get_by_subscriber_id(self, *, subscriber_id: int) -> ListmonkUser | None:
         """Return listmonk state by subscriber_id."""
-        stmt: Select[tuple[ListmonkUser]] = select(ListmonkUser).where(
-            ListmonkUser.subscriber_id == subscriber_id
-        ).order_by(ListmonkUser.updated_at.desc().nullslast(), ListmonkUser.user_id.desc()).limit(2)
+        stmt: Select[tuple[ListmonkUser]] = (
+            select(ListmonkUser)
+            .where(ListmonkUser.subscriber_id == subscriber_id)
+            .order_by(ListmonkUser.updated_at.desc().nullslast(), ListmonkUser.user_id.desc())
+            .limit(2)
+        )
         result = await self._session.execute(stmt)
         rows = list(result.scalars().all())
         if not rows:

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.clients.listmonk import SubscriberDelta
+from app.clients.listmonk import ListmonkClientError, SubscriberDelta
 from app.workers.listmonk_reconcile_worker import (
     ListmonkReconcileWorker,
     ReconcileMetrics,
@@ -44,9 +44,11 @@ async def test_reconcile_restores_mapping_by_attribute_user_id() -> None:
         )
     ]
 
-    with patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls, patch(
-        "app.workers.listmonk_reconcile_worker.UsersRepository"
-    ) as users_repo_cls, patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls:
+    with (
+        patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.UsersRepository") as users_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls,
+    ):
         listmonk_repo = AsyncMock()
         listmonk_repo.get_by_subscriber_id.return_value = None
         listmonk_repo_cls.return_value = listmonk_repo
@@ -92,9 +94,11 @@ async def test_reconcile_restores_mapping_by_email_when_attribute_missing() -> N
         )
     ]
 
-    with patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls, patch(
-        "app.workers.listmonk_reconcile_worker.UsersRepository"
-    ) as users_repo_cls, patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls:
+    with (
+        patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.UsersRepository") as users_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls,
+    ):
         listmonk_repo = AsyncMock()
         listmonk_repo.get_by_subscriber_id.return_value = None
         listmonk_repo_cls.return_value = listmonk_repo
@@ -141,9 +145,11 @@ async def test_reconcile_skips_when_email_is_ambiguous() -> None:
         )
     ]
 
-    with patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls, patch(
-        "app.workers.listmonk_reconcile_worker.UsersRepository"
-    ) as users_repo_cls, patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls:
+    with (
+        patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.UsersRepository") as users_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls,
+    ):
         listmonk_repo = AsyncMock()
         listmonk_repo.get_by_subscriber_id.return_value = None
         listmonk_repo_cls.return_value = listmonk_repo
@@ -184,9 +190,11 @@ async def test_reconcile_restores_deleted_subscriber_from_local_mapping() -> Non
         list_ids=[4],
     )
 
-    with patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls, patch(
-        "app.workers.listmonk_reconcile_worker.UsersRepository"
-    ) as users_repo_cls, patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls:
+    with (
+        patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.UsersRepository") as users_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls,
+    ):
         listmonk_repo = AsyncMock()
         listmonk_repo_cls.return_value = listmonk_repo
 
@@ -242,6 +250,52 @@ async def test_reconcile_without_target_lists_returns_zero() -> None:
         listmonk_client=AsyncMock(),
     )
     assert await worker.run_once() == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_continues_when_list_fetch_fails() -> None:
+    worker = _worker()
+    worker.settings.listmonk_list_ids = "1,2"
+    worker.listmonk_client.get_updated_subscribers.side_effect = [
+        ListmonkClientError("timeout"),
+        [
+            SubscriberDelta(
+                subscriber_id=212,
+                status="enabled",
+                list_ids=[2],
+                updated_at=datetime(2026, 3, 6, 7, 20, tzinfo=UTC),
+                email="mapped@example.com",
+                attributes=None,
+            )
+        ],
+    ]
+
+    with (
+        patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.UsersRepository") as users_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls,
+    ):
+        listmonk_repo = AsyncMock()
+        listmonk_repo.get_by_subscriber_id.return_value = None
+        listmonk_repo.get_batch_after_user_id.return_value = []
+        listmonk_repo_cls.return_value = listmonk_repo
+
+        users_repo = AsyncMock()
+        users_repo.get_user_ids_by_email.return_value = [88]
+        users_repo_cls.return_value = users_repo
+
+        sync_repo = AsyncMock()
+        sync_repo.get_or_create.side_effect = [
+            SimpleNamespace(watermark_updated_at=None, watermark_subscriber_id=None),
+            SimpleNamespace(watermark_updated_at=None, watermark_subscriber_id=None),
+            SimpleNamespace(watermark_updated_at=None, watermark_subscriber_id=0),
+        ]
+        sync_repo_cls.return_value = sync_repo
+
+        restored = await worker.run_once()
+
+    assert restored == 1
+    listmonk_repo.upsert.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -326,11 +380,25 @@ async def test_run_consistency_scan_handles_restore_error_and_live_subscriber() 
     sync_repo = AsyncMock()
     sync_repo.get_or_create.return_value = SimpleNamespace(watermark_subscriber_id=0)
     listmonk_repo.get_batch_after_user_id.return_value = [
-        SimpleNamespace(user_id=10, subscriber_id=100, email="x@y.z", status="enabled", list_ids="1", attributes={}),
-        SimpleNamespace(user_id=11, subscriber_id=101, email="y@z.x", status="enabled", list_ids="1", attributes={}),
+        SimpleNamespace(
+            user_id=10,
+            subscriber_id=100,
+            email="x@y.z",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+        SimpleNamespace(
+            user_id=11,
+            subscriber_id=101,
+            email="y@z.x",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
     ]
     worker.listmonk_client.get_subscriber_state.side_effect = [SimpleNamespace(), None]
-    worker.listmonk_client.restore_subscriber.side_effect = RuntimeError("boom")
+    worker.listmonk_client.restore_subscriber.side_effect = ListmonkClientError("boom")
 
     metrics = ReconcileMetrics(batch_size=10)
     await worker._run_consistency_scan(
@@ -343,11 +411,97 @@ async def test_run_consistency_scan_handles_restore_error_and_live_subscriber() 
     assert metrics.consistency_scanned == 2
     assert metrics.consistency_missing == 1
     assert metrics.consistency_errors == 1
+    sync_repo.update_watermark.assert_awaited_once_with(
+        source="listmonk_consistency",
+        list_id=0,
+        updated_at=None,
+        subscriber_id=10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_consistency_scan_reraises_unexpected_restore_error() -> None:
+    worker = _worker()
+    listmonk_repo = AsyncMock()
+    sync_repo = AsyncMock()
+    sync_repo.get_or_create.return_value = SimpleNamespace(watermark_subscriber_id=0)
+    listmonk_repo.get_batch_after_user_id.return_value = [
+        SimpleNamespace(
+            user_id=11,
+            subscriber_id=101,
+            email="y@z.x",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+    ]
+    worker.listmonk_client.get_subscriber_state.return_value = None
+    worker.listmonk_client.restore_subscriber.side_effect = RuntimeError("boom")
+
+    metrics = ReconcileMetrics(batch_size=10)
+    with pytest.raises(RuntimeError, match="boom"):
+        await worker._run_consistency_scan(
+            listmonk_repo=listmonk_repo,
+            sync_repo=sync_repo,
+            metrics=metrics,
+            limit=100,
+        )
+
+    assert metrics.consistency_scanned == 1
+    assert metrics.consistency_missing == 1
+    assert metrics.consistency_errors == 0
+    sync_repo.update_watermark.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_consistency_scan_keeps_failed_state_check_row_for_retry() -> None:
+    worker = _worker()
+    listmonk_repo = AsyncMock()
+    sync_repo = AsyncMock()
+    sync_repo.get_or_create.return_value = SimpleNamespace(watermark_subscriber_id=7)
+    listmonk_repo.get_batch_after_user_id.return_value = [
+        SimpleNamespace(
+            user_id=10,
+            subscriber_id=100,
+            email="x@y.z",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+        SimpleNamespace(
+            user_id=11,
+            subscriber_id=101,
+            email="y@z.x",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+    ]
+    worker.listmonk_client.get_subscriber_state.side_effect = ListmonkClientError("timeout")
+
+    metrics = ReconcileMetrics(batch_size=10)
+    await worker._run_consistency_scan(
+        listmonk_repo=listmonk_repo,
+        sync_repo=sync_repo,
+        metrics=metrics,
+        limit=100,
+    )
+
+    assert metrics.consistency_scanned == 1
+    assert metrics.consistency_errors == 1
+    worker.listmonk_client.get_subscriber_state.assert_awaited_once_with(subscriber_id=100)
+    sync_repo.update_watermark.assert_awaited_once_with(
+        source="listmonk_consistency",
+        list_id=0,
+        updated_at=None,
+        subscriber_id=7,
+    )
 
 
 def test_reconcile_build_and_helpers() -> None:
-    with patch("app.workers.listmonk_reconcile_worker.get_settings", return_value=SimpleNamespace()), patch(
-        "app.workers.listmonk_reconcile_worker.ListmonkSDKClient"
+    with (
+        patch("app.workers.listmonk_reconcile_worker.get_settings", return_value=SimpleNamespace()),
+        patch("app.workers.listmonk_reconcile_worker.ListmonkSDKClient"),
     ):
         worker = build_listmonk_reconcile_worker()
     assert worker is not None

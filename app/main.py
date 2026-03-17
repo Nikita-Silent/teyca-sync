@@ -9,7 +9,8 @@ import aio_pika
 import structlog
 from fastapi import FastAPI
 
-from app.api.webhook import health_router, router as webhook_router
+from app.api.webhook import health_router
+from app.api.webhook import router as webhook_router
 from app.config import get_settings
 from app.logging_config import configure_logging, shutdown_logging
 from app.mq.publisher import MQPublisher

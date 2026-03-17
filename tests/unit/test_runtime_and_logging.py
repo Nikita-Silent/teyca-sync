@@ -224,6 +224,52 @@ async def test_consumers_runner_callback_ack_and_reject() -> None:
 
 
 @pytest.mark.asyncio
+async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+        old_db_repo=AsyncMock(),
+        _process_semaphore=asyncio.Semaphore(1),
+    )
+
+    active = 0
+    max_active = 0
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release = asyncio.Event()
+    started_count = 0
+
+    async def process_side_effect(*_: object, **__: object) -> None:
+        nonlocal active, max_active, started_count
+        active += 1
+        max_active = max(max_active, active)
+        started_count += 1
+        if started_count == 1:
+            first_started.set()
+        else:
+            second_started.set()
+        await release.wait()
+        active -= 1
+
+    msg1 = AsyncMock()
+    msg2 = AsyncMock()
+    with patch.object(run_queue_consumers.ConsumersRunner, "_process", new=process_side_effect):
+        task1 = asyncio.create_task(runner._callback(msg1, run_queue_consumers.QUEUE_CREATE))
+        task2 = asyncio.create_task(runner._callback(msg2, run_queue_consumers.QUEUE_CREATE))
+        await first_started.wait()
+        await asyncio.sleep(0)
+        assert second_started.is_set() is False
+        release.set()
+        await asyncio.gather(task1, task2)
+
+    assert max_active == 1
+    assert second_started.is_set() is True
+    msg1.ack.assert_awaited_once()
+    msg2.ack.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_consumers_runner_consume_commit_and_rollback_paths() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=SimpleNamespace(rabbitmq_url="amqp://x"),
@@ -371,6 +417,51 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
         run_queue_consumers.main()
         run_mock.call_args.args[0].close()
     run_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_consumers_runner_run_clamps_concurrency_to_db_capacity() -> None:
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=SimpleNamespace(
+            rabbitmq_url="amqp://x",
+            rabbitmq_consumer_prefetch_count=10,
+            rabbitmq_consumer_max_concurrency=9,
+            database_pool_size=2,
+            database_pool_max_overflow=0,
+        ),
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+        old_db_repo=AsyncMock(),
+    )
+    queue_obj = AsyncMock()
+    channel = AsyncMock()
+    channel.declare_queue.return_value = queue_obj
+    connection = AsyncMock()
+    connection.channel.return_value = channel
+    heartbeat_task = DummyAwaitableTask()
+
+    with (
+        patch(
+            "app.workers.run_queue_consumers.aio_pika.connect_robust",
+            new=AsyncMock(return_value=connection),
+        ),
+        patch("app.workers.run_queue_consumers.asyncio.Event") as event_cls,
+        patch(
+            "app.workers.run_queue_consumers._start_heartbeat_task",
+            return_value=heartbeat_task,
+        ),
+        patch("app.workers.run_queue_consumers.logger") as logger,
+    ):
+        waiter = AsyncMock(side_effect=RuntimeError("stop"))
+        event_cls.return_value.wait = waiter
+        with pytest.raises(RuntimeError):
+            await runner.run()
+
+    logger.info.assert_called_once()
+    kwargs = logger.info.call_args.kwargs
+    assert kwargs["prefetch_count"] == 10
+    assert kwargs["db_capacity"] == 2
+    assert kwargs["max_concurrency"] == 2
 
 
 @pytest.mark.asyncio

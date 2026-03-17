@@ -20,8 +20,8 @@ from app.clients.listmonk import (
     _extract_updated_at,
     _is_after_watermark,
     _is_blocked_status,
-    _is_conflict_error,
     _is_confirmed_status,
+    _is_conflict_error,
     _normalize_email,
     _normalize_list_ids,
     _normalize_status_for_restore,
@@ -64,27 +64,42 @@ def test_subscriber_state_helpers() -> None:
     legacy = SubscriberState(subscriber_id=3, status="confirmed", list_ids=[1], list_statuses=None)
     assert legacy.is_confirmed_for_any([1]) is True
     assert legacy.is_confirmed_for_any([]) is True
-    assert SubscriberState(subscriber_id=4, status="disabled", list_ids=[], list_statuses=None).is_confirmed_for_all(
-        [1]
-    ) is False
-    assert SubscriberState(
-        subscriber_id=5,
-        status="enabled",
-        list_ids=[],
-        list_statuses={1: "unconfirmed"},
-    ).is_confirmed_for_any([]) is False
-    assert SubscriberState(
-        subscriber_id=6,
-        status="enabled",
-        list_ids=[],
-        list_statuses={1: "confirmed"},
-    ).is_confirmed_for_any([]) is True
-    assert SubscriberState(subscriber_id=7, status="disabled", list_ids=[], list_statuses=None).is_confirmed_for_any(
-        [1]
-    ) is False
-    assert SubscriberState(subscriber_id=8, status="enabled", list_ids=[2], list_statuses=None).is_confirmed_for_all(
-        []
-    ) is True
+    assert (
+        SubscriberState(
+            subscriber_id=4, status="disabled", list_ids=[], list_statuses=None
+        ).is_confirmed_for_all([1])
+        is False
+    )
+    assert (
+        SubscriberState(
+            subscriber_id=5,
+            status="enabled",
+            list_ids=[],
+            list_statuses={1: "unconfirmed"},
+        ).is_confirmed_for_any([])
+        is False
+    )
+    assert (
+        SubscriberState(
+            subscriber_id=6,
+            status="enabled",
+            list_ids=[],
+            list_statuses={1: "confirmed"},
+        ).is_confirmed_for_any([])
+        is True
+    )
+    assert (
+        SubscriberState(
+            subscriber_id=7, status="disabled", list_ids=[], list_statuses=None
+        ).is_confirmed_for_any([1])
+        is False
+    )
+    assert (
+        SubscriberState(
+            subscriber_id=8, status="enabled", list_ids=[2], list_statuses=None
+        ).is_confirmed_for_all([])
+        is True
+    )
 
 
 def test_listmonk_extract_helpers() -> None:
@@ -110,7 +125,11 @@ def test_listmonk_extract_helpers() -> None:
     assert _extract_updated_at(SimpleNamespace(created_at=now)) == now
     assert _extract_updated_at(SimpleNamespace()) == datetime.min.replace(tzinfo=UTC)
 
-    assert _extract_list_ids(SimpleNamespace(lists=[1, {"id": "2"}, SimpleNamespace(id=3)])) == [1, 2, 3]
+    assert _extract_list_ids(SimpleNamespace(lists=[1, {"id": "2"}, SimpleNamespace(id=3)])) == [
+        1,
+        2,
+        3,
+    ]
     assert _extract_list_ids(SimpleNamespace(lists=[{"id": "bad"}, SimpleNamespace(id="7")])) == []
     assert _extract_list_ids(SimpleNamespace(lists=None)) == []
 
@@ -131,7 +150,10 @@ def test_listmonk_extract_helpers() -> None:
     assert _normalize_email("   ") is None
     assert _normalize_email(None) is None
     assert _normalize_list_ids([2, 1, 2, 0, -1]) == [1, 2]
-    assert _build_subscriber_name(attributes={"fio": "  Ivan Ivanov  "}, fallback_email="x@y.z") == "Ivan Ivanov"
+    assert (
+        _build_subscriber_name(attributes={"fio": "  Ivan Ivanov  "}, fallback_email="x@y.z")
+        == "Ivan Ivanov"
+    )
     assert (
         _build_subscriber_name(
             attributes={"first_name": "Ivan", "last_name": "Ivanov", "pat_name": "Ivanovich"},
@@ -200,8 +222,9 @@ async def test_ensure_login_and_get_subscriber_state() -> None:
         )
     )
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         await client._ensure_login()
@@ -219,10 +242,13 @@ async def test_get_subscriber_state_returns_none_for_empty_payload_or_status() -
     fake = SimpleNamespace()
     fake.set_url_base = MagicMock()
     fake.login = MagicMock(return_value=True)
-    fake.subscriber_by_id = MagicMock(side_effect=[None, SimpleNamespace(status="", lists=[{"id": "bad"}])])
+    fake.subscriber_by_id = MagicMock(
+        side_effect=[None, SimpleNamespace(status="", lists=[{"id": "bad"}])]
+    )
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         assert await client.get_subscriber_state(subscriber_id=1) is None
@@ -241,8 +267,9 @@ async def test_get_subscriber_state_collects_object_list_ids() -> None:
         )
     )
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         state = await client.get_subscriber_state(subscriber_id=3)
@@ -256,8 +283,9 @@ async def test_ensure_login_failure() -> None:
     fake.set_url_base = MagicMock()
     fake.login = MagicMock(return_value=False)
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         with pytest.raises(ListmonkClientError):
@@ -274,12 +302,15 @@ async def test_upsert_subscriber_create_update_and_conflict_paths() -> None:
     fake.update_subscriber = MagicMock(return_value={"status": "enabled"})
     fake.subscriber_by_email = MagicMock(return_value=SimpleNamespace(id=88, status="enabled"))
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         with pytest.raises(ListmonkClientError):
-            await client.upsert_subscriber(email=None, list_ids=[1], attributes={}, subscriber_id=None)
+            await client.upsert_subscriber(
+                email=None, list_ids=[1], attributes={}, subscriber_id=None
+            )
 
         state = await client.upsert_subscriber(
             email="x@y.z",
@@ -301,7 +332,9 @@ async def test_upsert_subscriber_create_update_and_conflict_paths() -> None:
         conflict = RuntimeError("409 conflict")
         fake.create_subscriber.side_effect = conflict
         fake.update_subscriber.return_value = {"id": 88, "status": "enabled"}
-        fake.subscriber_by_email.return_value = SimpleNamespace(id=88, status="enabled", email="x@y.z")
+        fake.subscriber_by_email.return_value = SimpleNamespace(
+            id=88, status="enabled", email="x@y.z"
+        )
         state = await client.upsert_subscriber(
             email="x@y.z",
             list_ids=[1],
@@ -330,8 +363,9 @@ async def test_upsert_subscriber_normalizes_input_and_requires_list_ids() -> Non
     fake.update_subscriber = MagicMock(return_value={"status": "enabled"})
     fake.subscriber_by_email = MagicMock(return_value=SimpleNamespace(id=88, status="enabled"))
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         state = await client.upsert_subscriber(
@@ -373,11 +407,14 @@ async def test_upsert_subscriber_update_conflict_fallbacks_to_subscriber_by_emai
     fake.subscriber_by_email = MagicMock(
         return_value=SimpleNamespace(id=88, status="enabled", email="user@example.com")
     )
-    conflict = RuntimeError("pq: duplicate key value violates unique constraint subscribers_email_key")
+    conflict = RuntimeError(
+        "pq: duplicate key value violates unique constraint subscribers_email_key"
+    )
     fake.update_subscriber = MagicMock(side_effect=[conflict, {"status": "enabled"}])
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         state = await client.upsert_subscriber(
@@ -402,8 +439,9 @@ async def test_upsert_subscriber_edge_paths() -> None:
     fake.update_subscriber = MagicMock(return_value={"status": "enabled"})
     fake.subscriber_by_email = MagicMock(return_value=None)
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         with pytest.raises(ListmonkClientError):
@@ -441,7 +479,9 @@ async def test_restore_delete_and_get_updated_subscribers() -> None:
     fake = SimpleNamespace()
     fake.set_url_base = MagicMock()
     fake.login = MagicMock(return_value=True)
-    fake.subscriber_by_id = MagicMock(return_value=SimpleNamespace(id=1, status="enabled", lists=[1]))
+    fake.subscriber_by_id = MagicMock(
+        return_value=SimpleNamespace(id=1, status="enabled", lists=[1])
+    )
     fake.update_subscriber = MagicMock(return_value={"status": "enabled"})
     fake.delete_subscriber = MagicMock()
     fake.create_subscriber = MagicMock(return_value={"id": 1, "status": "enabled"})
@@ -464,8 +504,9 @@ async def test_restore_delete_and_get_updated_subscribers() -> None:
         ]
     )
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
 
@@ -517,8 +558,9 @@ async def test_restore_and_import_error_paths() -> None:
     fake.create_subscriber = MagicMock(return_value={"id": 1, "status": "enabled"})
     fake.subscribers = MagicMock(return_value=[])
 
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         with patch.object(client, "get_subscriber_state", new=AsyncMock(return_value=None)):
@@ -553,16 +595,22 @@ async def test_import_error_branches_after_login_and_other_edges() -> None:
     client._logged_in = True
     with patch("builtins.__import__", side_effect=ModuleNotFoundError("listmonk")):
         with pytest.raises(ListmonkClientError):
-            await client.upsert_subscriber(email="x@y.z", list_ids=[1], attributes={}, subscriber_id=10)
+            await client.upsert_subscriber(
+                email="x@y.z", list_ids=[1], attributes={}, subscriber_id=10
+            )
         with pytest.raises(ListmonkClientError):
-            await client.upsert_subscriber(email="x@y.z", list_ids=[1], attributes={}, subscriber_id=None)
+            await client.upsert_subscriber(
+                email="x@y.z", list_ids=[1], attributes={}, subscriber_id=None
+            )
         with pytest.raises(ListmonkClientError):
             await client.delete_subscriber(subscriber_id=1)
 
         with patch.object(
             client,
             "upsert_subscriber",
-            new=AsyncMock(return_value=SubscriberState(subscriber_id=1, status="enabled", list_ids=[1])),
+            new=AsyncMock(
+                return_value=SubscriberState(subscriber_id=1, status="enabled", list_ids=[1])
+            ),
         ):
             with pytest.raises(ListmonkClientError):
                 await client.restore_subscriber(
@@ -580,8 +628,9 @@ async def test_upsert_update_fallback_status_when_state_missing() -> None:
     fake.login = MagicMock(return_value=True)
     fake.subscriber_by_id = MagicMock(return_value=SimpleNamespace(status="confirmed", id=10))
     fake.update_subscriber = MagicMock(return_value={"status": "updated"})
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         with patch.object(client, "get_subscriber_state", new=AsyncMock(return_value=None)):
@@ -600,7 +649,9 @@ async def test_upsert_non_conflict_error_and_restore_fallback_and_watermark_skip
     fake.set_url_base = MagicMock()
     fake.login = MagicMock(return_value=True)
     fake.create_subscriber = MagicMock(side_effect=RuntimeError("boom"))
-    fake.subscriber_by_id = MagicMock(return_value=SimpleNamespace(id=1, status="enabled", lists=[1]))
+    fake.subscriber_by_id = MagicMock(
+        return_value=SimpleNamespace(id=1, status="enabled", lists=[1])
+    )
     fake.update_subscriber = MagicMock(return_value={"status": "enabled"})
     fake.subscribers = MagicMock(
         return_value=[
@@ -612,18 +663,26 @@ async def test_upsert_non_conflict_error_and_restore_fallback_and_watermark_skip
             )
         ]
     )
-    with patch.dict("sys.modules", {"listmonk": fake}), patch(
-        "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
     ):
         client = ListmonkSDKClient(_settings())
         with pytest.raises(RuntimeError):
-            await client.upsert_subscriber(email="x@y.z", list_ids=[1], attributes={}, subscriber_id=None)
+            await client.upsert_subscriber(
+                email="x@y.z", list_ids=[1], attributes={}, subscriber_id=None
+            )
 
-        with patch.object(
-            client,
-            "upsert_subscriber",
-            new=AsyncMock(return_value=SubscriberState(subscriber_id=1, status="enabled", list_ids=[1])),
-        ), patch.object(client, "get_subscriber_state", new=AsyncMock(return_value=None)):
+        with (
+            patch.object(
+                client,
+                "upsert_subscriber",
+                new=AsyncMock(
+                    return_value=SubscriberState(subscriber_id=1, status="enabled", list_ids=[1])
+                ),
+            ),
+            patch.object(client, "get_subscriber_state", new=AsyncMock(return_value=None)),
+        ):
             restored = await client.restore_subscriber(
                 email="x@y.z",
                 list_ids=[1],
@@ -639,3 +698,113 @@ async def test_upsert_non_conflict_error_and_restore_fallback_and_watermark_skip
             limit=10,
         )
         assert deltas == []
+
+
+@pytest.mark.asyncio
+async def test_get_updated_subscribers_retries_on_transient_timeout() -> None:
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.subscribers = MagicMock(return_value=[])
+
+    subscribers_calls = 0
+
+    async def flaky_to_thread(func: object, *args: object, **kwargs: object) -> object:
+        nonlocal subscribers_calls
+        if func is fake.subscribers:
+            subscribers_calls += 1
+            if subscribers_calls == 1:
+                raise httpx.ReadTimeout("timed out")
+        return func(*args, **kwargs)
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=flaky_to_thread)),
+    ):
+        client = ListmonkSDKClient(_settings())
+        deltas = await client.get_updated_subscribers(
+            list_id=1,
+            watermark_updated_at=None,
+            watermark_subscriber_id=None,
+            limit=10,
+        )
+
+    assert deltas == []
+    assert subscribers_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_get_updated_subscribers_wraps_asyncio_timeout_as_client_error() -> None:
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.subscribers = MagicMock(return_value=[])
+
+    async def timeout_to_thread(func: object, *args: object, **kwargs: object) -> object:
+        if func is fake.subscribers:
+            raise TimeoutError()
+        return func(*args, **kwargs)
+
+    settings = SimpleNamespace(
+        listmonk_url="http://listmonk",
+        listmonk_user="u",
+        listmonk_password="p",
+        listmonk_request_max_retries=0,
+    )
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch(
+            "app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=timeout_to_thread)
+        ),
+    ):
+        client = ListmonkSDKClient(settings)
+        with pytest.raises(ListmonkClientError):
+            await client.get_updated_subscribers(
+                list_id=1,
+                watermark_updated_at=None,
+                watermark_subscriber_id=None,
+                limit=10,
+            )
+
+
+@pytest.mark.asyncio
+async def test_upsert_subscriber_does_not_retry_mutating_call_after_timeout() -> None:
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.create_subscriber = MagicMock()
+
+    create_attempts = 0
+
+    async def timeout_once_per_write(func: object, *args: object, **kwargs: object) -> object:
+        nonlocal create_attempts
+        if func is fake.create_subscriber:
+            create_attempts += 1
+            raise TimeoutError()
+        return func(*args, **kwargs)
+
+    settings = SimpleNamespace(
+        listmonk_url="http://listmonk",
+        listmonk_user="u",
+        listmonk_password="p",
+        listmonk_request_max_retries=5,
+    )
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch(
+            "app.clients.listmonk.asyncio.to_thread",
+            new=AsyncMock(side_effect=timeout_once_per_write),
+        ),
+    ):
+        client = ListmonkSDKClient(settings)
+        with pytest.raises(ListmonkClientError):
+            await client.upsert_subscriber(
+                email="x@y.z",
+                list_ids=[1],
+                attributes={},
+                subscriber_id=None,
+            )
+
+    assert create_attempts == 1

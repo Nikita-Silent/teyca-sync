@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
-from typing import Callable
 from uuid import uuid4
 
 import httpx
@@ -31,7 +31,7 @@ class BonusOperation:
         return {"value": self.value}
 
     @staticmethod
-    def one_shot(value: str) -> "BonusOperation":
+    def one_shot(value: str) -> BonusOperation:
         """Create operation payload with a single value."""
         return BonusOperation(value=value)
 
