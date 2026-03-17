@@ -25,6 +25,7 @@ from app.db.session import SessionLocal
 from app.logging_config import configure_logging, shutdown_logging
 from app.mq.queues import QUEUE_CREATE, QUEUE_DELETE, QUEUE_UPDATE
 from app.repositories.bonus_accrual import BonusAccrualRepository
+from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
@@ -57,6 +58,7 @@ class ConsumersRunner:
                 settings=self.settings,
                 users_repo=UsersRepository(session),
                 listmonk_repo=ListmonkUsersRepository(session),
+                email_repair_repo=EmailRepairLogRepository(session),
                 merge_repo=MergeLogRepository(session),
                 old_db_repo=self.old_db_repo,
                 listmonk_client=self.listmonk_client,
@@ -75,6 +77,7 @@ class ConsumersRunner:
                 settings=self.settings,
                 users_repo=UsersRepository(session),
                 listmonk_repo=ListmonkUsersRepository(session),
+                email_repair_repo=EmailRepairLogRepository(session),
                 merge_repo=MergeLogRepository(session),
                 old_db_repo=self.old_db_repo,
                 listmonk_client=self.listmonk_client,

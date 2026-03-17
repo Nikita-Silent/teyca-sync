@@ -119,11 +119,11 @@ def _ensure_directory(path: Path) -> None:
 
 
 async def _path_exists(path: Path) -> bool:
-    return await asyncio.to_thread(path.exists)
+    return path.exists()
 
 
 async def _read_text(path: Path) -> str:
-    return await asyncio.to_thread(path.read_text, encoding="utf-8")
+    return path.read_text(encoding="utf-8")
 
 
 HEARTBEAT_DIR = _resolve_heartbeat_dir()

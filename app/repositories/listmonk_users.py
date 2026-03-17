@@ -1,15 +1,31 @@
 """Repository for listmonk user sync state."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import Select, delete, select, update
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ListmonkUser
 
 logger = structlog.get_logger()
+
+
+class DuplicateListmonkUserEmailError(RuntimeError):
+    """Raised when one email is linked to multiple users in listmonk_users."""
+
+    def __init__(
+        self, *, normalized_email: str, user_id: int, existing_user_ids: list[int]
+    ) -> None:
+        self.normalized_email = normalized_email
+        self.user_id = user_id
+        self.existing_user_ids = existing_user_ids
+        super().__init__(
+            f"Email {normalized_email} already linked to another user in listmonk_users"
+        )
 
 
 class ListmonkUsersRepository:
@@ -54,6 +70,33 @@ class ListmonkUsersRepository:
             )
         return rows[0]
 
+    async def get_by_email(self, *, email: str) -> list[ListmonkUser]:
+        """Return all rows mapped to normalized email."""
+        normalized_email = _normalize_email(email)
+        if normalized_email is None:
+            return []
+        stmt: Select[tuple[ListmonkUser]] = (
+            select(ListmonkUser)
+            .where(ListmonkUser.email == normalized_email)
+            .order_by(ListmonkUser.user_id.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_duplicate_emails(self, *, limit: int | None = None) -> list[str]:
+        """Return normalized emails that currently map to multiple users."""
+        stmt: Select[tuple[str | None]] = (
+            select(ListmonkUser.email)
+            .where(ListmonkUser.email.is_not(None))
+            .group_by(ListmonkUser.email)
+            .having(func.count(ListmonkUser.user_id) > 1)
+            .order_by(ListmonkUser.email.asc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(max(1, limit))
+        result = await self._session.execute(stmt)
+        return [str(value) for value in result.scalars().all()]
+
     async def upsert(
         self,
         *,
@@ -66,6 +109,24 @@ class ListmonkUsersRepository:
     ) -> None:
         """Insert/update listmonk state row."""
         normalized_email = _normalize_email(email)
+        if normalized_email is not None:
+            duplicate_user_ids = await self._find_other_user_ids_by_email(
+                user_id=user_id,
+                email=normalized_email,
+            )
+            if duplicate_user_ids:
+                logger.error(
+                    "listmonk_users_duplicate_email",
+                    email=normalized_email,
+                    user_id=user_id,
+                    duplicate_rows=len(duplicate_user_ids),
+                    existing_user_ids=duplicate_user_ids,
+                )
+                raise DuplicateListmonkUserEmailError(
+                    normalized_email=normalized_email,
+                    user_id=user_id,
+                    existing_user_ids=duplicate_user_ids,
+                )
         list_ids_text = ",".join(str(item) for item in list_ids)
         insert_stmt = insert(ListmonkUser).values(
             user_id=user_id,
@@ -134,6 +195,21 @@ class ListmonkUsersRepository:
         """Delete listmonk state row."""
         stmt = delete(ListmonkUser).where(ListmonkUser.user_id == user_id)
         await self._session.execute(stmt)
+
+    async def clear_email(self, *, user_id: int) -> None:
+        """Clear stored email for a listmonk mapping."""
+        stmt = update(ListmonkUser).where(ListmonkUser.user_id == user_id).values(email=None)
+        await self._session.execute(stmt)
+
+    async def _find_other_user_ids_by_email(self, *, user_id: int, email: str) -> list[int]:
+        stmt: Select[tuple[int]] = (
+            select(ListmonkUser.user_id)
+            .where(ListmonkUser.email == email, ListmonkUser.user_id != user_id)
+            .order_by(ListmonkUser.user_id.asc())
+            .limit(2)
+        )
+        result = await self._session.execute(stmt)
+        return [int(item) for item in result.scalars().all()]
 
 
 def _normalize_email(raw: object) -> str | None:

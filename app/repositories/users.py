@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Select, delete, func, select, text
+from sqlalchemy import Select, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,6 +87,11 @@ class UsersRepository:
     async def delete_by_user_id(self, *, user_id: int) -> None:
         """Delete user by primary key."""
         stmt = delete(User).where(User.user_id == user_id)
+        await self._session.execute(stmt)
+
+    async def clear_email(self, *, user_id: int) -> None:
+        """Clear stored email for a user."""
+        stmt = update(User).where(User.user_id == user_id).values(email=None)
         await self._session.execute(stmt)
 
 

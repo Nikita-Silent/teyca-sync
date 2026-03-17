@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.consumers.update_user import UpdateConsumerDeps, handle
+from app.repositories.listmonk_users import DuplicateListmonkUserEmailError
 from app.repositories.old_db import OldUserData
 
 
@@ -27,6 +28,7 @@ def _deps() -> UpdateConsumerDeps:
         ),
         users_repo=AsyncMock(),
         listmonk_repo=AsyncMock(),
+        email_repair_repo=AsyncMock(),
         merge_repo=AsyncMock(),
         old_db_repo=AsyncMock(),
         listmonk_client=AsyncMock(),
@@ -134,3 +136,32 @@ async def test_update_invalid_email_blocks_and_marks_existing_subscriber() -> No
         confirmed=False,
         status="blocked",
     )
+
+
+@pytest.mark.asyncio
+async def test_update_duplicate_email_schedules_repair_and_skips_requeue_path() -> None:
+    deps = _deps()
+    deps.merge_repo.exists.return_value = True
+    deps.listmonk_repo.get_by_user_id.return_value = None
+    deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
+        subscriber_id=904,
+        status="enabled",
+        list_ids=[3],
+    )
+    deps.listmonk_repo.upsert.side_effect = DuplicateListmonkUserEmailError(
+        normalized_email="duplicate@example.com",
+        user_id=20,
+        existing_user_ids=[21],
+    )
+
+    await handle(_payload(email="duplicate@example.com"), deps=deps)
+
+    deps.email_repair_repo.create_pending.assert_awaited_once_with(
+        normalized_email="duplicate@example.com",
+        incoming_user_id=20,
+        existing_user_id=21,
+        source_event_type="UPDATE",
+        source_event_id=None,
+        trace_id=None,
+    )
+    deps.listmonk_repo.set_consent_pending.assert_not_awaited()

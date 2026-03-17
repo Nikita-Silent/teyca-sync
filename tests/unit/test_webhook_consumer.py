@@ -20,7 +20,10 @@ def mock_publisher() -> AsyncMock:
 
 @pytest.fixture(autouse=True)
 def _override_publisher(mock_publisher: AsyncMock) -> None:
-    app.dependency_overrides[get_mq_publisher] = lambda: mock_publisher
+    async def override_publisher() -> AsyncMock:
+        return mock_publisher
+
+    app.dependency_overrides[get_mq_publisher] = override_publisher
     yield
     app.dependency_overrides.pop(get_mq_publisher, None)
 
