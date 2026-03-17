@@ -22,19 +22,33 @@ async def test_users_repository_paths() -> None:
     session.execute.assert_awaited()
 
     session.execute.reset_mock()
-    session.execute.return_value = SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(user_id=1))
+    session.execute.return_value = SimpleNamespace(
+        scalar_one_or_none=lambda: SimpleNamespace(user_id=1)
+    )
     user = await repo.get_by_user_id(user_id=1)
     assert user is not None
 
-    session.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [1, "2"]))
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: [1, "2"])
+    )
     ids = await repo.get_user_ids_by_email(email=" USER@example.com ", limit=0)
     assert ids == [1, 2]
     assert await repo.get_user_ids_by_email(email="  ") == []
 
     session.execute.reset_mock()
-    await repo.upsert(user_id=1, profile={"email": "  X@Y.Z  ", "summ": 10})
+    await repo.upsert(
+        user_id=1,
+        profile={
+            "email": "  X@Y.Z  ",
+            "summ": 10,
+            "referal": "  4243447  ",
+            "tags": {"values": [892]},
+        },
+    )
     users_upsert_stmt = session.execute.await_args_list[0].args[0]
     assert users_upsert_stmt.compile().params["email"] == "x@y.z"
+    assert users_upsert_stmt.compile().params["referal"] == "4243447"
+    assert users_upsert_stmt.compile().params["tags"] == {"values": [892]}
 
     await repo.delete_by_user_id(user_id=1)
     assert session.execute.await_count >= 2
@@ -51,7 +65,9 @@ async def test_listmonk_users_repository_paths() -> None:
 
     session.execute.return_value = SimpleNamespace(scalar_one_or_none=lambda: "row")
     assert await repo.get_by_user_id(user_id=1) == "row"
-    session.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["row"]))
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: ["row"])
+    )
     assert await repo.get_by_subscriber_id(subscriber_id=10) == "row"
     session.execute.return_value = SimpleNamespace(
         scalars=lambda: SimpleNamespace(
@@ -75,7 +91,9 @@ async def test_listmonk_users_repository_paths() -> None:
     listmonk_upsert_stmt = session.execute.await_args_list[0].args[0]
     assert listmonk_upsert_stmt.compile().params["email"] == "u@example.com"
 
-    session.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["a", "b"]))
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: ["a", "b"])
+    )
     assert await repo.get_pending_batch(limit=10) == ["a", "b"]
     assert await repo.get_batch_after_user_id(last_user_id=1, limit=10) == ["a", "b"]
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from app.workers.legacy_snapshot_importer import (
     _to_optional_bool,
     _to_optional_float,
     _to_optional_int,
+    _to_optional_json_object,
 )
 
 
@@ -47,6 +49,13 @@ def test_optional_numeric_parsers() -> None:
     assert _to_optional_float("bad") is None
 
 
+def test_optional_json_object_parser() -> None:
+    assert _to_optional_json_object({"values": [892]}) == {"values": [892]}
+    assert _to_optional_json_object('{"values":[893]}') == {"values": [893]}
+    assert _to_optional_json_object('["bad"]') is None
+    assert _to_optional_json_object("bad") is None
+
+
 def test_optional_bool_and_datetime_parsers() -> None:
     assert _to_optional_bool(True) is True
     assert _to_optional_bool("yes") is True
@@ -67,8 +76,12 @@ async def test_run_uses_rollback_in_dry_run() -> None:
     source_engine = AsyncMock()
     source_engine.connect = AsyncMock(return_value=source_conn)
 
-    with patch("app.workers.legacy_snapshot_importer.create_async_engine", return_value=source_engine):
-        importer = LegacySnapshotImporter(source_db_url="postgresql+asyncpg://legacy", session=session)
+    with patch(
+        "app.workers.legacy_snapshot_importer.create_async_engine", return_value=source_engine
+    ):
+        importer = LegacySnapshotImporter(
+            source_db_url="postgresql+asyncpg://legacy", session=session
+        )
         importer._ensure_target_is_empty = AsyncMock()
         importer._import_users = AsyncMock(return_value=(10, 0))
         importer._import_listmonk_users = AsyncMock(return_value=(7, 0))
@@ -99,8 +112,12 @@ async def test_run_uses_commit_without_dry_run() -> None:
     source_engine = AsyncMock()
     source_engine.connect = AsyncMock(return_value=source_conn)
 
-    with patch("app.workers.legacy_snapshot_importer.create_async_engine", return_value=source_engine):
-        importer = LegacySnapshotImporter(source_db_url="postgresql+asyncpg://legacy", session=session)
+    with patch(
+        "app.workers.legacy_snapshot_importer.create_async_engine", return_value=source_engine
+    ):
+        importer = LegacySnapshotImporter(
+            source_db_url="postgresql+asyncpg://legacy", session=session
+        )
         importer._ensure_target_is_empty = AsyncMock()
         importer._import_users = AsyncMock(return_value=(1, 0))
         importer._import_listmonk_users = AsyncMock(return_value=(1, 0))
@@ -111,3 +128,52 @@ async def test_run_uses_commit_without_dry_run() -> None:
 
     session.commit.assert_awaited_once()
     session.rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_import_users_maps_referal_and_tags() -> None:
+    session = AsyncMock()
+    importer = LegacySnapshotImporter(source_db_url="postgresql+asyncpg://legacy", session=session)
+    importer._insert_rows_in_chunks = AsyncMock()
+
+    source_conn = AsyncMock()
+    source_conn.execute.return_value = SimpleNamespace(
+        mappings=lambda: SimpleNamespace(
+            all=lambda: [
+                {
+                    "user_id": 1,
+                    "email": "user@example.com",
+                    "phone": "79039859055",
+                    "first_name": "Ivan",
+                    "last_name": "Ivanov",
+                    "pat_name": None,
+                    "birthday": None,
+                    "gender": None,
+                    "barcode": None,
+                    "discount": None,
+                    "bonus": "10",
+                    "loyalty_level": None,
+                    "summ": "20",
+                    "summ_all": "30",
+                    "summ_last": "40",
+                    "visits": "2",
+                    "visits_all": "3",
+                    "date_last": None,
+                    "city": "Novokuznetsk",
+                    "referal": "4243447",
+                    "tags": {"values": [892]},
+                    "created_at": None,
+                    "updated_at": None,
+                }
+            ]
+        )
+    )
+
+    imported, skipped = await importer._import_users(source_conn=source_conn)
+
+    assert imported == 1
+    assert skipped == 0
+    importer._insert_rows_in_chunks.assert_awaited_once()
+    rows = importer._insert_rows_in_chunks.await_args.kwargs["rows"]
+    assert rows[0]["referal"] == "4243447"
+    assert rows[0]["tags"] == {"values": [892]}

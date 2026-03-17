@@ -39,6 +39,8 @@ class User(Base):
     visits_all: Mapped[int | None] = mapped_column(nullable=True)
     date_last: Mapped[str | None] = mapped_column(String(32), nullable=True)
     city: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    referal: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    tags: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)

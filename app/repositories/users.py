@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import User
 
-
 USER_UPSERT_FIELDS: tuple[str, ...] = (
     "email",
     "phone",
@@ -31,6 +30,8 @@ USER_UPSERT_FIELDS: tuple[str, ...] = (
     "visits_all",
     "date_last",
     "city",
+    "referal",
+    "tags",
 )
 
 
@@ -42,7 +43,9 @@ class UsersRepository:
 
     async def lock_user(self, *, user_id: int) -> None:
         """Acquire transaction-scoped advisory lock for user_id."""
-        await self._session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": user_id})
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": user_id}
+        )
 
     async def get_by_user_id(self, *, user_id: int) -> User | None:
         """Return user by primary key."""
@@ -70,6 +73,8 @@ class UsersRepository:
         for field in USER_UPSERT_FIELDS:
             values[field] = profile.get(field)
         values["email"] = _normalize_email(values.get("email"))
+        values["referal"] = _normalize_text(values.get("referal"))
+        values["tags"] = _normalize_json_object(values.get("tags"))
 
         insert_stmt = insert(User).values(**values)
         update_fields = {field: values[field] for field in USER_UPSERT_FIELDS}
@@ -90,3 +95,16 @@ def _normalize_email(raw: object) -> str | None:
         return None
     normalized = raw.strip().lower()
     return normalized or None
+
+
+def _normalize_text(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip()
+    return normalized or None
+
+
+def _normalize_json_object(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    return raw
