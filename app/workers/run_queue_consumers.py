@@ -9,15 +9,18 @@ from typing import Any
 
 import aio_pika
 import structlog
-from structlog import contextvars as log_contextvars
 from aio_pika.abc import AbstractIncomingMessage
+from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkSDKClient
 from app.clients.teyca import TeycaClient
 from app.config import Settings, get_settings
-from app.consumers.create_user import CreateConsumerDeps, handle as handle_create
-from app.consumers.delete_user import DeleteConsumerDeps, handle as handle_delete
-from app.consumers.update_user import UpdateConsumerDeps, handle as handle_update
+from app.consumers.create_user import CreateConsumerDeps
+from app.consumers.create_user import handle as handle_create
+from app.consumers.delete_user import DeleteConsumerDeps
+from app.consumers.delete_user import handle as handle_delete
+from app.consumers.update_user import UpdateConsumerDeps
+from app.consumers.update_user import handle as handle_update
 from app.db.session import SessionLocal
 from app.logging_config import configure_logging, shutdown_logging
 from app.mq.queues import QUEUE_CREATE, QUEUE_DELETE, QUEUE_UPDATE
@@ -40,6 +43,7 @@ class ConsumersRunner:
     listmonk_client: ListmonkSDKClient
     teyca_client: TeycaClient
     old_db_repo: OldDBRepository
+    _process_semaphore: asyncio.Semaphore | None = None
 
     async def _parse_payload(self, message: AbstractIncomingMessage) -> dict[str, Any]:
         try:
@@ -125,7 +129,12 @@ class ConsumersRunner:
 
     async def _callback(self, message: AbstractIncomingMessage, queue_name: str) -> None:
         try:
-            await self._process(message, queue_name)
+            semaphore = self._process_semaphore
+            if semaphore is None:
+                await self._process(message, queue_name)
+            else:
+                async with semaphore:
+                    await self._process(message, queue_name)
             await message.ack()
             logger.info(
                 "consumer_message_acked",
@@ -149,7 +158,20 @@ class ConsumersRunner:
         """Connect to RabbitMQ and consume all queues indefinitely."""
         connection = await aio_pika.connect_robust(self.settings.rabbitmq_url)
         channel = await connection.channel()
-        await channel.set_qos(prefetch_count=32)
+        prefetch_count = max(1, int(getattr(self.settings, "rabbitmq_consumer_prefetch_count", 4)))
+        await channel.set_qos(prefetch_count=prefetch_count)
+        db_capacity = max(
+            1,
+            int(getattr(self.settings, "database_pool_size", 5))
+            + int(getattr(self.settings, "database_pool_max_overflow", 10)),
+        )
+        max_concurrency = max(
+            1,
+            int(getattr(self.settings, "rabbitmq_consumer_max_concurrency", prefetch_count)),
+        )
+        max_concurrency = min(max_concurrency, prefetch_count)
+        max_concurrency = min(max_concurrency, db_capacity)
+        self._process_semaphore = asyncio.Semaphore(max_concurrency)
         heartbeat_task = _start_heartbeat_task("consumers", interval_seconds=15)
 
         queue_create = await channel.declare_queue(QUEUE_CREATE, durable=True)
@@ -163,6 +185,9 @@ class ConsumersRunner:
         logger.info(
             "consumers_started",
             queues=[QUEUE_CREATE, QUEUE_UPDATE, QUEUE_DELETE],
+            prefetch_count=prefetch_count,
+            max_concurrency=max_concurrency,
+            db_capacity=db_capacity,
         )
         try:
             await asyncio.Event().wait()
@@ -195,7 +220,9 @@ def _resolve_trace_id(*, payload: dict[str, Any], message: AbstractIncomingMessa
     return to_optional_str(getattr(message, "correlation_id", None))
 
 
-def _resolve_source_event_id(*, payload: dict[str, Any], message: AbstractIncomingMessage) -> str | None:
+def _resolve_source_event_id(
+    *, payload: dict[str, Any], message: AbstractIncomingMessage
+) -> str | None:
     payload_event_id = to_optional_str(payload.get("source_event_id"))
     if payload_event_id:
         return payload_event_id

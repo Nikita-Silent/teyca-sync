@@ -107,6 +107,22 @@ async def test_mq_publisher_reopens_closed_channel() -> None:
     assert connection.channel.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_mq_publisher_declares_queue_once_per_channel() -> None:
+    connection = AsyncMock()
+    channel = AsyncMock()
+    channel.is_closed = False
+    channel.default_exchange = AsyncMock()
+    connection.channel.return_value = channel
+
+    publisher = MQPublisher(connection)
+    await publisher.publish("queue-x", {"x": 1})
+    await publisher.publish("queue-x", {"x": 2})
+
+    channel.declare_queue.assert_awaited_once_with("queue-x", durable=True)
+    assert channel.default_exchange.publish.await_count == 2
+
+
 def test_common_helpers_cover_numeric_and_merge_paths() -> None:
     pass_data = PassData.model_validate(
         {

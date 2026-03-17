@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import httpx
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.clients.listmonk import ListmonkSDKClient, SubscriberDelta
+from app.clients.listmonk import ListmonkClientError, ListmonkSDKClient, SubscriberDelta
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.repositories.listmonk_users import ListmonkUsersRepository
@@ -49,12 +50,22 @@ class ListmonkReconcileWorker:
 
             for list_id in target_list_ids:
                 state = await sync_repo.get_or_create(source=RECONCILE_SOURCE, list_id=list_id)
-                deltas = await self.listmonk_client.get_updated_subscribers(
-                    list_id=list_id,
-                    watermark_updated_at=state.watermark_updated_at,
-                    watermark_subscriber_id=state.watermark_subscriber_id,
-                    limit=batch_size,
-                )
+                try:
+                    deltas = await self.listmonk_client.get_updated_subscribers(
+                        list_id=list_id,
+                        watermark_updated_at=state.watermark_updated_at,
+                        watermark_subscriber_id=state.watermark_subscriber_id,
+                        limit=batch_size,
+                    )
+                except (ListmonkClientError, httpx.HTTPError) as exc:
+                    metrics.list_fetch_errors += 1
+                    logger.error(
+                        "listmonk_reconcile_list_fetch_failed",
+                        list_id=list_id,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                    continue
                 metrics.deltas_fetched += len(deltas)
                 if not deltas:
                     continue
@@ -101,6 +112,7 @@ class ListmonkReconcileWorker:
             deltas_fetched=metrics.deltas_fetched,
             already_mapped=metrics.already_mapped,
             restored=metrics.restored,
+            list_fetch_errors=metrics.list_fetch_errors,
             mapped_by_attribute=metrics.mapped_by_attribute,
             mapped_by_email=metrics.mapped_by_email,
             attribute_user_not_found=metrics.attribute_user_not_found,
@@ -122,7 +134,9 @@ class ListmonkReconcileWorker:
         metrics: "ReconcileMetrics",
         limit: int,
     ) -> None:
-        state = await sync_repo.get_or_create(source=CONSISTENCY_SOURCE, list_id=CONSISTENCY_LIST_ID)
+        state = await sync_repo.get_or_create(
+            source=CONSISTENCY_SOURCE, list_id=CONSISTENCY_LIST_ID
+        )
         last_user_id = int(state.watermark_subscriber_id or 0)
         rows = await listmonk_repo.get_batch_after_user_id(last_user_id=last_user_id, limit=limit)
         if not rows:
@@ -139,7 +153,20 @@ class ListmonkReconcileWorker:
         for row in rows:
             current_last_user_id = int(row.user_id)
             metrics.consistency_scanned += 1
-            state_live = await self.listmonk_client.get_subscriber_state(subscriber_id=int(row.subscriber_id))
+            try:
+                state_live = await self.listmonk_client.get_subscriber_state(
+                    subscriber_id=int(row.subscriber_id)
+                )
+            except (ListmonkClientError, httpx.HTTPError) as exc:
+                metrics.consistency_errors += 1
+                logger.error(
+                    "listmonk_reconcile_state_check_failed",
+                    user_id=int(row.user_id),
+                    subscriber_id=int(row.subscriber_id),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                continue
             if state_live is not None:
                 continue
 
@@ -297,6 +324,7 @@ class ReconcileMetrics:
     deltas_fetched: int = 0
     already_mapped: int = 0
     restored: int = 0
+    list_fetch_errors: int = 0
     mapped_by_attribute: int = 0
     mapped_by_email: int = 0
     attribute_user_not_found: int = 0

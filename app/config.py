@@ -10,9 +10,14 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "postgresql+asyncpg://teyca:teyca@localhost:5432/teyca"
+    database_pool_size: int = 5
+    database_pool_max_overflow: int = 10
+    database_pool_timeout_seconds: float = 30.0
 
     # RabbitMQ
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    rabbitmq_consumer_prefetch_count: int = 4
+    rabbitmq_consumer_max_concurrency: int = 4
 
     # Webhook auth
     webhook_auth_enabled: bool = True
@@ -33,6 +38,9 @@ class Settings(BaseSettings):
     listmonk_user: str = ""
     listmonk_password: str = ""
     listmonk_list_ids: str = ""
+    listmonk_request_timeout_seconds: float = 15.0
+    listmonk_request_max_retries: int = 2
+    listmonk_request_retry_backoff_seconds: float = 0.5
     consent_bonus_amount: str = "100.0"
     consent_bonus_ttl_days: int = 30
     consent_sync_batch_size: int = 500
