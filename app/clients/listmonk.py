@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 import httpx
 import structlog
@@ -109,6 +110,7 @@ class ListmonkSDKClient:
         func: Callable[..., T],
         *args: object,
         action: str,
+        retryable: bool = True,
         **kwargs: object,
     ) -> T:
         """Run blocking SDK call in thread with timeout and transient retries."""
@@ -128,11 +130,11 @@ class ListmonkSDKClient:
                     asyncio.to_thread(func, *args, **kwargs),
                     timeout=timeout_seconds,
                 )
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 wrapped = ListmonkClientError(
                     f"Listmonk SDK call timeout after {timeout_seconds}s: action={action}"
                 )
-                if attempt >= max_retries:
+                if not retryable or attempt >= max_retries:
                     raise wrapped from exc
                 logger.warning(
                     "listmonk_sdk_call_retry",
@@ -143,7 +145,7 @@ class ListmonkSDKClient:
                     timeout_seconds=timeout_seconds,
                 )
             except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
-                if attempt >= max_retries:
+                if not retryable or attempt >= max_retries:
                     raise
                 logger.warning(
                     "listmonk_sdk_call_retry",
@@ -217,7 +219,7 @@ class ListmonkSDKClient:
                 if isinstance(item, dict) and "id" in item:
                     try:
                         list_ids.append(int(item["id"]))
-                    except TypeError, ValueError:
+                    except (TypeError, ValueError):
                         continue
                     continue
                 value = getattr(item, "id", None)
@@ -321,6 +323,7 @@ class ListmonkSDKClient:
                     None,
                     current_status,
                     action="update_subscriber",
+                    retryable=False,
                 )
             except Exception as exc:
                 if not _is_conflict_error(exc) or not normalized_email:
@@ -352,6 +355,7 @@ class ListmonkSDKClient:
                     None,
                     getattr(existing_by_email, "status", None) or "enabled",
                     action="update_subscriber",
+                    retryable=False,
                 )
             state = await self.get_subscriber_state(subscriber_id=effective_subscriber_id)
             if state is not None:
@@ -393,6 +397,7 @@ class ListmonkSDKClient:
                 False,
                 request_kwargs["attribs"],
                 action="create_subscriber",
+                retryable=False,
             )
         except Exception as exc:
             if not _is_conflict_error(exc) or not request_kwargs["email"]:
@@ -421,6 +426,7 @@ class ListmonkSDKClient:
                 None,
                 getattr(existing, "status", None) or "enabled",
                 action="update_subscriber",
+                retryable=False,
             )
         created_id = _extract_subscriber_id(response)
         if created_id is None:
@@ -501,6 +507,7 @@ class ListmonkSDKClient:
             None,
             target_status,
             action="update_subscriber",
+            retryable=False,
         )
         refreshed = await self.get_subscriber_state(subscriber_id=state.subscriber_id)
         if refreshed is not None:
@@ -542,6 +549,7 @@ class ListmonkSDKClient:
             None,
             subscriber_id,
             action="delete_subscriber",
+            retryable=False,
         )
         _safe_info(
             "listmonk_delete_subscriber_done",
@@ -684,7 +692,7 @@ def _extract_list_ids(payload: object) -> list[int]:
             if isinstance(item, dict) and "id" in item:
                 try:
                     list_ids.append(int(item["id"]))
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     continue
                 continue
             value = getattr(item, "id", None)

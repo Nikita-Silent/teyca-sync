@@ -411,6 +411,57 @@ async def test_run_consistency_scan_handles_restore_error_and_live_subscriber() 
     assert metrics.consistency_scanned == 2
     assert metrics.consistency_missing == 1
     assert metrics.consistency_errors == 1
+    sync_repo.update_watermark.assert_awaited_once_with(
+        source="listmonk_consistency",
+        list_id=0,
+        updated_at=None,
+        subscriber_id=10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_consistency_scan_keeps_failed_state_check_row_for_retry() -> None:
+    worker = _worker()
+    listmonk_repo = AsyncMock()
+    sync_repo = AsyncMock()
+    sync_repo.get_or_create.return_value = SimpleNamespace(watermark_subscriber_id=7)
+    listmonk_repo.get_batch_after_user_id.return_value = [
+        SimpleNamespace(
+            user_id=10,
+            subscriber_id=100,
+            email="x@y.z",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+        SimpleNamespace(
+            user_id=11,
+            subscriber_id=101,
+            email="y@z.x",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+    ]
+    worker.listmonk_client.get_subscriber_state.side_effect = ListmonkClientError("timeout")
+
+    metrics = ReconcileMetrics(batch_size=10)
+    await worker._run_consistency_scan(
+        listmonk_repo=listmonk_repo,
+        sync_repo=sync_repo,
+        metrics=metrics,
+        limit=100,
+    )
+
+    assert metrics.consistency_scanned == 1
+    assert metrics.consistency_errors == 1
+    worker.listmonk_client.get_subscriber_state.assert_awaited_once_with(subscriber_id=100)
+    sync_repo.update_watermark.assert_awaited_once_with(
+        source="listmonk_consistency",
+        list_id=0,
+        updated_at=None,
+        subscriber_id=7,
+    )
 
 
 def test_reconcile_build_and_helpers() -> None:

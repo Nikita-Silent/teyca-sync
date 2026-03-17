@@ -131,7 +131,7 @@ class ListmonkReconcileWorker:
         *,
         listmonk_repo: ListmonkUsersRepository,
         sync_repo: SyncStateRepository,
-        metrics: "ReconcileMetrics",
+        metrics: ReconcileMetrics,
         limit: int,
     ) -> None:
         state = await sync_repo.get_or_create(
@@ -151,7 +151,6 @@ class ListmonkReconcileWorker:
 
         current_last_user_id = last_user_id
         for row in rows:
-            current_last_user_id = int(row.user_id)
             metrics.consistency_scanned += 1
             try:
                 state_live = await self.listmonk_client.get_subscriber_state(
@@ -166,8 +165,9 @@ class ListmonkReconcileWorker:
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
-                continue
+                break
             if state_live is not None:
+                current_last_user_id = int(row.user_id)
                 continue
 
             metrics.consistency_missing += 1
@@ -187,7 +187,7 @@ class ListmonkReconcileWorker:
                     old_subscriber_id=int(row.subscriber_id),
                     error=str(exc),
                 )
-                continue
+                break
 
             await listmonk_repo.upsert(
                 user_id=int(row.user_id),
@@ -206,6 +206,7 @@ class ListmonkReconcileWorker:
                 new_subscriber_id=int(restored.subscriber_id),
                 status=restored.status,
             )
+            current_last_user_id = int(row.user_id)
 
         await sync_repo.update_watermark(
             source=CONSISTENCY_SOURCE,
@@ -221,7 +222,7 @@ class ListmonkReconcileWorker:
         list_id: int,
         listmonk_repo: ListmonkUsersRepository,
         users_repo: UsersRepository,
-        metrics: "ReconcileMetrics",
+        metrics: ReconcileMetrics,
     ) -> None:
         existing = await listmonk_repo.get_by_subscriber_id(subscriber_id=delta.subscriber_id)
         if existing is not None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -743,7 +742,7 @@ async def test_get_updated_subscribers_wraps_asyncio_timeout_as_client_error() -
 
     async def timeout_to_thread(func: object, *args: object, **kwargs: object) -> object:
         if func is fake.subscribers:
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
         return func(*args, **kwargs)
 
     settings = SimpleNamespace(
@@ -767,3 +766,45 @@ async def test_get_updated_subscribers_wraps_asyncio_timeout_as_client_error() -
                 watermark_subscriber_id=None,
                 limit=10,
             )
+
+
+@pytest.mark.asyncio
+async def test_upsert_subscriber_does_not_retry_mutating_call_after_timeout() -> None:
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.create_subscriber = MagicMock()
+
+    create_attempts = 0
+
+    async def timeout_once_per_write(func: object, *args: object, **kwargs: object) -> object:
+        nonlocal create_attempts
+        if func is fake.create_subscriber:
+            create_attempts += 1
+            raise TimeoutError()
+        return func(*args, **kwargs)
+
+    settings = SimpleNamespace(
+        listmonk_url="http://listmonk",
+        listmonk_user="u",
+        listmonk_password="p",
+        listmonk_request_max_retries=5,
+    )
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch(
+            "app.clients.listmonk.asyncio.to_thread",
+            new=AsyncMock(side_effect=timeout_once_per_write),
+        ),
+    ):
+        client = ListmonkSDKClient(settings)
+        with pytest.raises(ListmonkClientError):
+            await client.upsert_subscriber(
+                email="x@y.z",
+                list_ids=[1],
+                attributes={},
+                subscriber_id=None,
+            )
+
+    assert create_attempts == 1
