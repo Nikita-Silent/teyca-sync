@@ -398,7 +398,7 @@ async def test_run_consistency_scan_handles_restore_error_and_live_subscriber() 
         ),
     ]
     worker.listmonk_client.get_subscriber_state.side_effect = [SimpleNamespace(), None]
-    worker.listmonk_client.restore_subscriber.side_effect = RuntimeError("boom")
+    worker.listmonk_client.restore_subscriber.side_effect = ListmonkClientError("boom")
 
     metrics = ReconcileMetrics(batch_size=10)
     await worker._run_consistency_scan(
@@ -417,6 +417,40 @@ async def test_run_consistency_scan_handles_restore_error_and_live_subscriber() 
         updated_at=None,
         subscriber_id=10,
     )
+
+
+@pytest.mark.asyncio
+async def test_run_consistency_scan_reraises_unexpected_restore_error() -> None:
+    worker = _worker()
+    listmonk_repo = AsyncMock()
+    sync_repo = AsyncMock()
+    sync_repo.get_or_create.return_value = SimpleNamespace(watermark_subscriber_id=0)
+    listmonk_repo.get_batch_after_user_id.return_value = [
+        SimpleNamespace(
+            user_id=11,
+            subscriber_id=101,
+            email="y@z.x",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+    ]
+    worker.listmonk_client.get_subscriber_state.return_value = None
+    worker.listmonk_client.restore_subscriber.side_effect = RuntimeError("boom")
+
+    metrics = ReconcileMetrics(batch_size=10)
+    with pytest.raises(RuntimeError, match="boom"):
+        await worker._run_consistency_scan(
+            listmonk_repo=listmonk_repo,
+            sync_repo=sync_repo,
+            metrics=metrics,
+            limit=100,
+        )
+
+    assert metrics.consistency_scanned == 1
+    assert metrics.consistency_missing == 1
+    assert metrics.consistency_errors == 0
+    sync_repo.update_watermark.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -235,23 +235,36 @@ async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
 
     active = 0
     max_active = 0
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release = asyncio.Event()
+    started_count = 0
 
     async def process_side_effect(*_: object, **__: object) -> None:
-        nonlocal active, max_active
+        nonlocal active, max_active, started_count
         active += 1
         max_active = max(max_active, active)
-        await asyncio.sleep(0.01)
+        started_count += 1
+        if started_count == 1:
+            first_started.set()
+        else:
+            second_started.set()
+        await release.wait()
         active -= 1
 
     msg1 = AsyncMock()
     msg2 = AsyncMock()
     with patch.object(run_queue_consumers.ConsumersRunner, "_process", new=process_side_effect):
-        await asyncio.gather(
-            runner._callback(msg1, run_queue_consumers.QUEUE_CREATE),
-            runner._callback(msg2, run_queue_consumers.QUEUE_CREATE),
-        )
+        task1 = asyncio.create_task(runner._callback(msg1, run_queue_consumers.QUEUE_CREATE))
+        task2 = asyncio.create_task(runner._callback(msg2, run_queue_consumers.QUEUE_CREATE))
+        await first_started.wait()
+        await asyncio.sleep(0)
+        assert second_started.is_set() is False
+        release.set()
+        await asyncio.gather(task1, task2)
 
     assert max_active == 1
+    assert second_started.is_set() is True
     msg1.ack.assert_awaited_once()
     msg2.ack.assert_awaited_once()
 

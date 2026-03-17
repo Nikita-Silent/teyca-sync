@@ -179,13 +179,14 @@ class ListmonkReconcileWorker:
                     attributes=row.attributes,
                     desired_status=row.status,
                 )
-            except Exception as exc:
+            except (ListmonkClientError, httpx.HTTPError, ValueError) as exc:
                 metrics.consistency_errors += 1
                 logger.error(
                     "listmonk_reconcile_restore_failed",
                     user_id=int(row.user_id),
                     old_subscriber_id=int(row.subscriber_id),
                     error=str(exc),
+                    error_type=type(exc).__name__,
                 )
                 break
 
