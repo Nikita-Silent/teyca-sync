@@ -10,6 +10,7 @@ from app.workers.listmonk_reconcile_worker import (
     ReconcileMetrics,
     _extract_attr_user_id,
     _parse_list_ids_text,
+    _resolve_restore_list_ids,
     build_listmonk_reconcile_worker,
 )
 
@@ -235,6 +236,66 @@ async def test_reconcile_restores_deleted_subscriber_from_local_mapping() -> Non
         attributes={"user_id": 77},
     )
     listmonk_repo.set_consent_pending.assert_awaited_once_with(user_id=77)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_restore_falls_back_to_configured_lists_when_row_list_ids_invalid() -> None:
+    worker = _worker()
+    worker.settings.listmonk_list_ids = "7,8"
+    worker.listmonk_client.get_updated_subscribers.side_effect = [[], []]
+    worker.listmonk_client.get_subscriber_state.return_value = None
+    worker.listmonk_client.restore_subscriber.return_value = SimpleNamespace(
+        subscriber_id=9998,
+        status="enabled",
+        list_ids=[7, 8],
+    )
+
+    with (
+        patch("app.workers.listmonk_reconcile_worker.ListmonkUsersRepository") as listmonk_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.UsersRepository") as users_repo_cls,
+        patch("app.workers.listmonk_reconcile_worker.SyncStateRepository") as sync_repo_cls,
+    ):
+        listmonk_repo = AsyncMock()
+        listmonk_repo_cls.return_value = listmonk_repo
+
+        listmonk_repo.get_batch_after_user_id.return_value = [
+            SimpleNamespace(
+                user_id=78,
+                subscriber_id=1235,
+                email="fallback@example.com",
+                status="confirmed",
+                list_ids=" , x ",
+                attributes={"user_id": 78},
+            )
+        ]
+        users_repo_cls.return_value = AsyncMock()
+
+        sync_repo = AsyncMock()
+        sync_repo.get_or_create.side_effect = [
+            SimpleNamespace(watermark_updated_at=None, watermark_subscriber_id=None),
+            SimpleNamespace(watermark_updated_at=None, watermark_subscriber_id=None),
+            SimpleNamespace(watermark_updated_at=None, watermark_subscriber_id=0),
+        ]
+        sync_repo_cls.return_value = sync_repo
+
+        restored = await worker.run_once()
+
+    assert restored == 1
+    worker.listmonk_client.restore_subscriber.assert_awaited_once_with(
+        email="fallback@example.com",
+        list_ids=[7, 8],
+        attributes={"user_id": 78},
+        desired_status="confirmed",
+    )
+    listmonk_repo.upsert.assert_awaited_once_with(
+        user_id=78,
+        subscriber_id=9998,
+        email="fallback@example.com",
+        status="enabled",
+        list_ids=[7, 8],
+        attributes={"user_id": 78},
+    )
+    listmonk_repo.set_consent_pending.assert_awaited_once_with(user_id=78)
 
 
 @pytest.mark.asyncio
@@ -513,3 +574,5 @@ def test_reconcile_build_and_helpers() -> None:
 
     assert _parse_list_ids_text(None) == []
     assert _parse_list_ids_text("1, x, 2, ,3") == [1, 2, 3]
+    assert _resolve_restore_list_ids(stored_list_ids="9,10", configured_list_ids="1,2") == [9, 10]
+    assert _resolve_restore_list_ids(stored_list_ids="x, ,", configured_list_ids="1,2") == [1, 2]

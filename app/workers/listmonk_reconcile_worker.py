@@ -171,7 +171,10 @@ class ListmonkReconcileWorker:
                 continue
 
             metrics.consistency_missing += 1
-            parsed_list_ids = _parse_list_ids_text(row.list_ids)
+            parsed_list_ids = _resolve_restore_list_ids(
+                stored_list_ids=row.list_ids,
+                configured_list_ids=self.settings.listmonk_list_ids,
+            )
             try:
                 restored = await self.listmonk_client.restore_subscriber(
                     email=row.email,
@@ -363,3 +366,12 @@ def _parse_list_ids_text(raw: str | None) -> list[int]:
         except ValueError:
             continue
     return result
+
+
+def _resolve_restore_list_ids(
+    *, stored_list_ids: str | None, configured_list_ids: str
+) -> list[int]:
+    stored = _parse_list_ids_text(stored_list_ids)
+    if stored:
+        return stored
+    return parse_list_ids(configured_list_ids)
