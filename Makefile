@@ -1,5 +1,8 @@
 .PHONY: up down migrate test test-unit test-integration consent-sync-once reconcile-once consumers legacy-import legacy-import-dry-run
 
+PYTHON ?= ./.venv/bin/python
+PYTEST ?= ./.venv/bin/pytest
+
 up:
 	docker compose up -d --build
 
@@ -10,13 +13,13 @@ migrate:
 	docker compose run --rm app alembic upgrade head
 
 test:
-	python -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/ -v
 
 test-unit:
-	pytest tests/unit/ -v
+	$(PYTEST) tests/unit/ -v
 
 test-integration:
-	pytest tests/integration/ -v
+	$(PYTEST) tests/integration/ -v
 
 consent-sync-once:
 	docker compose run --rm app python -m app.workers.run_consent_sync

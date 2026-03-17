@@ -585,15 +585,22 @@ async def test_main_uses_webhook_path_from_env() -> None:
     reloaded_main = importlib.reload(app_main)
     try:
         publisher = AsyncMock()
-        reloaded_main.app.dependency_overrides[get_mq_publisher] = lambda: publisher
+
+        async def override_publisher() -> AsyncMock:
+            return publisher
+
+        reloaded_main.app.dependency_overrides[get_mq_publisher] = override_publisher
         payload = {"type": "CREATE", "pass": {"user_id": 1}}
         async with AsyncClient(
             transport=ASGITransport(app=reloaded_main.app), base_url="http://test"
         ) as ac:
-            resp = await ac.post(
-                "/custom-webhook",
-                json=payload,
-                headers={"Authorization": "secret-token"},
+            resp = await asyncio.wait_for(
+                ac.post(
+                    "/custom-webhook",
+                    json=payload,
+                    headers={"Authorization": "secret-token"},
+                ),
+                timeout=5,
             )
         assert resp.status_code == 200
         publisher.publish_webhook.assert_called_once()

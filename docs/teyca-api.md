@@ -26,6 +26,10 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 - Если при update/create в Listmonk возникает конфликт уникальности email (`subscribers_email_key` / `409 conflict`), сервис делает fallback:
   - `subscriber_by_email(email)` -> `update_subscriber` найденного subscriber.
 - Если `LISTMONK_LIST_IDS` пустой/невалидный, upsert не выполняется (ошибка конфигурации).
+- Если локальная БД `listmonk_users` уже содержит тот же email у другого `user_id`, consumer не уходит в бесконечный retry:
+  - создаётся запись в `email_repair_log`,
+  - отдельный repair-worker позже определяет winner через Listmonk,
+  - loser'ам email очищается локально и в Teyca.
 
 ---
 
@@ -49,6 +53,7 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 - Если Teyca возвращает `4xx/5xx`, клиент выбрасывает `TeycaAPIError`.
 - Для `CREATE/UPDATE/DELETE` consumers это приводит к rollback транзакции и `reject(requeue=true)` в RabbitMQ.
 - Для `consent-sync` это приводит к сохранению `consent_pending=true` и повторной попытке на следующем запуске worker.
+- Для `email-repair` это не возвращает исходное webhook-сообщение в RabbitMQ; ошибка сохраняется в `email_repair_log` с bounded retry.
 
 ### Карты (passes)
 
@@ -73,6 +78,11 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 3. **Получение истории бонусов** — **GET** `https://api.teyca.ru/v1/{token}/passes/{user_id}/bonuses` (без body). Нужно для отчётов или проверки.
 
 4. **PUT карты** (`/v1/{token}/passes/{user_id}`) с полем `bonus` — это **не начисление**, а установка итогового значения поля на карте (например после merge: сложили бонусы из кассы и CRM и один раз обновили карту). Для добавления новой операции начисления используется только POST `.../bonuses` с массивом.
+
+5. **Duplicate email remediation** — отдельный repair-worker при конфликте email в локальной БД отправляет:
+   - **PUT** `https://api.teyca.ru/v1/{token}/passes/{user_id}`
+   - Body: `{"email": null, "key1": "bad email"}`
+   Это помечает loser-пользователя как невалидный email-кейс и убирает email из Teyca, чтобы следующий `UPDATE` снова не возвращал конфликт.
 
 | Действие | Метод | Путь | Body |
 |----------|--------|------|------|

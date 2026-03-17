@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.db.models import MergeLog
 from app.repositories.bonus_accrual import BonusAccrualRepository
-from app.repositories.listmonk_users import ListmonkUsersRepository
+from app.repositories.email_repair_log import EmailRepairLogRepository
+from app.repositories.listmonk_users import (
+    DuplicateListmonkUserEmailError,
+    ListmonkUsersRepository,
+)
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.sync_state import SyncStateRepository
 from app.repositories.users import UsersRepository
@@ -80,6 +84,10 @@ async def test_listmonk_users_repository_paths() -> None:
     assert (await repo.get_by_subscriber_id(subscriber_id=10)).user_id == 2
 
     session.execute.reset_mock()
+    session.execute.side_effect = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
+        SimpleNamespace(),
+    ]
     await repo.upsert(
         user_id=1,
         subscriber_id=10,
@@ -88,9 +96,34 @@ async def test_listmonk_users_repository_paths() -> None:
         list_ids=[1, 2],
         attributes={"user_id": 1},
     )
-    listmonk_upsert_stmt = session.execute.await_args_list[0].args[0]
+    listmonk_upsert_stmt = session.execute.await_args_list[1].args[0]
     assert listmonk_upsert_stmt.compile().params["email"] == "u@example.com"
 
+    session.execute.reset_mock()
+    session.execute.side_effect = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [2])),
+    ]
+    with (
+        patch("app.repositories.listmonk_users.logger.error") as logger_error,
+        pytest.raises(DuplicateListmonkUserEmailError),
+    ):
+        await repo.upsert(
+            user_id=1,
+            subscriber_id=10,
+            email="duplicate@example.com",
+            status="enabled",
+            list_ids=[1],
+            attributes={"user_id": 1},
+        )
+    logger_error.assert_called_once_with(
+        "listmonk_users_duplicate_email",
+        email="duplicate@example.com",
+        user_id=1,
+        duplicate_rows=1,
+        existing_user_ids=[2],
+    )
+
+    session.execute.side_effect = None
     session.execute.return_value = SimpleNamespace(
         scalars=lambda: SimpleNamespace(all=lambda: ["a", "b"])
     )
@@ -121,6 +154,63 @@ async def test_merge_log_repository_paths() -> None:
     assert added.user_id == 1
 
     await repo.delete_by_user_id(user_id=1)
+
+
+@pytest.mark.asyncio
+async def test_email_repair_log_repository_paths() -> None:
+    session = AsyncMock()
+    repo = EmailRepairLogRepository(session)
+
+    await repo.create_pending(
+        normalized_email="duplicate@example.com",
+        incoming_user_id=10,
+        existing_user_id=20,
+        source_event_type="UPDATE",
+        source_event_id="event-1",
+        trace_id="trace-1",
+    )
+
+    stmt = session.execute.await_args.args[0]
+    params = stmt.compile().params
+    assert params["normalized_email"] == "duplicate@example.com"
+    assert params["incoming_user_id"] == 10
+    assert params["existing_user_id"] == 20
+    assert params["source_event_type"] == "UPDATE"
+    assert params["source_event_id"] == "event-1"
+    assert params["trace_id"] == "trace-1"
+    assert params["status"] == "pending"
+    assert params["attempts"] == 0
+    session.execute.reset_mock()
+
+    await repo.create_db_applied(
+        normalized_email="duplicate@example.com",
+        incoming_user_id=10,
+        existing_user_id=20,
+        winner_user_id=20,
+        winner_subscriber_id=33,
+        source_event_id="backfill-1",
+        trace_id="trace-1",
+    )
+    params = session.execute.await_args.args[0].compile().params
+    assert params["status"] == "db_applied"
+    assert params["winner_user_id"] == 20
+    assert params["winner_subscriber_id"] == 33
+    session.execute.reset_mock()
+
+    session.execute.return_value = SimpleNamespace()
+    assert (
+        await repo.mark_retry(
+            repair_id=1,
+            attempts=3,
+            error_text="boom",
+            max_attempts=3,
+        )
+        == "manual_review"
+    )
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: ["row"])
+    )
+    assert await repo.get_db_applied_batch(limit=10) == ["row"]
 
 
 @pytest.mark.asyncio

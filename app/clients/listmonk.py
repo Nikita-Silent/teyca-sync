@@ -219,7 +219,7 @@ class ListmonkSDKClient:
                 if isinstance(item, dict) and "id" in item:
                     try:
                         list_ids.append(int(item["id"]))
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         continue
                     continue
                 value = getattr(item, "id", None)
@@ -244,6 +244,53 @@ class ListmonkSDKClient:
             "listmonk_get_subscriber_state_done",
             subscriber_id=subscriber_id,
             found=True,
+            status=state.status,
+            list_ids=state.list_ids,
+        )
+        return state
+
+    async def get_subscriber_by_email(self, *, email: str) -> SubscriberState | None:
+        """Fetch subscriber state from Listmonk by normalized email."""
+        try:
+            import listmonk  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise ListmonkClientError("listmonk package is not installed") from exc
+
+        await self._ensure_login()
+        normalized_email = _normalize_email(email)
+        if not normalized_email:
+            raise ListmonkClientError("Subscriber email is required")
+        _safe_info(
+            "listmonk_get_subscriber_by_email_request",
+            email=normalized_email,
+        )
+        payload = await self._sdk_call(
+            listmonk.subscriber_by_email,
+            normalized_email,
+            action="subscriber_by_email",
+        )
+        subscriber_id = _extract_subscriber_id(payload)
+        if payload is None or subscriber_id is None:
+            _safe_info(
+                "listmonk_get_subscriber_by_email_done",
+                email=normalized_email,
+                found=False,
+            )
+            return None
+        state = await self.get_subscriber_state(subscriber_id=subscriber_id)
+        if state is None:
+            _safe_info(
+                "listmonk_get_subscriber_by_email_done",
+                email=normalized_email,
+                found=False,
+                subscriber_id=subscriber_id,
+            )
+            return None
+        _safe_info(
+            "listmonk_get_subscriber_by_email_done",
+            email=normalized_email,
+            found=True,
+            subscriber_id=state.subscriber_id,
             status=state.status,
             list_ids=state.list_ids,
         )
@@ -692,7 +739,7 @@ def _extract_list_ids(payload: object) -> list[int]:
             if isinstance(item, dict) and "id" in item:
                 try:
                     list_ids.append(int(item["id"]))
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     continue
                 continue
             value = getattr(item, "id", None)

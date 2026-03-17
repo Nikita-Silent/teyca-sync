@@ -17,7 +17,8 @@ from app.consumers.common import (
     is_valid_email,
     merge_profile_with_old_data,
 )
-from app.repositories.listmonk_users import ListmonkUsersRepository
+from app.repositories.email_repair_log import EmailRepairLogRepository
+from app.repositories.listmonk_users import DuplicateListmonkUserEmailError, ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
@@ -38,6 +39,7 @@ class CreateConsumerDeps:
     settings: Settings
     users_repo: UsersRepository
     listmonk_repo: ListmonkUsersRepository
+    email_repair_repo: EmailRepairLogRepository
     merge_repo: MergeLogRepository
     old_db_repo: OldDBRepository
     listmonk_client: ListmonkSDKClient
@@ -119,14 +121,34 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
         subscriber_status=subscriber_state.status,
         list_ids=subscriber_state.list_ids,
     )
-    await deps.listmonk_repo.upsert(
-        user_id=user_id,
-        subscriber_id=subscriber_state.subscriber_id,
-        email=event.pass_data.email,
-        status=subscriber_state.status,
-        list_ids=subscriber_state.list_ids,
-        attributes=build_listmonk_attributes(event.pass_data),
-    )
+    try:
+        await deps.listmonk_repo.upsert(
+            user_id=user_id,
+            subscriber_id=subscriber_state.subscriber_id,
+            email=event.pass_data.email,
+            status=subscriber_state.status,
+            list_ids=subscriber_state.list_ids,
+            attributes=build_listmonk_attributes(event.pass_data),
+        )
+    except DuplicateListmonkUserEmailError as exc:
+        for existing_user_id in exc.existing_user_ids:
+            await deps.email_repair_repo.create_pending(
+                normalized_email=exc.normalized_email,
+                incoming_user_id=user_id,
+                existing_user_id=existing_user_id,
+                source_event_type=event.type,
+                source_event_id=source_event_id,
+                trace_id=trace_id,
+            )
+        logger.error(
+            "create_consumer_duplicate_email_scheduled",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            email=exc.normalized_email,
+            existing_user_ids=exc.existing_user_ids,
+        )
+        return
 
     merge_needs_write = merge_result.merged and (old_data is not None) and old_data.has_merge_data()
     if merge_needs_write and not merged_already:

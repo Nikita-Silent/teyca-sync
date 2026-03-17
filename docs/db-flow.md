@@ -1,6 +1,6 @@
 # DB Flow (куда смотреть и зачем)
 
-Дата актуальности: 2026-03-06
+Дата актуальности: 2026-03-17
 
 ## 1) Где лежат таблицы
 
@@ -11,6 +11,7 @@
   - `listmonk_users`
   - `merge_log`
   - `bonus_accrual_log`
+  - `email_repair_log`
   - `sync_state` (используется в инкрементальном consent sync как watermark)
 
 ## 2) Таблицы и их назначение
@@ -43,6 +44,21 @@
 - Водяные знаки для инкрементальных sync-задач.
 - Для `consent_sync_worker` это ключевая таблица прогресса по каждому `list_id`.
 
+6. `email_repair_log`
+- Очередь и аудит duplicate-email remediation.
+- Пишется consumer'ами `CREATE/UPDATE`, когда локальный `listmonk_users.email` уже занят другим `user_id`.
+- Полезные поля:
+  - `normalized_email`
+  - `incoming_user_id`
+  - `existing_user_id`
+  - `winner_user_id`
+  - `winner_subscriber_id`
+  - `status`
+  - `attempts`
+  - `next_retry_at`
+  - `error_text`
+- Сюда смотреть, если email "пропал" у loser-пользователя или если duplicate-email больше не ретраится через RabbitMQ.
+
 ## 3) Flow по событиям (что меняется в БД)
 
 ## CREATE (`queue-create`)
@@ -57,10 +73,17 @@
 5. `listmonk_users.consent_pending = true`
 6. commit
 
+Если локальный email-дубликат:
+1. `users`: upsert уже выполнен
+2. `email_repair_log`: insert `status='pending'`
+3. `listmonk_users`: не обновляется этим сообщением
+4. consumer завершает обработку без `requeue`
+
 Куда смотреть:
 1. `users` (профиль)
 2. `listmonk_users` (subscriber/status + consent_pending)
 3. `merge_log` (был ли merge)
+4. `email_repair_log` (если sync в Listmonk не прошёл из-за duplicate email)
 
 ## UPDATE (`queue-update`)
 
@@ -73,11 +96,13 @@
 
 Если `merge_log` отсутствует, merge выполняется и логируется в `merge_log`.
 При успешном merge дополнительно обновляется `key2` в Teyca.
+Если локальный email-дубликат, вместо бесконечного retry создаётся запись в `email_repair_log`, а сообщение ack-ается.
 
 Куда смотреть:
 1. `users.updated_at`
 2. `merge_log` (есть/нет записи)
 3. `listmonk_users` (обновился ли subscriber и pending-флаг)
+4. `email_repair_log` (если update "не дошёл" до `listmonk_users` из-за duplicate email)
 
 ## DELETE (`queue-delete`)
 
@@ -121,6 +146,25 @@
 1. `listmonk_users.consent_pending`
 2. `bonus_accrual_log` по `reason='email_consent'`
 
+## Email repair-worker
+
+1. читает `email_repair_log` со статусами `pending` и `failed`, учитывая `next_retry_at`
+2. ищет authoritative subscriber в Listmonk по `normalized_email`
+3. находит winner по совпадению `subscriber_id` с одной из строк в `listmonk_users`
+4. loser'ам:
+- `users.email = NULL`
+- `listmonk_users.email = NULL`
+- Teyca `PUT /passes/{user_id}` с `email=null`, `key1='bad email'`
+5. `email_repair_log.status` меняется:
+- `teyca_synced` при успехе
+- `failed` при очередной retryable ошибке
+- `manual_review` после исчерпания попыток
+
+Куда смотреть:
+1. `email_repair_log` по `normalized_email` или `incoming_user_id`
+2. `users.email` и `listmonk_users.email` у winner/loser
+3. логи `email_repair_*`
+
 ## 3.1) Маппинг old DB -> текущая БД
 
 Текущая интеграция old DB читает таблицу `public.users` и использует алиасы колонок.
@@ -162,6 +206,12 @@ SELECT *
 FROM bonus_accrual_log
 WHERE user_id = :user_id
 ORDER BY created_at DESC;
+
+-- 5) Duplicate email remediation
+SELECT *
+FROM email_repair_log
+WHERE incoming_user_id = :user_id
+ORDER BY created_at DESC;
 ```
 
 ## 5) Что проверять в первую очередь по типовым вопросам
@@ -185,6 +235,11 @@ ORDER BY created_at DESC;
 5. "Почему бонус уже начислен, но key1 не обновился"
 - Проверить `bonus_accrual_log.payload` (`bonus_done=true`, `key1_done=false`)
 - Это штатный частичный прогресс; следующий retry догонит `key1`.
+
+6. "Почему email очистился или не обновился"
+- Проверить `email_repair_log` по `incoming_user_id` или `normalized_email`
+- Проверить, кто стал `winner_user_id`
+- Проверить, был ли статус `teyca_synced` или `manual_review`
 
 ## 6) Метрики и логи consent sync
 

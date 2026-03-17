@@ -34,6 +34,15 @@ make test
 - `LOKI_USERNAME` / `LOKI_PASSWORD` — Basic Auth для Loki.
 - `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `reconcile`, `consent-sync`).
 
+## Process Flow
+
+- Teyca шлёт `CREATE` / `UPDATE` / `DELETE` webhook в FastAPI.
+- FastAPI валидирует `Authorization`, добавляет `trace_id` / `source_event_id` и публикует сообщение в RabbitMQ.
+- `queue-consumers` читают сообщение, обновляют `users`, `listmonk_users`, `merge_log` и синхронизируют Listmonk через Python SDK.
+- `consent-sync` периодически читает изменившихся подписчиков из Listmonk, подтверждает consent в Teyca и начисляет бонусы.
+- `listmonk-reconcile` восстанавливает потерянные связи `subscriber_id -> user_id`.
+- `email-repair` разбирает duplicate email кейсы через `email_repair_log`, определяет winner по Listmonk и очищает loser'ов локально и в Teyca.
+
 ## Teyca API limits
 
 - Исходящие вызовы в Teyca ограничиваются в клиенте скользящими окнами:
@@ -49,10 +58,17 @@ make test
 - В queue-consumers (`CREATE/UPDATE/DELETE`):
   - DB транзакция откатывается,
   - сообщение `reject(requeue=true)` и будет обработано повторно.
+- Исключение: duplicate email в `listmonk_users` не считается transient-ошибкой обработки.
+  - consumer пишет запись в `email_repair_log`,
+  - логирует `*_consumer_duplicate_email_scheduled`,
+  - завершает обработку без `requeue`, чтобы не клинить очередь.
 - В `consent-sync`:
   - ошибка логируется,
   - пользователь остаётся `consent_pending=true`,
   - обработка повторяется в следующих запусках.
+- В `email-repair`:
+  - ошибка resolution/Teyca cleanup не возвращает исходный webhook в очередь,
+  - запись в `email_repair_log` переводится в `failed` или `manual_review` с bounded retry.
 
 ## Tracing
 
@@ -70,6 +86,18 @@ make test
   - в Teyca отправляется `PUT /passes/{user_id}` с `key1=blocked`,
   - если для `user_id` уже есть запись в `listmonk_users`, локально сохраняется `status=blocked` и `consent_pending=false`.
 - Если email исправили и пришёл следующий `UPDATE` с валидным email, работает обычный flow: `upsert_subscriber` + `set_consent_pending=true`.
+
+## Duplicate Email Remediation
+
+- Если `CREATE/UPDATE` упирается в локальный duplicate email в `listmonk_users`, consumer не делает бесконечный retry.
+- Вместо этого создаётся `email_repair_log` со статусом `pending`.
+- Отдельный `email-repair` worker:
+  - ищет authoritative subscriber в Listmonk по email,
+  - выбирает winner по совпавшему `subscriber_id`,
+  - loser'ам очищает `email` в `users` и `listmonk_users`,
+  - отправляет в Teyca `PUT /passes/{user_id}` с `email=null` и `key1="bad email"`,
+  - помечает repair как `teyca_synced`, `failed` или `manual_review`.
+- Это нужно, чтобы очередь `queue-update`/`queue-create` не зацикливалась на одном конфликте и данные могли актуализироваться дальше.
 
 ## Listmonk Upsert Rules
 

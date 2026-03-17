@@ -1,7 +1,7 @@
 # Runtime Flow (Mermaid)
 
 Источник:
-- текущий код `app/` (факт на 2026-03-06)
+- текущий код `app/` (факт на 2026-03-17)
 - `docs/roadmap.md` (план/срезы)
 
 ## 1) Текущее состояние (реально в коде)
@@ -31,9 +31,13 @@ flowchart LR
     CCreate --> TY["Teyca bonuses API"]
     CUpdate --> TY
 
-SW["consent sync-worker"] --> PG
-SW --> LM
-SW --> TY
+    ER["email repair-worker"] --> PG
+    ER --> LM
+    ER --> TY
+
+    SW["consent sync-worker"] --> PG
+    SW --> LM
+    SW --> TY
 
     RW["listmonk reconcile-worker"] --> PG
     RW --> LM
@@ -77,6 +81,10 @@ sequenceDiagram
         opt listmonk_users row already exists
             C->>DB: mark checked status=blocked, consent_pending=false
         end
+    else local duplicate email in listmonk_users
+        C->>DB: insert email_repair_log(status=pending)
+        C->>C: log create_consumer_duplicate_email_scheduled
+        Note over C,DB: consumer exits without requeue
     end
     C->>DB: commit
 ```
@@ -119,6 +127,10 @@ sequenceDiagram
         opt listmonk_users row already exists
             U->>DB: mark checked status=blocked, consent_pending=false
         end
+    else local duplicate email in listmonk_users
+        U->>DB: insert email_repair_log(status=pending)
+        U->>U: log update_consumer_duplicate_email_scheduled
+        Note over U,DB: consumer exits without requeue
     end
     U->>DB: commit
 ```
@@ -192,7 +204,40 @@ sequenceDiagram
     W->>DB: commit
 ```
 
-## 6) Метрики и логи (runtime)
+## 6) Sequence: email repair-worker
+
+```mermaid
+sequenceDiagram
+    participant SCH as Scheduler
+    participant E as Email repair-worker
+    participant DB as Postgres
+    participant LM as Listmonk SDK
+    participant TY as Teyca API
+
+    SCH->>E: periodic tick
+    E->>DB: read pending/failed rows from email_repair_log
+    loop by repair row
+        E->>DB: mark row processing
+        E->>LM: subscriber_by_email(normalized_email)
+        alt winner resolved by subscriber_id -> user_id
+            E->>DB: clear users.email for losers
+            E->>DB: clear listmonk_users.email for losers
+            loop by loser user_id
+                E->>TY: PUT /passes/{user_id} {email: null, key1: "bad email"}
+            end
+            E->>DB: mark email_repair_log teyca_synced
+        else resolution/Teyca failed
+            E->>DB: increment attempts, set next_retry_at/status
+            alt attempts exhausted
+                E->>DB: mark manual_review
+            else retry allowed
+                E->>DB: mark failed
+            end
+        end
+    end
+```
+
+## 7) Метрики и логи (runtime)
 
 В конце каждого запуска `consent_sync_worker` пишется агрегированный лог:
 
@@ -214,8 +259,11 @@ sequenceDiagram
 - `consent_sync_list_processed` — сколько deltas обработано по конкретному `list_id` и до какого watermark дошли.
 - `consent_sync_subscriber_not_mapped` — в Listmonk есть subscriber, но нет связи с `user_id` в нашей БД.
 - `listmonk_upsert_subscriber_request` / `listmonk_upsert_subscriber_done` — upsert subscriber в Listmonk (включая fallback по email при конфликте `subscribers_email_key`).
+- `email_repair_metrics` — агрегированные счётчики запуска repair-worker.
+- `email_repair_synced` — duplicate email разрешён и loser синхронизирован с Teyca.
+- `email_repair_failed` — repair не завершился и переведён в `failed`/`manual_review`.
 
-## 7) Sequence: listmonk reconcile-worker
+## 8) Sequence: listmonk reconcile-worker
 
 ```mermaid
 sequenceDiagram

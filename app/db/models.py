@@ -118,6 +118,39 @@ class BonusAccrualLog(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class EmailRepairLog(Base):
+    """Tracks duplicate-email remediation attempts and repair outcomes."""
+
+    __tablename__ = "email_repair_log"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_email",
+            "incoming_user_id",
+            "existing_user_id",
+            name="uq_email_repair_log_email_user_pair",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    normalized_email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    incoming_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    existing_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    winner_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    winner_subscriber_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_event_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class SyncState(Base):
     """Watermark state for incremental sync jobs."""
 
