@@ -47,7 +47,7 @@ def build_profile_from_pass(pass_data: PassData) -> dict[str, Any]:
         "date_last": pass_data.date_last,
         "city": pass_data.city,
         "referal": _to_optional_str(pass_data.referal),
-        "tags": _to_optional_json_object(pass_data.tags),
+        "tags": _to_optional_int_list(pass_data.tags),
     }
 
 
@@ -163,7 +163,13 @@ def _to_optional_str(raw: object) -> str | None:
     return stripped or None
 
 
-def _to_optional_json_object(raw: object) -> dict[str, Any] | None:
-    if not isinstance(raw, dict):
+def _to_optional_int_list(raw: object) -> list[int] | None:
+    if not isinstance(raw, list):
         return None
-    return raw
+    normalized: list[int] = []
+    for item in raw:
+        value = _to_optional_int(item)
+        if value is None:
+            return None
+        normalized.append(value)
+    return normalized

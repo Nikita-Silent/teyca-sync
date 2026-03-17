@@ -1,6 +1,5 @@
 """Incoming webhook payload from Teyca. type + pass (any extra fields from Teyca allowed)."""
 
-from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -33,7 +32,7 @@ class PassData(BaseModel):
     date_last: str | None = None
     city: str | None = None
     referal: str | None = None
-    tags: dict[str, Any] | None = None
+    tags: list[int] | None = None
     template: str | None = None
     key1: str | None = None
     key2: str | None = None

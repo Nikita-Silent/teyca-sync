@@ -16,7 +16,7 @@ from app.workers.legacy_snapshot_importer import (
     _to_optional_bool,
     _to_optional_float,
     _to_optional_int,
-    _to_optional_json_object,
+    _to_optional_int_list,
 )
 
 
@@ -49,11 +49,12 @@ def test_optional_numeric_parsers() -> None:
     assert _to_optional_float("bad") is None
 
 
-def test_optional_json_object_parser() -> None:
-    assert _to_optional_json_object({"values": [892]}) == {"values": [892]}
-    assert _to_optional_json_object('{"values":[893]}') == {"values": [893]}
-    assert _to_optional_json_object('["bad"]') is None
-    assert _to_optional_json_object("bad") is None
+def test_optional_int_list_parser() -> None:
+    assert _to_optional_int_list([892, "893"]) == [892, 893]
+    assert _to_optional_int_list("[894,895]") == [894, 895]
+    assert _to_optional_int_list({"values": [893]}) == [893]
+    assert _to_optional_int_list('{"values":[893]}') is None
+    assert _to_optional_int_list("bad") is None
 
 
 def test_optional_bool_and_datetime_parsers() -> None:
@@ -161,7 +162,7 @@ async def test_import_users_maps_referal_and_tags() -> None:
                     "date_last": None,
                     "city": "Novokuznetsk",
                     "referal": "4243447",
-                    "tags": {"values": [892]},
+                    "tags": [892, 899],
                     "created_at": None,
                     "updated_at": None,
                 }
@@ -176,4 +177,4 @@ async def test_import_users_maps_referal_and_tags() -> None:
     importer._insert_rows_in_chunks.assert_awaited_once()
     rows = importer._insert_rows_in_chunks.await_args.kwargs["rows"]
     assert rows[0]["referal"] == "4243447"
-    assert rows[0]["tags"] == {"values": [892]}
+    assert rows[0]["tags"] == [892, 899]

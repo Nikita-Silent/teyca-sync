@@ -74,7 +74,7 @@ class UsersRepository:
             values[field] = profile.get(field)
         values["email"] = _normalize_email(values.get("email"))
         values["referal"] = _normalize_text(values.get("referal"))
-        values["tags"] = _normalize_json_object(values.get("tags"))
+        values["tags"] = _normalize_int_list(values.get("tags"))
 
         insert_stmt = insert(User).values(**values)
         update_fields = {field: values[field] for field in USER_UPSERT_FIELDS}
@@ -104,7 +104,14 @@ def _normalize_text(raw: object) -> str | None:
     return normalized or None
 
 
-def _normalize_json_object(raw: object) -> dict[str, Any] | None:
-    if not isinstance(raw, dict):
+def _normalize_int_list(raw: object) -> list[int] | None:
+    if isinstance(raw, dict):
+        raw = raw.get("values")
+    if not isinstance(raw, list):
         return None
-    return raw
+    normalized: list[int] = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, int):
+            return None
+        normalized.append(item)
+    return normalized

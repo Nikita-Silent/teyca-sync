@@ -42,13 +42,13 @@ async def test_users_repository_paths() -> None:
             "email": "  X@Y.Z  ",
             "summ": 10,
             "referal": "  4243447  ",
-            "tags": {"values": [892]},
+            "tags": [892, 899],
         },
     )
     users_upsert_stmt = session.execute.await_args_list[0].args[0]
     assert users_upsert_stmt.compile().params["email"] == "x@y.z"
     assert users_upsert_stmt.compile().params["referal"] == "4243447"
-    assert users_upsert_stmt.compile().params["tags"] == {"values": [892]}
+    assert users_upsert_stmt.compile().params["tags"] == [892, 899]
 
     await repo.delete_by_user_id(user_id=1)
     assert session.execute.await_count >= 2

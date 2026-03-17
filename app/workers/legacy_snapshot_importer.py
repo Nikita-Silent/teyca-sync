@@ -192,7 +192,7 @@ class LegacySnapshotImporter:
                     "date_last": self._parse_str(row.get("date_last"), field="users.date_last"),
                     "city": self._parse_str(row.get("city"), field="users.city"),
                     "referal": self._parse_str(row.get("referal"), field="users.referal"),
-                    "tags": self._parse_json_object(row.get("tags"), field="users.tags"),
+                    "tags": self._parse_int_list(row.get("tags"), field="users.tags"),
                     "created_at": self._parse_datetime(
                         row.get("created_at"), field="users.created_at"
                     ),
@@ -493,8 +493,8 @@ class LegacySnapshotImporter:
             self._track(field=field, status="null")
         return None
 
-    def _parse_json_object(self, raw: object, *, field: str) -> dict[str, Any] | None:
-        value = _to_optional_json_object(raw)
+    def _parse_int_list(self, raw: object, *, field: str) -> list[int] | None:
+        value = _to_optional_int_list(raw)
         if value is not None:
             self._track(field=field, status="parsed")
             return value
@@ -550,11 +550,19 @@ def _to_optional_float(raw: object) -> float | None:
     return None
 
 
-def _to_optional_json_object(raw: object) -> dict[str, Any] | None:
+def _to_optional_int_list(raw: object) -> list[int] | None:
     if raw is None:
         return None
     if isinstance(raw, dict):
-        return raw
+        raw = raw.get("values")
+    if isinstance(raw, list):
+        normalized: list[int] = []
+        for item in raw:
+            value = _to_optional_int(item)
+            if value is None:
+                return None
+            normalized.append(value)
+        return normalized
     if isinstance(raw, str):
         stripped = raw.strip()
         if not stripped:
@@ -563,8 +571,8 @@ def _to_optional_json_object(raw: object) -> dict[str, Any] | None:
             parsed = json.loads(stripped)
         except json.JSONDecodeError:
             return None
-        if isinstance(parsed, dict):
-            return parsed
+        if isinstance(parsed, list):
+            return _to_optional_int_list(parsed)
     return None
 
 
