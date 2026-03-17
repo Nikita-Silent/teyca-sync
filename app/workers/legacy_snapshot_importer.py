@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-import re
 from typing import Any
 
 import structlog
@@ -91,7 +92,9 @@ class LegacySnapshotImporter:
             await source_conn.close()
             await self._source_engine.dispose()
 
-        stats.field_stats = {field: dict(counter) for field, counter in sorted(self._field_stats.items())}
+        stats.field_stats = {
+            field: dict(counter) for field, counter in sorted(self._field_stats.items())
+        }
         logger.info(
             "legacy_snapshot_import_done",
             dry_run=dry_run,
@@ -146,6 +149,8 @@ class LegacySnapshotImporter:
                 visits_all,
                 date_last,
                 city,
+                referal,
+                tags,
                 created_at,
                 updated_at
             FROM loyalty_users
@@ -175,7 +180,9 @@ class LegacySnapshotImporter:
                     "barcode": self._parse_str(row.get("barcode"), field="users.barcode"),
                     "discount": self._parse_str(row.get("discount"), field="users.discount"),
                     "bonus": self._parse_float(row.get("bonus"), field="users.bonus"),
-                    "loyalty_level": self._parse_str(row.get("loyalty_level"), field="users.loyalty_level"),
+                    "loyalty_level": self._parse_str(
+                        row.get("loyalty_level"), field="users.loyalty_level"
+                    ),
                     "summ": self._parse_float(row.get("summ"), field="users.summ"),
                     "summ_all": self._parse_float(row.get("summ_all"), field="users.summ_all"),
                     "summ_last": self._parse_float(row.get("summ_last"), field="users.summ_last"),
@@ -184,8 +191,14 @@ class LegacySnapshotImporter:
                     "visits_all": self._parse_int(row.get("visits_all"), field="users.visits_all"),
                     "date_last": self._parse_str(row.get("date_last"), field="users.date_last"),
                     "city": self._parse_str(row.get("city"), field="users.city"),
-                    "created_at": self._parse_datetime(row.get("created_at"), field="users.created_at"),
-                    "updated_at": self._parse_datetime(row.get("updated_at"), field="users.updated_at"),
+                    "referal": self._parse_str(row.get("referal"), field="users.referal"),
+                    "tags": self._parse_int_list(row.get("tags"), field="users.tags"),
+                    "created_at": self._parse_datetime(
+                        row.get("created_at"), field="users.created_at"
+                    ),
+                    "updated_at": self._parse_datetime(
+                        row.get("updated_at"), field="users.updated_at"
+                    ),
                 }
             )
 
@@ -230,7 +243,9 @@ class LegacySnapshotImporter:
             if user_id is None or subscriber_id is None:
                 skipped += 1
                 continue
-            status = self._parse_status(row.get("listmonk_user_status"), field="listmonk_users.status")
+            status = self._parse_status(
+                row.get("listmonk_user_status"), field="listmonk_users.status"
+            )
             list_status_raw = self._parse_str(
                 row.get("listmonk_list_id_status"),
                 field="listmonk_users.legacy_list_id_status",
@@ -365,7 +380,9 @@ class LegacySnapshotImporter:
                 skipped += 1
                 continue
 
-            updated_at = self._parse_datetime(row.get("updated_at"), field="bonus_accrual_log.updated_at")
+            updated_at = self._parse_datetime(
+                row.get("updated_at"), field="bonus_accrual_log.updated_at"
+            )
             finalized_at = updated_at or imported_at
 
             payload.append(
@@ -391,8 +408,10 @@ class LegacySnapshotImporter:
             return 0, skipped
         inserted = 0
         for chunk in _chunked(payload, self._batch_size):
-            stmt = insert(BonusAccrualLog).values(chunk).on_conflict_do_nothing(
-                constraint="uq_bonus_accrual_idempotency_key"
+            stmt = (
+                insert(BonusAccrualLog)
+                .values(chunk)
+                .on_conflict_do_nothing(constraint="uq_bonus_accrual_idempotency_key")
             )
             result_target = await self._session.execute(stmt)
             inserted += int(result_target.rowcount or 0)
@@ -474,6 +493,17 @@ class LegacySnapshotImporter:
             self._track(field=field, status="null")
         return None
 
+    def _parse_int_list(self, raw: object, *, field: str) -> list[int] | None:
+        value = _to_optional_int_list(raw)
+        if value is not None:
+            self._track(field=field, status="parsed")
+            return value
+        if _has_non_empty_input(raw):
+            self._track(field=field, status="invalid")
+        else:
+            self._track(field=field, status="null")
+        return None
+
 
 def _to_optional_str(raw: object) -> str | None:
     if raw is None:
@@ -515,8 +545,34 @@ def _to_optional_float(raw: object) -> float | None:
             return None
         try:
             return float(Decimal(stripped))
-        except (InvalidOperation, ValueError):
+        except InvalidOperation, ValueError:
             return None
+    return None
+
+
+def _to_optional_int_list(raw: object) -> list[int] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        raw = raw.get("values")
+    if isinstance(raw, list):
+        normalized: list[int] = []
+        for item in raw:
+            value = _to_optional_int(item)
+            if value is None:
+                return None
+            normalized.append(value)
+        return normalized
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, list):
+            return _to_optional_int_list(parsed)
     return None
 
 

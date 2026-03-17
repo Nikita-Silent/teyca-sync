@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
-import re
 from typing import Any
 
 from app.repositories.old_db import OldUserData
@@ -46,10 +46,14 @@ def build_profile_from_pass(pass_data: PassData) -> dict[str, Any]:
         "visits_all": _to_optional_int(pass_data.visits_all),
         "date_last": pass_data.date_last,
         "city": pass_data.city,
+        "referal": _to_optional_str(pass_data.referal),
+        "tags": _to_optional_int_list(pass_data.tags),
     }
 
 
-def merge_profile_with_old_data(profile: dict[str, Any], old_data: OldUserData | None) -> MergeResult:
+def merge_profile_with_old_data(
+    profile: dict[str, Any], old_data: OldUserData | None
+) -> MergeResult:
     """Apply merge-by-sum rules for numeric fields."""
     if old_data is None:
         return MergeResult(profile=profile, merged=False)
@@ -150,3 +154,22 @@ def _to_optional_int(raw: object) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _to_optional_str(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _to_optional_int_list(raw: object) -> list[int] | None:
+    if not isinstance(raw, list):
+        return None
+    normalized: list[int] = []
+    for item in raw:
+        value = _to_optional_int(item)
+        if value is None:
+            return None
+        normalized.append(value)
+    return normalized

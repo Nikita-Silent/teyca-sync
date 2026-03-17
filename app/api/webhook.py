@@ -8,11 +8,12 @@ from uuid import uuid4
 
 import aio_pika
 import structlog
+from aio_pika.exceptions import CONNECTION_EXCEPTIONS
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from aio_pika.exceptions import CONNECTION_EXCEPTIONS
 
 from app.api.auth import verify_webhook_token
 from app.config import get_settings
@@ -82,10 +83,7 @@ async def health() -> JSONResponse:
         **live_payload["checks"],
         **ready_payload["checks"],
     }
-    is_healthy = (
-        live_response.status_code == 200
-        and ready_response.status_code == 200
-    )
+    is_healthy = live_response.status_code == 200 and ready_response.status_code == 200
     return JSONResponse(
         status_code=200 if is_healthy else 503,
         content={
@@ -116,7 +114,20 @@ async def webhook(
         )
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
 
-    payload = WebhookPayload.model_validate(body)
+    try:
+        payload = WebhookPayload.model_validate(body)
+    except ValidationError as exc:
+        logger.error(
+            "webhook_validation_failed",
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            payload_type=body.get("type") if isinstance(body, dict) else None,
+            user_id=_extract_user_id(body),
+            error_count=len(exc.errors()),
+            invalid_fields=_extract_invalid_fields(exc),
+        )
+        raise HTTPException(status_code=422, detail="Invalid webhook payload") from exc
+
     message = payload.model_dump(by_alias=True)
     message["trace_id"] = trace_id
     message["source_event_id"] = source_event_id
@@ -140,6 +151,32 @@ def _extract_trace_id(request: Request) -> str:
 def _extract_source_event_id(request: Request) -> str:
     raw = request.headers.get("x-event-id", "").strip()
     return raw or str(uuid4())
+
+
+def _extract_user_id(body: object) -> int | None:
+    if not isinstance(body, dict):
+        return None
+    pass_payload = body.get("pass")
+    if not isinstance(pass_payload, dict):
+        return None
+    raw_user_id = pass_payload.get("user_id")
+    if isinstance(raw_user_id, bool):
+        return None
+    if isinstance(raw_user_id, int):
+        return raw_user_id
+    return None
+
+
+def _extract_invalid_fields(exc: ValidationError) -> list[str]:
+    invalid_fields: list[str] = []
+    for error in exc.errors():
+        raw_location = error.get("loc")
+        if not isinstance(raw_location, tuple):
+            continue
+        location = ".".join(str(part) for part in raw_location)
+        if location:
+            invalid_fields.append(location)
+    return invalid_fields
 
 
 async def _check_database_health() -> str | None:

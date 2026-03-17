@@ -12,6 +12,8 @@ from app.clients.teyca import BonusOperation, SlidingWindowRateLimiter, TeycaAPI
 from app.consumers.common import (
     _to_optional_float,
     _to_optional_int,
+    _to_optional_int_list,
+    _to_optional_str,
     build_listmonk_attributes,
     build_merge_key2_value,
     build_profile_from_pass,
@@ -114,11 +116,15 @@ def test_common_helpers_cover_numeric_and_merge_paths() -> None:
             "summ": "10.5",
             "visits": "2",
             "bonus": "100",
+            "referal": "  4243447  ",
+            "tags": [892, 899],
         }
     )
     profile = build_profile_from_pass(pass_data)
     assert profile["summ"] == 10.5
     assert profile["visits"] == 2
+    assert profile["referal"] == "4243447"
+    assert profile["tags"] == [892, 899]
 
     merged = merge_profile_with_old_data(
         profile,
@@ -145,11 +151,17 @@ def test_common_helpers_cover_numeric_and_merge_paths() -> None:
     assert _to_optional_int("bad") is None
     assert _to_optional_int(1.9) == 1
     assert _to_optional_int(object()) is None
+    assert _to_optional_str("  abc  ") == "abc"
+    assert _to_optional_str(" ") is None
+    assert _to_optional_int_list([1, "2"]) == [1, 2]
+    assert _to_optional_int_list(["bad"]) is None
     assert is_valid_email("user@example.com") is True
     assert is_valid_email("bad..mail@example.com") is False
     assert is_valid_email("bad.mail@") is False
 
-    assert build_merge_key2_value(datetime(2026, 3, 6, 12, 1, tzinfo=UTC)) == "merge 06.03.2026 19:01"
+    assert (
+        build_merge_key2_value(datetime(2026, 3, 6, 12, 1, tzinfo=UTC)) == "merge 06.03.2026 19:01"
+    )
 
 
 @pytest.mark.asyncio

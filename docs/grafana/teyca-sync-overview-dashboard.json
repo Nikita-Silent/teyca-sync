@@ -15,6 +15,7 @@
       }
     ]
   },
+  "description": "Operator-focused Loki dashboard for teyca-sync.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -24,49 +25,67 @@
   "panels": [
     {
       "datasource": {
-        "type": "loki",
-        "uid": "$datasource"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
+        "type": "grafana",
+        "uid": "-- Grafana --"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 3,
+        "w": 24,
         "x": 0,
         "y": 0
       },
       "id": 1,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "content": "# Teyca Sync Overview\nСмотреть сверху вниз:\n- `Total Logs / Errors / Webhooks / Teyca Failures` — что происходило за выбранный период\n- `Logs By Component` — какой worker реально живой\n- `Errors By Event` — что именно ломается\n- `Consent Sync` и `Reconcile` — агрегаты фоновых джоб\n- `Recent Failures` — основной panel для дебага",
+        "mode": "markdown"
+      },
+      "title": "How To Read This Dashboard",
+      "type": "text"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 3
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
       },
       "targets": [
         {
@@ -75,14 +94,205 @@
             "uid": "$datasource"
           },
           "editorMode": "code",
-          "expr": "sum by (type) (count_over_time({service=\"teyca-sync\", component=\"app\"} | json | event=\"webhook_received\" [$__interval]))",
-          "legendFormat": "{{type}}",
-          "queryType": "range",
+          "expr": "sum(count_over_time({service=\"teyca-sync\"} [$__range])) or vector(0)",
+          "instant": true,
+          "queryType": "instant",
           "refId": "A"
         }
       ],
-      "title": "Webhook Received By Type",
-      "type": "timeseries"
+      "title": "Total Logs",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 3
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service=\"teyca-sync\"} | json | level=\"error\" [$__range])) or vector(0)",
+          "instant": true,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 3
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service=\"teyca-sync\"} | json | event=\"webhook_received\" [$__range])) or vector(0)",
+          "instant": true,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Webhooks",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 3
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({service=\"teyca-sync\"} | json | event=~\"teyca_update_pass_failed|teyca_accrue_bonuses_failed\" [$__range])) or vector(0)",
+          "instant": true,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Teyca Failures",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -101,10 +311,6 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
               }
             ]
           }
@@ -114,261 +320,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "id": 2,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "$datasource"
-          },
-          "editorMode": "code",
-          "expr": "sum by (queue_name) (count_over_time({service=\"teyca-sync\", component=\"consumers\"} | json | event=\"consumer_message_failed\" [$__interval]))",
-          "legendFormat": "{{queue_name}}",
-          "queryType": "range",
-          "refId": "A"
-        }
-      ],
-      "title": "Consumer Message Failures",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "$datasource"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
         "x": 0,
-        "y": 8
-      },
-      "id": 3,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "$datasource"
-          },
-          "editorMode": "code",
-          "expr": "sum(count_over_time({service=\"teyca-sync\"} | json | event=\"teyca_update_pass_done\" [$__interval]))",
-          "legendFormat": "PUT done",
-          "queryType": "range",
-          "refId": "A"
-        }
-      ],
-      "title": "Teyca PUT Success Rate",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "$datasource"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 6,
-        "y": 8
-      },
-      "id": 4,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "$datasource"
-          },
-          "editorMode": "code",
-          "expr": "sum(count_over_time({service=\"teyca-sync\"} | json | event=\"teyca_update_pass_failed\" [$__interval]))",
-          "legendFormat": "PUT failed",
-          "queryType": "range",
-          "refId": "A"
-        }
-      ],
-      "title": "Teyca PUT Failure Rate",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "$datasource"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 12,
-        "y": 8
-      },
-      "id": 5,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "$datasource"
-          },
-          "editorMode": "code",
-          "expr": "sum(count_over_time({service=\"teyca-sync\", component=\"consent-sync\"} | json | event=\"consent_sync_run_completed\" [$__interval]))",
-          "legendFormat": "consent-sync runs",
-          "queryType": "range",
-          "refId": "A"
-        }
-      ],
-      "title": "Consent Sync Runs",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "$datasource"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 8
+        "y": 7
       },
       "id": 6,
       "options": {
@@ -379,8 +332,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -390,13 +343,13 @@
             "uid": "$datasource"
           },
           "editorMode": "code",
-          "expr": "max_over_time({service=\"teyca-sync\", component=\"consent-sync\"} | json | event=\"consent_sync_metrics\" | unwrap teyca_errors [$__interval])",
-          "legendFormat": "teyca_errors (max)",
+          "expr": "sum by (component) (count_over_time({service=\"teyca-sync\"} [$__interval]))",
+          "legendFormat": "{{component}}",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Consent Sync Teyca Errors",
+      "title": "Logs By Component",
       "type": "timeseries"
     },
     {
@@ -416,10 +369,6 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
               }
             ]
           }
@@ -429,8 +378,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 16
+        "x": 12,
+        "y": 7
       },
       "id": 7,
       "options": {
@@ -441,8 +390,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -452,14 +401,211 @@
             "uid": "$datasource"
           },
           "editorMode": "code",
-          "expr": "sum by (component) (count_over_time({service=\"teyca-sync\"} | json | event=\"teyca_update_pass_done\" [$__interval]))",
-          "legendFormat": "{{component}}",
+          "expr": "topk(8, sum by (event) (count_over_time({service=\"teyca-sync\"} | json | level=\"error\" [$__interval])))",
+          "legendFormat": "{{event}}",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Teyca PUT Success By Component",
+      "title": "Errors By Event",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(sum_over_time({service=\"teyca-sync\"} | json | event=\"consent_sync_metrics\" | unwrap processed [$__interval])) or vector(0)",
+          "legendFormat": "processed",
+          "queryType": "range",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(sum_over_time({service=\"teyca-sync\"} | json | event=\"consent_sync_metrics\" | unwrap confirmed_done [$__interval])) or vector(0)",
+          "legendFormat": "confirmed_done",
+          "queryType": "range",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(sum_over_time({service=\"teyca-sync\"} | json | event=\"consent_sync_metrics\" | unwrap teyca_errors [$__interval])) or vector(0)",
+          "legendFormat": "teyca_errors",
+          "queryType": "range",
+          "refId": "C"
+        }
+      ],
+      "title": "Consent Sync",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(sum_over_time({service=\"teyca-sync\"} | json | event=\"listmonk_reconcile_metrics\" | unwrap scanned [$__interval])) or vector(0)",
+          "legendFormat": "scanned",
+          "queryType": "range",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(sum_over_time({service=\"teyca-sync\"} | json | event=\"listmonk_reconcile_metrics\" | unwrap restored [$__interval])) or vector(0)",
+          "legendFormat": "restored",
+          "queryType": "range",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(sum_over_time({service=\"teyca-sync\"} | json | event=\"listmonk_reconcile_metrics\" | unwrap consistency_restored [$__interval])) or vector(0)",
+          "legendFormat": "consistency_restored",
+          "queryType": "range",
+          "refId": "C"
+        }
+      ],
+      "title": "Reconcile",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 10,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "{service=\"teyca-sync\"} | json | level=\"error\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent Failures",
+      "type": "logs"
     }
   ],
   "refresh": "30s",
@@ -467,8 +613,7 @@
   "style": "dark",
   "tags": [
     "teyca-sync",
-    "loki",
-    "operations"
+    "loki"
   ],
   "templating": {
     "list": [
@@ -493,13 +638,13 @@
     ]
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-24h",
     "to": "now"
   },
   "timepicker": {},
-  "timezone": "",
+  "timezone": "browser",
   "title": "Teyca Sync Overview",
   "uid": "teyca-sync-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

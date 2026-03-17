@@ -31,6 +31,8 @@ class PassData(BaseModel):
     visits_all: int | str | None = None
     date_last: str | None = None
     city: str | None = None
+    referal: str | None = None
+    tags: list[int] | None = None
     template: str | None = None
     key1: str | None = None
     key2: str | None = None
