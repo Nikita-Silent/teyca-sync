@@ -81,10 +81,21 @@ async def test_listmonk_users_repository_paths() -> None:
             ]
         )
     )
-    assert (await repo.get_by_subscriber_id(subscriber_id=10)).user_id == 2
+    session.execute.reset_mock()
+    with patch("app.repositories.listmonk_users.logger.warning") as logger_warning:
+        assert (await repo.get_by_subscriber_id(subscriber_id=10)).user_id == 2
+    assert session.execute.await_count == 2
+    logger_warning.assert_called_once_with(
+        "listmonk_users_duplicate_subscriber_id_collapsed",
+        subscriber_id=10,
+        duplicate_rows=2,
+        kept_user_id=2,
+        removed_user_ids=[1],
+    )
 
     session.execute.reset_mock()
     session.execute.side_effect = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
         SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
         SimpleNamespace(),
     ]
@@ -96,11 +107,49 @@ async def test_listmonk_users_repository_paths() -> None:
         list_ids=[1, 2],
         attributes={"user_id": 1},
     )
-    listmonk_upsert_stmt = session.execute.await_args_list[1].args[0]
+    listmonk_upsert_stmt = session.execute.await_args_list[2].args[0]
     assert listmonk_upsert_stmt.compile().params["email"] == "u@example.com"
 
     session.execute.reset_mock()
     session.execute.side_effect = [
+        SimpleNamespace(
+            scalars=lambda: SimpleNamespace(
+                all=lambda: [SimpleNamespace(user_id=2), SimpleNamespace(user_id=1)]
+            )
+        ),
+        SimpleNamespace(),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [2])),
+    ]
+    with (
+        patch("app.repositories.listmonk_users.logger.warning") as logger_warning,
+        patch("app.repositories.listmonk_users.logger.error") as logger_error,
+        pytest.raises(DuplicateListmonkUserEmailError),
+    ):
+        await repo.upsert(
+            user_id=1,
+            subscriber_id=10,
+            email="duplicate@example.com",
+            status="enabled",
+            list_ids=[1],
+            attributes={"user_id": 1},
+        )
+    logger_warning.assert_called_once_with(
+        "listmonk_users_duplicate_subscriber_id_dropped_before_upsert",
+        subscriber_id=10,
+        target_user_id=1,
+        removed_user_ids=[2],
+    )
+    logger_error.assert_called_once_with(
+        "listmonk_users_duplicate_email",
+        email="duplicate@example.com",
+        user_id=1,
+        duplicate_rows=1,
+        existing_user_ids=[2],
+    )
+
+    session.execute.reset_mock()
+    session.execute.side_effect = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
         SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [2])),
     ]
     with (
