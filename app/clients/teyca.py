@@ -211,12 +211,12 @@ class TeycaClient:
     def __init__(
         self,
         settings: Settings,
+        rate_limiter: RateLimiter,
         http_client: httpx.AsyncClient | None = None,
-        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self._settings = settings
         self._client = http_client
-        self._rate_limiter = rate_limiter or build_teyca_rate_limiter(settings)
+        self._rate_limiter = rate_limiter
 
     async def accrue_bonuses(self, *, user_id: int, bonuses: list[BonusOperation]) -> None:
         """Call POST /v1/{token}/passes/{user_id}/bonuses."""
@@ -328,16 +328,32 @@ class TeycaClient:
 
 
 def build_teyca_rate_limiter(settings: Settings) -> RateLimiter:
-    """Create either a shared Redis-backed limiter or the local fallback."""
+    """Create a shared Redis-backed limiter or an explicitly allowed local one."""
     redis_url = str(getattr(settings, "teyca_rate_limit_redis_url", "") or "").strip()
-    if not redis_url:
-        return SlidingWindowRateLimiter(limits=TeycaClient._DEFAULT_LIMITS)
+    if redis_url:
+        redis_client = cast(AsyncRedisEvalClient, Redis.from_url(redis_url))
+        return RedisSlidingWindowRateLimiter(
+            redis_client=redis_client,
+            limits=TeycaClient._DEFAULT_LIMITS,
+            key_prefix=_build_redis_key_prefix(settings),
+        )
 
-    redis_client = cast(AsyncRedisEvalClient, Redis.from_url(redis_url))
-    return RedisSlidingWindowRateLimiter(
-        redis_client=redis_client,
-        limits=TeycaClient._DEFAULT_LIMITS,
-        key_prefix=_build_redis_key_prefix(settings),
+    allow_local = bool(getattr(settings, "teyca_allow_local_rate_limiter", False))
+    if not allow_local:
+        raise TeycaAPIError(
+            "TEYCA_RATE_LIMIT_REDIS_URL must be configured unless "
+            "TEYCA_ALLOW_LOCAL_RATE_LIMITER=true is set explicitly"
+        )
+
+    logger.warning("teyca_rate_limiter_local_fallback_enabled")
+    return SlidingWindowRateLimiter(limits=TeycaClient._DEFAULT_LIMITS)
+
+
+def build_teyca_client(settings: Settings) -> TeycaClient:
+    """Build Teyca client with an explicit limiter selection."""
+    return TeycaClient(
+        settings=settings,
+        rate_limiter=build_teyca_rate_limiter(settings),
     )
 
 

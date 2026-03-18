@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkSDKClient, SubscriberDelta, SubscriberState
-from app.clients.teyca import BonusOperation, TeycaAPIError, TeycaClient
+from app.clients.teyca import BonusOperation, TeycaAPIError, TeycaClient, build_teyca_client
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.repositories.bonus_accrual import BonusAccrualRepository
@@ -581,7 +581,7 @@ def build_consent_sync_worker() -> ConsentSyncWorker:
         settings=settings,
         session_factory=SessionLocal,
         listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=TeycaClient(settings),
+        teyca_client=build_teyca_client(settings),
     )
 
 

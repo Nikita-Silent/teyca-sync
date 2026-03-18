@@ -16,6 +16,7 @@ from app.clients.teyca import (
     SlidingWindowRateLimiter,
     TeycaAPIError,
     TeycaClient,
+    build_teyca_client,
     build_teyca_rate_limiter,
 )
 from app.config import Settings
@@ -276,8 +277,12 @@ def test_teyca_client_settings_validation() -> None:
         teyca_base_url="https://api.example.com",
         teyca_api_key="",
         teyca_token="",
+        teyca_allow_local_rate_limiter=True,
     )
-    client = TeycaClient(settings=cast(Settings, settings))
+    client = TeycaClient(
+        settings=cast(Settings, settings),
+        rate_limiter=AsyncMock(),
+    )
     with pytest.raises(TeycaAPIError):
         client._get_headers()
 
@@ -288,8 +293,13 @@ async def test_teyca_client_uses_internal_httpx_client_when_not_injected() -> No
         teyca_base_url="https://api.example.com/",
         teyca_api_key="api-key",
         teyca_token="token-1",
+        teyca_allow_local_rate_limiter=True,
     )
-    client = TeycaClient(settings=cast(Settings, settings), http_client=None)
+    client = TeycaClient(
+        settings=cast(Settings, settings),
+        http_client=None,
+        rate_limiter=AsyncMock(),
+    )
 
     httpx_client = AsyncMock()
     httpx_client.post.return_value = SimpleNamespace(status_code=200, text="ok")
@@ -362,6 +372,7 @@ def test_build_teyca_rate_limiter_uses_redis_when_configured() -> None:
         teyca_token="token-1",
         teyca_rate_limit_redis_url="redis://redis:6379/0",
         teyca_rate_limit_redis_prefix="teyca-rate-limit",
+        teyca_allow_local_rate_limiter=False,
     )
     factory = FakeRedisFactory()
 
@@ -372,18 +383,52 @@ def test_build_teyca_rate_limiter_uses_redis_when_configured() -> None:
     assert factory.calls == ["redis://redis:6379/0"]
 
 
-def test_build_teyca_rate_limiter_falls_back_to_local_when_redis_is_disabled() -> None:
+def test_build_teyca_rate_limiter_falls_back_to_local_when_explicitly_allowed() -> None:
     settings = SimpleNamespace(
         teyca_base_url="https://api.example.com/",
         teyca_api_key="api-key",
         teyca_token="token-1",
         teyca_rate_limit_redis_url="",
         teyca_rate_limit_redis_prefix="teyca-rate-limit",
+        teyca_allow_local_rate_limiter=True,
     )
 
     limiter = build_teyca_rate_limiter(cast(Settings, settings))
 
     assert isinstance(limiter, SlidingWindowRateLimiter)
+
+
+def test_build_teyca_rate_limiter_requires_redis_in_production() -> None:
+    settings = SimpleNamespace(
+        teyca_base_url="https://api.example.com/",
+        teyca_api_key="api-key",
+        teyca_token="token-1",
+        teyca_rate_limit_redis_url="",
+        teyca_rate_limit_redis_prefix="teyca-rate-limit",
+        teyca_allow_local_rate_limiter=False,
+    )
+
+    with pytest.raises(TeycaAPIError):
+        build_teyca_rate_limiter(cast(Settings, settings))
+
+
+def test_build_teyca_client_passes_explicit_limiter() -> None:
+    settings = SimpleNamespace(
+        teyca_base_url="https://api.example.com/",
+        teyca_api_key="api-key",
+        teyca_token="token-1",
+        teyca_rate_limit_redis_url="",
+        teyca_rate_limit_redis_prefix="teyca-rate-limit",
+        teyca_allow_local_rate_limiter=True,
+    )
+
+    with patch(
+        "app.clients.teyca.build_teyca_rate_limiter", return_value=AsyncMock()
+    ) as limiter_mock:
+        client = build_teyca_client(cast(Settings, settings))
+
+    assert isinstance(client, TeycaClient)
+    limiter_mock.assert_called_once()
 
 
 def test_run_entrypoints_call_asyncio_run() -> None:

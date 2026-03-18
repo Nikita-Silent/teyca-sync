@@ -654,7 +654,7 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
             ),
         ),
         patch("app.workers.run_queue_consumers.ListmonkSDKClient"),
-        patch("app.workers.run_queue_consumers.TeycaClient"),
+        patch("app.workers.run_queue_consumers.build_teyca_client"),
         patch("app.workers.run_queue_consumers.OldDBRepository") as old_db_repo_cls,
         patch("app.workers.run_queue_consumers.configure_logging"),
         patch("app.workers.run_queue_consumers.shutdown_logging"),

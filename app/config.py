@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     teyca_token: str = ""
     teyca_rate_limit_redis_url: str = ""
     teyca_rate_limit_redis_prefix: str = "teyca-rate-limit"
+    teyca_allow_local_rate_limiter: bool = False
 
     # Old DB (read-only, merge)
     export_db_url: str = ""

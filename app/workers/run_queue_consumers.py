@@ -14,7 +14,7 @@ from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
 from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkSDKClient
-from app.clients.teyca import TeycaAPIError, TeycaClient
+from app.clients.teyca import TeycaAPIError, TeycaClient, build_teyca_client
 from app.config import Settings, get_settings
 from app.consumers.create_user import CreateConsumerDeps
 from app.consumers.create_user import handle as handle_create
@@ -532,7 +532,7 @@ async def _run() -> None:
     runner = ConsumersRunner(
         settings=settings,
         listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=TeycaClient(settings),
+        teyca_client=build_teyca_client(settings),
         old_db_repo=OldDBRepository(
             settings.export_db_url,
             request_timeout_seconds=settings.export_db_request_timeout_seconds,
