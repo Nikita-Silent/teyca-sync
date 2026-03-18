@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import structlog
 from sqlalchemy import Select, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ListmonkUser
@@ -199,7 +200,19 @@ class ListmonkUsersRepository:
                 "attributes": attributes,
             },
         )
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            if "uq_listmonk_users_subscriber_id" not in str(exc.orig):
+                raise
+            duplicate_rows = await self._get_other_rows_for_subscriber_id(
+                user_id=user_id,
+                subscriber_id=subscriber_id,
+            )
+            raise DuplicateListmonkSubscriberIdError(
+                subscriber_id=subscriber_id,
+                rows=_to_duplicate_mapping_rows(duplicate_rows),
+            ) from exc
 
     async def get_pending_batch(self, *, limit: int) -> list[ListmonkUser]:
         """Return batch of pending users ordered by user_id."""

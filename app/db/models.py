@@ -58,6 +58,7 @@ class ListmonkUser(Base):
     """Listmonk sync state per user."""
 
     __tablename__ = "listmonk_users"
+    __table_args__ = (UniqueConstraint("subscriber_id", name="uq_listmonk_users_subscriber_id"),)
 
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.user_id", ondelete="RESTRICT"), primary_key=True

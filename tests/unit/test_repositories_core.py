@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import MergeLog
 from app.repositories.bonus_accrual import BonusAccrualRepository
@@ -170,6 +171,33 @@ async def test_listmonk_users_repository_paths() -> None:
         duplicate_rows=1,
         existing_user_ids=[2],
     )
+
+    session.execute.reset_mock()
+    session.execute.side_effect = [
+        SimpleNamespace(),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
+        IntegrityError(
+            statement=None,
+            params=None,
+            orig=RuntimeError("uq_listmonk_users_subscriber_id"),
+        ),
+        SimpleNamespace(
+            scalars=lambda: SimpleNamespace(
+                all=lambda: [SimpleNamespace(user_id=2), SimpleNamespace(user_id=1)]
+            )
+        ),
+    ]
+    with pytest.raises(DuplicateListmonkSubscriberIdError) as exc_info:
+        await repo.upsert(
+            user_id=1,
+            subscriber_id=10,
+            email="duplicate@example.com",
+            status="enabled",
+            list_ids=[1],
+            attributes={"user_id": 1},
+        )
+    assert exc_info.value.user_ids == [2]
 
     session.execute.side_effect = None
     session.execute.return_value = SimpleNamespace(
