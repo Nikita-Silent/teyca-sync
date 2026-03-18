@@ -10,6 +10,7 @@ from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.listmonk_user_archive import ListmonkUserArchiveRepository
 from app.repositories.listmonk_users import (
+    LISTMONK_SUBSCRIBER_LOCK_NAMESPACE,
     DuplicateListmonkSubscriberIdError,
     DuplicateListmonkUserEmailError,
     ListmonkUsersRepository,
@@ -95,6 +96,7 @@ async def test_listmonk_users_repository_paths() -> None:
 
     session.execute.reset_mock()
     session.execute.side_effect = [
+        SimpleNamespace(),
         SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
         SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
         SimpleNamespace(),
@@ -107,11 +109,15 @@ async def test_listmonk_users_repository_paths() -> None:
         list_ids=[1, 2],
         attributes={"user_id": 1},
     )
-    listmonk_upsert_stmt = session.execute.await_args_list[2].args[0]
+    lock_stmt, lock_params = session.execute.await_args_list[0].args
+    assert "pg_advisory_xact_lock" in str(lock_stmt)
+    assert lock_params == {"namespace": LISTMONK_SUBSCRIBER_LOCK_NAMESPACE, "lock_key": 10}
+    listmonk_upsert_stmt = session.execute.await_args_list[3].args[0]
     assert listmonk_upsert_stmt.compile().params["email"] == "u@example.com"
 
     session.execute.reset_mock()
     session.execute.side_effect = [
+        SimpleNamespace(),
         SimpleNamespace(
             scalars=lambda: SimpleNamespace(
                 all=lambda: [SimpleNamespace(user_id=2), SimpleNamespace(user_id=1)]
@@ -141,6 +147,7 @@ async def test_listmonk_users_repository_paths() -> None:
 
     session.execute.reset_mock()
     session.execute.side_effect = [
+        SimpleNamespace(),
         SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
         SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [2])),
     ]

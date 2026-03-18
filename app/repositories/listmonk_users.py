@@ -6,14 +6,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import Select, delete, func, select, update
+from sqlalchemy import Select, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ListmonkUser
 
 logger = structlog.get_logger()
+
+LISTMONK_SUBSCRIBER_LOCK_NAMESPACE = 2002
 
 
 class DuplicateListmonkUserEmailError(RuntimeError):
@@ -144,6 +145,7 @@ class ListmonkUsersRepository:
         attributes: dict[str, object] | None,
     ) -> None:
         """Insert/update listmonk state row."""
+        await self._lock_subscriber_id(subscriber_id=subscriber_id)
         normalized_email = _normalize_email(email)
         duplicate_subscriber_rows = await self._get_other_rows_for_subscriber_id(
             user_id=user_id, subscriber_id=subscriber_id
@@ -197,19 +199,7 @@ class ListmonkUsersRepository:
                 "attributes": attributes,
             },
         )
-        try:
-            await self._session.execute(stmt)
-        except IntegrityError as exc:
-            if "uq_listmonk_users_subscriber_id" not in str(exc.orig):
-                raise
-            duplicate_rows = await self._get_other_rows_for_subscriber_id(
-                user_id=user_id,
-                subscriber_id=subscriber_id,
-            )
-            raise DuplicateListmonkSubscriberIdError(
-                subscriber_id=subscriber_id,
-                rows=_to_duplicate_mapping_rows(duplicate_rows),
-            ) from exc
+        await self._session.execute(stmt)
 
     async def get_pending_batch(self, *, limit: int) -> list[ListmonkUser]:
         """Return batch of pending users ordered by user_id."""
@@ -280,6 +270,16 @@ class ListmonkUsersRepository:
         )
         result = await self._session.execute(stmt)
         return [int(item) for item in result.scalars().all()]
+
+    async def _lock_subscriber_id(self, *, subscriber_id: int) -> None:
+        """Serialize writes for one subscriber_id until DB constraint is deployed."""
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, :lock_key)"),
+            {
+                "namespace": LISTMONK_SUBSCRIBER_LOCK_NAMESPACE,
+                "lock_key": subscriber_id,
+            },
+        )
 
     async def _get_rows_by_subscriber_id(
         self, *, subscriber_id: int, limit: int
