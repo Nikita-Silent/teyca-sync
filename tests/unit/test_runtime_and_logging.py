@@ -5,6 +5,7 @@ import importlib
 import logging
 import os
 import runpy
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -264,7 +265,7 @@ async def test_consumers_runner_callback_ack_and_reject() -> None:
     published_message = channel.default_exchange.publish.await_args.args[0]
     assert published_message.headers["x-lock-busy-retry-count"] == 1
     assert published_message.headers["x-original-queue"] == run_queue_consumers.QUEUE_UPDATE
-    assert published_message.expiration == 1000
+    assert published_message.expiration == timedelta(seconds=1)
     assert channel.default_exchange.publish.await_args.kwargs["routing_key"] == "queue-update-retry"
 
 
@@ -313,6 +314,39 @@ async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -
     assert published_message.headers["x-lock-busy-retry-count"] == 6
     assert published_message.expiration is None
     assert channel.default_exchange.publish.await_args.kwargs["routing_key"] == "queue-update-dead"
+
+
+@pytest.mark.asyncio
+async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> None:
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+        old_db_repo=AsyncMock(),
+    )
+    message = AsyncMock()
+    message.body = b'{"type":"UPDATE","pass":{"user_id":42}}'
+    message.headers = {run_queue_consumers.LOCK_BUSY_RETRY_HEADER: 1}
+
+    with (
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_create", new=AsyncMock()
+        ) as consume_create,
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_update", new=AsyncMock()
+        ) as consume_update,
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_delete", new=AsyncMock()
+        ) as consume_delete,
+    ):
+        await runner._process(message, run_queue_consumers.QUEUE_UPDATE)
+
+    consume_create.assert_not_awaited()
+    consume_delete.assert_not_awaited()
+    consume_update.assert_awaited_once_with(
+        {"type": "UPDATE", "pass": {"user_id": 42}},
+        wait_for_lock=True,
+    )
 
 
 @pytest.mark.asyncio

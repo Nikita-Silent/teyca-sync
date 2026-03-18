@@ -126,6 +126,48 @@ async def test_update_invalid_email_blocks_and_skips_listmonk() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_retry_waits_for_user_lock() -> None:
+    deps = _deps()
+    deps.merge_repo.exists.return_value = True
+    deps.listmonk_repo.get_by_user_id.return_value = None
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = []
+    deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
+        subscriber_id=903,
+        status="enabled",
+        list_ids=[3],
+    )
+
+    await handle(_payload(), deps=deps, wait_for_lock=True)
+
+    deps.users_repo.lock_user.assert_awaited_once_with(user_id=20, wait=True)
+
+
+@pytest.mark.asyncio
+async def test_update_commits_before_external_calls() -> None:
+    deps = _deps()
+    events: list[str] = []
+    deps.commit_checkpoint = AsyncMock(side_effect=lambda: events.append("commit"))
+    deps.merge_repo.exists.return_value = False
+    deps.old_db_repo.get_user_data.return_value = OldUserData(bonus=40.0, summ=15)
+    deps.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=902)
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = []
+    deps.listmonk_client.upsert_subscriber.side_effect = lambda **_: (
+        events.append("listmonk")
+        or SimpleNamespace(
+            subscriber_id=902,
+            status="enabled",
+            list_ids=[3],
+        )
+    )
+    deps.teyca_client.accrue_bonuses.side_effect = lambda **_: events.append("teyca_bonus")
+
+    await handle(_payload(), deps=deps)
+
+    assert deps.commit_checkpoint.await_count == 2
+    assert events[:4] == ["commit", "listmonk", "commit", "teyca_bonus"]
+
+
+@pytest.mark.asyncio
 async def test_update_invalid_email_blocks_and_marks_existing_subscriber() -> None:
     deps = _deps()
     deps.merge_repo.exists.return_value = True
