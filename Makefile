@@ -1,7 +1,8 @@
-.PHONY: up down migrate test test-unit test-integration consent-sync-once reconcile-once consumers legacy-import legacy-import-dry-run
+.PHONY: up down migrate test test-unit test-integration typecheck typecheck-tests consent-sync-once reconcile-once consumers legacy-import legacy-import-dry-run
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
+BASEDPYRIGHT ?= ./.venv/bin/basedpyright
 
 up:
 	docker compose up -d --build
@@ -20,6 +21,12 @@ test-unit:
 
 test-integration:
 	$(PYTEST) tests/integration/ -v
+
+typecheck:
+	$(BASEDPYRIGHT)
+
+typecheck-tests:
+	$(BASEDPYRIGHT) --project pyrightconfig.tests.json
 
 consent-sync-once:
 	docker compose run --rm app python -m app.workers.run_consent_sync

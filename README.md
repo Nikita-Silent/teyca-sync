@@ -38,11 +38,13 @@ make test
 ```bash
 ./.venv/bin/ruff check .
 ./.venv/bin/basedpyright
+./.venv/bin/basedpyright --project pyrightconfig.tests.json
 make test
 ```
 
 - `ruff` — линт и формат правил проекта.
-- `basedpyright` — type check в режиме `basic` по `app/` и `migrations/`.
+- `basedpyright` — основной type check в режиме `basic` по `app/` и `migrations/`.
+- `basedpyright --project pyrightconfig.tests.json` — отдельный rollout для типизации `tests/`; это не основной gate runtime-кода.
 - `make test` — полный unit/integration набор, доступный в текущем репозитории.
 
 ## Env
