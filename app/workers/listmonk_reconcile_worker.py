@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -36,6 +37,131 @@ class ListmonkReconcileWorker:
     session_factory: async_sessionmaker[AsyncSession]
     listmonk_client: ListmonkSDKClient
 
+    async def _run_in_session(
+        self,
+        operation: Callable[[AsyncSession], Awaitable[Any]],
+    ) -> Any:
+        """Run one short database phase in its own transaction."""
+        async with self.session_factory() as session:
+            try:
+                result = await operation(session)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+        return result
+
+    async def _load_watermark(
+        self,
+        *,
+        source: str,
+        list_id: int,
+    ) -> tuple[datetime | None, int | None]:
+        """Load or create sync watermark in a short transaction."""
+
+        async def operation(session: AsyncSession) -> tuple[datetime | None, int | None]:
+            sync_repo = SyncStateRepository(session)
+            state = await sync_repo.get_or_create(source=source, list_id=list_id)
+            return state.watermark_updated_at, state.watermark_subscriber_id
+
+        return await self._run_in_session(operation)
+
+    async def _update_watermark(
+        self,
+        *,
+        source: str,
+        list_id: int,
+        updated_at: datetime | None,
+        subscriber_id: int | None,
+    ) -> None:
+        """Persist sync watermark in a short transaction."""
+
+        async def operation(session: AsyncSession) -> None:
+            sync_repo = SyncStateRepository(session)
+            await sync_repo.get_or_create(source=source, list_id=list_id)
+            await sync_repo.update_watermark(
+                source=source,
+                list_id=list_id,
+                updated_at=updated_at,
+                subscriber_id=subscriber_id,
+            )
+
+        await self._run_in_session(operation)
+
+    async def _load_consistency_batch(self, *, limit: int) -> tuple[int, list[Any]]:
+        """Load consistency scan checkpoint and current row batch."""
+
+        async def operation(session: AsyncSession) -> tuple[int, list[Any]]:
+            sync_repo = SyncStateRepository(session)
+            listmonk_repo = ListmonkUsersRepository(session)
+            state = await sync_repo.get_or_create(
+                source=CONSISTENCY_SOURCE,
+                list_id=CONSISTENCY_LIST_ID,
+            )
+            last_user_id = int(state.watermark_subscriber_id or 0)
+            rows = await listmonk_repo.get_batch_after_user_id(
+                last_user_id=last_user_id, limit=limit
+            )
+            return last_user_id, rows
+
+        return await self._run_in_session(operation)
+
+    async def _apply_delta(
+        self, *, delta: SubscriberDelta, list_id: int, metrics: ReconcileMetrics
+    ) -> None:
+        """Apply one incremental delta using a short-lived database session."""
+
+        async def operation(session: AsyncSession) -> None:
+            listmonk_repo = ListmonkUsersRepository(session)
+            users_repo = UsersRepository(session)
+            await self._reconcile_delta(
+                delta=delta,
+                list_id=list_id,
+                listmonk_repo=listmonk_repo,
+                users_repo=users_repo,
+                metrics=metrics,
+            )
+
+        await self._run_in_session(operation)
+
+    async def _apply_consistency_restore(
+        self,
+        *,
+        row: Any,
+        restored: Any,
+    ) -> None:
+        """Persist one restored subscriber mapping after external restore completes."""
+
+        async def operation(session: AsyncSession) -> None:
+            listmonk_repo = ListmonkUsersRepository(session)
+            current = await listmonk_repo.get_by_user_id(user_id=int(row.user_id))
+            if current is None:
+                logger.warning(
+                    "listmonk_reconcile_consistency_row_missing",
+                    user_id=int(row.user_id),
+                    old_subscriber_id=int(row.subscriber_id),
+                )
+                return
+            if int(current.subscriber_id) != int(row.subscriber_id):
+                logger.warning(
+                    "listmonk_reconcile_consistency_mapping_changed",
+                    user_id=int(row.user_id),
+                    old_subscriber_id=int(row.subscriber_id),
+                    current_subscriber_id=int(current.subscriber_id),
+                )
+                return
+            await listmonk_repo.upsert(
+                user_id=int(row.user_id),
+                subscriber_id=int(restored.subscriber_id),
+                email=row.email,
+                status=restored.status,
+                list_ids=restored.list_ids,
+                attributes=row.attributes,
+            )
+            await listmonk_repo.set_consent_pending(user_id=int(row.user_id))
+
+        await self._run_in_session(operation)
+
     async def run_once(self) -> int:
         """Process one incremental batch and return restored mappings count."""
         target_list_ids = parse_list_ids(self.settings.listmonk_list_ids)
@@ -46,68 +172,61 @@ class ListmonkReconcileWorker:
             logger.info("listmonk_reconcile_no_target_lists")
             return 0
 
-        async with self.session_factory() as session:
-            listmonk_repo = ListmonkUsersRepository(session)
-            users_repo = UsersRepository(session)
-            sync_repo = SyncStateRepository(session)
-
-            for list_id in target_list_ids:
-                state = await sync_repo.get_or_create(source=RECONCILE_SOURCE, list_id=list_id)
-                try:
-                    deltas = await self.listmonk_client.get_updated_subscribers(
-                        list_id=list_id,
-                        watermark_updated_at=state.watermark_updated_at,
-                        watermark_subscriber_id=state.watermark_subscriber_id,
-                        limit=batch_size,
-                    )
-                except (ListmonkClientError, httpx.HTTPError) as exc:
-                    metrics.list_fetch_errors += 1
-                    logger.error(
-                        "listmonk_reconcile_list_fetch_failed",
-                        list_id=list_id,
-                        error=str(exc),
-                        error_type=type(exc).__name__,
-                    )
-                    continue
-                metrics.deltas_fetched += len(deltas)
-                if not deltas:
-                    continue
-
-                last_updated_at: datetime | None = None
-                last_subscriber_id: int | None = None
-                for delta in deltas:
-                    metrics.scanned += 1
-                    last_updated_at = delta.updated_at
-                    last_subscriber_id = delta.subscriber_id
-                    await self._reconcile_delta(
-                        delta=delta,
-                        list_id=list_id,
-                        listmonk_repo=listmonk_repo,
-                        users_repo=users_repo,
-                        metrics=metrics,
-                    )
-
-                await sync_repo.update_watermark(
-                    source=RECONCILE_SOURCE,
-                    list_id=list_id,
-                    updated_at=last_updated_at,
-                    subscriber_id=last_subscriber_id,
-                )
-                logger.info(
-                    "listmonk_reconcile_list_processed",
-                    list_id=list_id,
-                    deltas=len(deltas),
-                    watermark_updated_at=last_updated_at.isoformat() if last_updated_at else None,
-                    watermark_subscriber_id=last_subscriber_id,
-                )
-
-            await self._run_consistency_scan(
-                listmonk_repo=listmonk_repo,
-                sync_repo=sync_repo,
-                metrics=metrics,
-                limit=batch_size,
+        for list_id in target_list_ids:
+            watermark_updated_at, watermark_subscriber_id = await self._load_watermark(
+                source=RECONCILE_SOURCE,
+                list_id=list_id,
             )
-            await session.commit()
+            try:
+                deltas = await self.listmonk_client.get_updated_subscribers(
+                    list_id=list_id,
+                    watermark_updated_at=watermark_updated_at,
+                    watermark_subscriber_id=watermark_subscriber_id,
+                    limit=batch_size,
+                )
+            except (ListmonkClientError, httpx.HTTPError) as exc:
+                metrics.list_fetch_errors += 1
+                logger.error(
+                    "listmonk_reconcile_list_fetch_failed",
+                    list_id=list_id,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                continue
+            metrics.deltas_fetched += len(deltas)
+            if not deltas:
+                continue
+
+            last_updated_at: datetime | None = None
+            last_subscriber_id: int | None = None
+            for delta in deltas:
+                metrics.scanned += 1
+                last_updated_at = delta.updated_at
+                last_subscriber_id = delta.subscriber_id
+                await self._apply_delta(
+                    delta=delta,
+                    list_id=list_id,
+                    metrics=metrics,
+                )
+
+            await self._update_watermark(
+                source=RECONCILE_SOURCE,
+                list_id=list_id,
+                updated_at=last_updated_at,
+                subscriber_id=last_subscriber_id,
+            )
+            logger.info(
+                "listmonk_reconcile_list_processed",
+                list_id=list_id,
+                deltas=len(deltas),
+                watermark_updated_at=last_updated_at.isoformat() if last_updated_at else None,
+                watermark_subscriber_id=last_subscriber_id,
+            )
+
+        await self._run_consistency_scan(
+            metrics=metrics,
+            limit=batch_size,
+        )
         logger.info(
             "listmonk_reconcile_metrics",
             batch_size=metrics.batch_size,
@@ -133,19 +252,13 @@ class ListmonkReconcileWorker:
     async def _run_consistency_scan(
         self,
         *,
-        listmonk_repo: ListmonkUsersRepository,
-        sync_repo: SyncStateRepository,
         metrics: ReconcileMetrics,
         limit: int,
     ) -> None:
-        state = await sync_repo.get_or_create(
-            source=CONSISTENCY_SOURCE, list_id=CONSISTENCY_LIST_ID
-        )
-        last_user_id = int(state.watermark_subscriber_id or 0)
-        rows = await listmonk_repo.get_batch_after_user_id(last_user_id=last_user_id, limit=limit)
+        last_user_id, rows = await self._load_consistency_batch(limit=limit)
         if not rows:
             # Restart round-robin scan from the beginning.
-            await sync_repo.update_watermark(
+            await self._update_watermark(
                 source=CONSISTENCY_SOURCE,
                 list_id=CONSISTENCY_LIST_ID,
                 updated_at=None,
@@ -197,15 +310,7 @@ class ListmonkReconcileWorker:
                 )
                 break
 
-            await listmonk_repo.upsert(
-                user_id=int(row.user_id),
-                subscriber_id=int(restored.subscriber_id),
-                email=row.email,
-                status=restored.status,
-                list_ids=restored.list_ids,
-                attributes=row.attributes,
-            )
-            await listmonk_repo.set_consent_pending(user_id=int(row.user_id))
+            await self._apply_consistency_restore(row=row, restored=restored)
             metrics.consistency_restored += 1
             logger.info(
                 "listmonk_reconcile_subscriber_restored",
@@ -216,7 +321,7 @@ class ListmonkReconcileWorker:
             )
             current_last_user_id = int(row.user_id)
 
-        await sync_repo.update_watermark(
+        await self._update_watermark(
             source=CONSISTENCY_SOURCE,
             list_id=CONSISTENCY_LIST_ID,
             updated_at=None,
