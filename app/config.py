@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # Old DB (read-only, merge)
     export_db_url: str = ""
+    export_db_request_timeout_seconds: float = 15.0
 
     # Listmonk
     listmonk_url: str = ""

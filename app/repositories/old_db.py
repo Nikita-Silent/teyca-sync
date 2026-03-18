@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,8 +46,9 @@ class OldUserData:
 class OldDBRepository:
     """Query old DB by normalized phone."""
 
-    def __init__(self, export_db_url: str) -> None:
+    def __init__(self, export_db_url: str, *, request_timeout_seconds: float = 15.0) -> None:
         self._url = export_db_url.strip()
+        self._request_timeout_seconds = max(0.1, float(request_timeout_seconds))
         self._engine: AsyncEngine | None = None
         self._columns_cache: set[str] | None = None
 
@@ -56,7 +58,14 @@ class OldDBRepository:
             return None
 
         if self._engine is None:
-            self._engine = create_async_engine(self._url, pool_pre_ping=True)
+            self._engine = create_async_engine(
+                self._url,
+                pool_pre_ping=True,
+                connect_args={
+                    "timeout": self._request_timeout_seconds,
+                    "command_timeout": self._request_timeout_seconds,
+                },
+            )
 
         available_columns = await self._get_users_columns()
         if "phone" not in available_columns:
@@ -98,8 +107,15 @@ class OldDBRepository:
         )
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(query, query_params)
+                result = await asyncio.wait_for(
+                    conn.execute(query, query_params),
+                    timeout=self._request_timeout_seconds,
+                )
                 row = result.mappings().first()
+        except asyncio.TimeoutError as exc:
+            raise OldDBRepositoryError(
+                f"Old DB query timeout after {self._request_timeout_seconds}s"
+            ) from exc
         except SQLAlchemyError as exc:
             raise OldDBRepositoryError("Failed reading old DB by phone") from exc
 
@@ -138,8 +154,13 @@ class OldDBRepository:
         )
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(query)
+                result = await asyncio.wait_for(
+                    conn.execute(query),
+                    timeout=self._request_timeout_seconds,
+                )
                 self._columns_cache = {str(row[0]) for row in result.fetchall()}
+        except asyncio.TimeoutError:
+            self._columns_cache = set()
         except SQLAlchemyError:
             self._columns_cache = set()
         return self._columns_cache

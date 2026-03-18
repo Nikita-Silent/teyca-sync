@@ -527,17 +527,21 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
     with (
         patch(
             "app.workers.run_queue_consumers.get_settings",
-            return_value=SimpleNamespace(export_db_url="db"),
+            return_value=SimpleNamespace(
+                export_db_url="db",
+                export_db_request_timeout_seconds=12.5,
+            ),
         ),
         patch("app.workers.run_queue_consumers.ListmonkSDKClient"),
         patch("app.workers.run_queue_consumers.TeycaClient"),
-        patch("app.workers.run_queue_consumers.OldDBRepository"),
+        patch("app.workers.run_queue_consumers.OldDBRepository") as old_db_repo_cls,
         patch("app.workers.run_queue_consumers.configure_logging"),
         patch("app.workers.run_queue_consumers.shutdown_logging"),
         patch.object(run_queue_consumers.ConsumersRunner, "run", new=AsyncMock()) as run_mock,
     ):
         await run_queue_consumers._run()
     run_mock.assert_awaited_once()
+    old_db_repo_cls.assert_called_once_with("db", request_timeout_seconds=12.5)
 
     with patch("app.workers.run_queue_consumers.asyncio.run") as run_mock:
         run_queue_consumers.main()
