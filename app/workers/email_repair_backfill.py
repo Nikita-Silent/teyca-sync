@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import structlog
@@ -66,6 +68,68 @@ class DuplicateEmailBackfill:
     session_factory: async_sessionmaker[AsyncSession]
     listmonk_client: ListmonkSDKClient
     teyca_client: TeycaClient
+
+    async def _run_in_session(
+        self,
+        operation: Callable[[AsyncSession], Awaitable[Any]],
+    ) -> Any:
+        """Run one short database phase in its own transaction."""
+        async with self.session_factory() as session:
+            try:
+                result = await operation(session)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+        return result
+
+    async def _load_db_applied_rows(self, *, limit: int) -> list[Any]:
+        """Load rows pending Teyca sync in a short transaction."""
+
+        async def operation(session: AsyncSession) -> list[Any]:
+            repair_repo = EmailRepairLogRepository(session)
+            return await repair_repo.get_db_applied_batch(limit=max(1, limit))
+
+        return await self._run_in_session(operation)
+
+    async def _mark_teyca_synced(
+        self,
+        *,
+        repair_id: int,
+        winner_user_id: int,
+        winner_subscriber_id: int,
+    ) -> None:
+        """Persist successful Teyca sync in a short transaction."""
+
+        async def operation(session: AsyncSession) -> None:
+            repair_repo = EmailRepairLogRepository(session)
+            await repair_repo.mark_teyca_synced(
+                repair_id=repair_id,
+                winner_user_id=winner_user_id,
+                winner_subscriber_id=winner_subscriber_id,
+            )
+
+        await self._run_in_session(operation)
+
+    async def _mark_retry(
+        self,
+        *,
+        repair_id: int,
+        attempts: int,
+        error_text: str,
+    ) -> str:
+        """Persist failed Teyca sync state in a short transaction."""
+
+        async def operation(session: AsyncSession) -> str:
+            repair_repo = EmailRepairLogRepository(session)
+            return await repair_repo.mark_retry(
+                repair_id=repair_id,
+                attempts=attempts,
+                error_text=error_text,
+                max_attempts=EMAIL_REPAIR_MAX_ATTEMPTS,
+            )
+
+        return str(await self._run_in_session(operation))
 
     async def collect_plans(
         self,
@@ -185,71 +249,65 @@ class DuplicateEmailBackfill:
     async def sync_teyca(self, *, batch_size: int) -> DuplicateEmailBackfillSummary:
         """Sync already-applied loser cleanup rows to Teyca."""
         summary = DuplicateEmailBackfillSummary()
+        rows = await self._load_db_applied_rows(limit=batch_size)
+        summary.loser_rows = len(rows)
 
-        async with self.session_factory() as session:
-            repair_repo = EmailRepairLogRepository(session)
-            rows = await repair_repo.get_db_applied_batch(limit=max(1, batch_size))
-            summary.loser_rows = len(rows)
+        for row in rows:
+            repair_id = int(row.id)
+            loser_user_id = int(row.incoming_user_id)
+            if row.winner_user_id is None or row.winner_subscriber_id is None:
+                raise DuplicateEmailBackfillError(
+                    f"repair_id={repair_id} is missing winner metadata for Teyca sync"
+                )
+            winner_user_id = int(row.winner_user_id)
+            winner_subscriber_id = int(row.winner_subscriber_id)
+            attempts = int(row.attempts) + 1
 
-            for row in rows:
-                repair_id = int(row.id)
-                loser_user_id = int(row.incoming_user_id)
-                if row.winner_user_id is None or row.winner_subscriber_id is None:
-                    raise DuplicateEmailBackfillError(
-                        f"repair_id={repair_id} is missing winner metadata for Teyca sync"
-                    )
-                winner_user_id = int(row.winner_user_id)
-                winner_subscriber_id = int(row.winner_subscriber_id)
-                attempts = int(row.attempts) + 1
-
-                try:
-                    await self.teyca_client.update_pass_fields(
-                        user_id=winner_user_id,
-                        fields={"key6": TEYCA_KEY6_BUGS},
-                    )
-                    await self.teyca_client.update_pass_fields(
-                        user_id=loser_user_id,
-                        fields={
-                            "email": None,
-                            "key1": TEYCA_KEY1_BAD_EMAIL,
-                            "key6": TEYCA_KEY6_BUGS,
-                        },
-                    )
-                    await repair_repo.mark_teyca_synced(
-                        repair_id=repair_id,
-                        winner_user_id=winner_user_id,
-                        winner_subscriber_id=winner_subscriber_id,
-                    )
-                    summary.teyca_synced += 1
-                    logger.info(
-                        "email_repair_backfill_teyca_synced",
-                        repair_id=repair_id,
-                        loser_user_id=loser_user_id,
-                        winner_user_id=winner_user_id,
-                        winner_subscriber_id=winner_subscriber_id,
-                    )
-                except (TeycaAPIError, httpx.HTTPError) as exc:
-                    status = await repair_repo.mark_retry(
-                        repair_id=repair_id,
-                        attempts=attempts,
-                        error_text=str(exc),
-                        max_attempts=EMAIL_REPAIR_MAX_ATTEMPTS,
-                    )
-                    if status == "manual_review":
-                        summary.manual_review += 1
-                    else:
-                        summary.teyca_failed += 1
-                    logger.error(
-                        "email_repair_backfill_teyca_failed",
-                        repair_id=repair_id,
-                        loser_user_id=loser_user_id,
-                        attempts=attempts,
-                        status=status,
-                        error=str(exc),
-                        error_type=type(exc).__name__,
-                    )
-
-            await session.commit()
+            try:
+                await self.teyca_client.update_pass_fields(
+                    user_id=winner_user_id,
+                    fields={"key6": TEYCA_KEY6_BUGS},
+                )
+                await self.teyca_client.update_pass_fields(
+                    user_id=loser_user_id,
+                    fields={
+                        "email": None,
+                        "key1": TEYCA_KEY1_BAD_EMAIL,
+                        "key6": TEYCA_KEY6_BUGS,
+                    },
+                )
+                await self._mark_teyca_synced(
+                    repair_id=repair_id,
+                    winner_user_id=winner_user_id,
+                    winner_subscriber_id=winner_subscriber_id,
+                )
+                summary.teyca_synced += 1
+                logger.info(
+                    "email_repair_backfill_teyca_synced",
+                    repair_id=repair_id,
+                    loser_user_id=loser_user_id,
+                    winner_user_id=winner_user_id,
+                    winner_subscriber_id=winner_subscriber_id,
+                )
+            except (TeycaAPIError, httpx.HTTPError) as exc:
+                status = await self._mark_retry(
+                    repair_id=repair_id,
+                    attempts=attempts,
+                    error_text=str(exc),
+                )
+                if status == "manual_review":
+                    summary.manual_review += 1
+                else:
+                    summary.teyca_failed += 1
+                logger.error(
+                    "email_repair_backfill_teyca_failed",
+                    repair_id=repair_id,
+                    loser_user_id=loser_user_id,
+                    attempts=attempts,
+                    status=status,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
 
         logger.info(
             "email_repair_backfill_teyca_summary",

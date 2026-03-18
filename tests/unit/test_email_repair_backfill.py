@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+from app.config import Settings
 from app.workers.email_repair_backfill import (
     DuplicateEmailBackfill,
     DuplicateEmailBackfillError,
@@ -14,24 +17,35 @@ from app.workers.email_repair_backfill import (
 )
 
 
-def _backfill() -> DuplicateEmailBackfill:
-    session_factory = MagicMock()
-    teyca_client = AsyncMock()
-    return DuplicateEmailBackfill(
-        settings=SimpleNamespace(),
-        session_factory=session_factory,
+@dataclass(slots=True)
+class _BackfillMocks:
+    session_factory: MagicMock
+    listmonk_client: AsyncMock
+    teyca_client: AsyncMock
+
+
+def _backfill() -> tuple[DuplicateEmailBackfill, _BackfillMocks]:
+    mocks = _BackfillMocks(
+        session_factory=MagicMock(),
         listmonk_client=AsyncMock(),
-        teyca_client=teyca_client,
+        teyca_client=AsyncMock(),
     )
+    backfill = DuplicateEmailBackfill(
+        settings=cast(Settings, SimpleNamespace()),
+        session_factory=mocks.session_factory,
+        listmonk_client=mocks.listmonk_client,
+        teyca_client=mocks.teyca_client,
+    )
+    return backfill, mocks
 
 
 @pytest.mark.asyncio
 async def test_collect_plans_resolves_winner_via_listmonk_truth() -> None:
-    backfill = _backfill()
+    backfill, mocks = _backfill()
     session = AsyncMock()
     session_cm = AsyncMock()
     session_cm.__aenter__.return_value = session
-    backfill.session_factory.return_value = session_cm
+    mocks.session_factory.return_value = session_cm
 
     listmonk_repo = AsyncMock()
     listmonk_repo.get_duplicate_emails.return_value = ["dup@example.com"]
@@ -40,9 +54,7 @@ async def test_collect_plans_resolves_winner_via_listmonk_truth() -> None:
         SimpleNamespace(user_id=20),
     ]
     listmonk_repo.get_by_subscriber_id.return_value = SimpleNamespace(user_id=20)
-    backfill.listmonk_client.get_subscriber_by_email.return_value = SimpleNamespace(
-        subscriber_id=777
-    )
+    mocks.listmonk_client.get_subscriber_by_email.return_value = SimpleNamespace(subscriber_id=777)
 
     with patch(
         "app.workers.email_repair_backfill.ListmonkUsersRepository", return_value=listmonk_repo
@@ -62,11 +74,11 @@ async def test_collect_plans_resolves_winner_via_listmonk_truth() -> None:
 
 @pytest.mark.asyncio
 async def test_collect_plans_reports_unresolved_groups() -> None:
-    backfill = _backfill()
+    backfill, mocks = _backfill()
     session = AsyncMock()
     session_cm = AsyncMock()
     session_cm.__aenter__.return_value = session
-    backfill.session_factory.return_value = session_cm
+    mocks.session_factory.return_value = session_cm
 
     listmonk_repo = AsyncMock()
     listmonk_repo.get_duplicate_emails.return_value = ["dup@example.com"]
@@ -74,7 +86,7 @@ async def test_collect_plans_reports_unresolved_groups() -> None:
         SimpleNamespace(user_id=10),
         SimpleNamespace(user_id=20),
     ]
-    backfill.listmonk_client.get_subscriber_by_email.return_value = None
+    mocks.listmonk_client.get_subscriber_by_email.return_value = None
 
     with patch(
         "app.workers.email_repair_backfill.ListmonkUsersRepository", return_value=listmonk_repo
@@ -93,11 +105,11 @@ async def test_collect_plans_reports_unresolved_groups() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_clears_loser_emails_and_persists_db_applied_rows() -> None:
-    backfill = _backfill()
+    backfill, mocks = _backfill()
     session = AsyncMock()
     session_cm = AsyncMock()
     session_cm.__aenter__.return_value = session
-    backfill.session_factory.return_value = session_cm
+    mocks.session_factory.return_value = session_cm
 
     users_repo = AsyncMock()
     listmonk_repo = AsyncMock()
@@ -132,7 +144,7 @@ async def test_apply_clears_loser_emails_and_persists_db_applied_rows() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_rejects_partial_execution_when_issues_exist() -> None:
-    backfill = _backfill()
+    backfill, _ = _backfill()
 
     with pytest.raises(DuplicateEmailBackfillError):
         await backfill.apply(
@@ -149,14 +161,8 @@ async def test_apply_rejects_partial_execution_when_issues_exist() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_teyca_marks_rows_synced() -> None:
-    backfill = _backfill()
-    session = AsyncMock()
-    session_cm = AsyncMock()
-    session_cm.__aenter__.return_value = session
-    backfill.session_factory.return_value = session_cm
-
-    repair_repo = AsyncMock()
-    repair_repo.get_db_applied_batch.return_value = [
+    backfill, mocks = _backfill()
+    rows = [
         SimpleNamespace(
             id=1,
             incoming_user_id=10,
@@ -166,40 +172,38 @@ async def test_sync_teyca_marks_rows_synced() -> None:
         )
     ]
 
-    with patch(
-        "app.workers.email_repair_backfill.EmailRepairLogRepository", return_value=repair_repo
+    with (
+        patch.object(
+            DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
+        ),
+        patch.object(
+            DuplicateEmailBackfill, "_mark_teyca_synced", new=AsyncMock()
+        ) as mark_teyca_synced,
     ):
         summary = await backfill.sync_teyca(batch_size=10)
 
     assert summary.teyca_synced == 1
-    assert backfill.teyca_client.update_pass_fields.await_count == 2
-    backfill.teyca_client.update_pass_fields.assert_any_await(
+    assert mocks.teyca_client.update_pass_fields.await_count == 2
+    mocks.teyca_client.update_pass_fields.assert_any_await(
         user_id=20,
         fields={"key6": "bugs"},
     )
-    backfill.teyca_client.update_pass_fields.assert_any_await(
+    mocks.teyca_client.update_pass_fields.assert_any_await(
         user_id=10,
         fields={"email": None, "key1": "bad email", "key6": "bugs"},
     )
-    repair_repo.mark_teyca_synced.assert_awaited_once_with(
+    mark_teyca_synced.assert_awaited_once_with(
         repair_id=1,
         winner_user_id=20,
         winner_subscriber_id=777,
     )
-    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_sync_teyca_marks_retry_on_teyca_error() -> None:
-    backfill = _backfill()
-    session = AsyncMock()
-    session_cm = AsyncMock()
-    session_cm.__aenter__.return_value = session
-    backfill.session_factory.return_value = session_cm
-    backfill.teyca_client.update_pass_fields.side_effect = httpx.ReadTimeout("boom")
-
-    repair_repo = AsyncMock()
-    repair_repo.get_db_applied_batch.return_value = [
+    backfill, mocks = _backfill()
+    mocks.teyca_client.update_pass_fields.side_effect = httpx.ReadTimeout("boom")
+    rows = [
         SimpleNamespace(
             id=1,
             incoming_user_id=10,
@@ -208,17 +212,20 @@ async def test_sync_teyca_marks_retry_on_teyca_error() -> None:
             attempts=0,
         )
     ]
-    repair_repo.mark_retry.return_value = "failed"
 
-    with patch(
-        "app.workers.email_repair_backfill.EmailRepairLogRepository", return_value=repair_repo
+    with (
+        patch.object(
+            DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
+        ),
+        patch.object(
+            DuplicateEmailBackfill, "_mark_retry", new=AsyncMock(return_value="failed")
+        ) as mark_retry,
     ):
         summary = await backfill.sync_teyca(batch_size=10)
 
     assert summary.teyca_failed == 1
-    repair_repo.mark_retry.assert_awaited_once_with(
+    mark_retry.assert_awaited_once_with(
         repair_id=1,
         attempts=1,
         error_text="boom",
-        max_attempts=3,
     )

@@ -1,6 +1,7 @@
 """Pytest fixtures. TESTING=1 so app lifespan uses mock publisher (no RabbitMQ)."""
 
 import os
+from collections.abc import AsyncGenerator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -15,8 +16,9 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-async def client() -> AsyncClient:
+async def client() -> AsyncGenerator[AsyncClient]:
     from app.main import app
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",

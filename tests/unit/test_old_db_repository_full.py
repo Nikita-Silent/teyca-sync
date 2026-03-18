@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -99,6 +100,29 @@ async def test_get_user_data_returns_row_and_handles_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_user_data_times_out() -> None:
+    repo = OldDBRepository("postgresql://x", request_timeout_seconds=0.2)
+    repo._columns_cache = {"phone", "summ"}
+
+    conn = AsyncMock()
+
+    async def slow_execute(*args: object, **kwargs: object) -> object:
+        await asyncio.sleep(1)
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: None))
+
+    conn.execute.side_effect = slow_execute
+    cm = AsyncMock()
+    cm.__aenter__.return_value = conn
+    cm.__aexit__.return_value = False
+    engine = MagicMock()
+    engine.connect.return_value = cm
+    repo._engine = engine
+
+    with pytest.raises(OldDBRepositoryError, match="Old DB query timeout"):
+        await repo.get_user_data(phone="79039859055")
+
+
+@pytest.mark.asyncio
 async def test_get_users_columns_and_close() -> None:
     repo = OldDBRepository("postgresql://x")
     assert await repo._get_users_columns() == set()
@@ -142,5 +166,11 @@ async def test_get_user_data_creates_engine_on_first_call() -> None:
     cm.__aexit__.return_value = False
     fake_engine.connect.return_value = cm
 
-    with patch("app.repositories.old_db.create_async_engine", return_value=fake_engine):
+    with patch(
+        "app.repositories.old_db.create_async_engine", return_value=fake_engine
+    ) as engine_factory:
         assert await repo.get_user_data(phone="123") is None
+
+    _, kwargs = engine_factory.call_args
+    assert kwargs["connect_args"]["timeout"] == pytest.approx(15.0)
+    assert kwargs["connect_args"]["command_timeout"] == pytest.approx(15.0)

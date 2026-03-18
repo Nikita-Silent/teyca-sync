@@ -50,6 +50,23 @@ class UpdateConsumerDeps:
     commit_checkpoint: Callable[[], Awaitable[None]] | None = None
 
 
+def _log_step(
+    event_name: str,
+    *,
+    user_id: int,
+    trace_id: str | None,
+    source_event_id: str | None,
+    **fields: object,
+) -> None:
+    logger.info(
+        event_name,
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+        **fields,
+    )
+
+
 async def handle(
     payload: dict[str, Any], *, deps: UpdateConsumerDeps, wait_for_lock: bool = False
 ) -> None:
@@ -64,7 +81,45 @@ async def handle(
         trace_id=trace_id,
         source_event_id=source_event_id,
     )
+    profile = build_profile_from_pass(event.pass_data)
+    merge_applied = False
+    old_data = None
+    old_bonus_value: float | None = None
+    merge_needs_write = False
+    merge_exists_hint = await deps.merge_repo.exists(user_id=user_id)
+    if not merge_exists_hint:
+        _log_step(
+            "update_consumer_old_db_read_start",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            phone=event.pass_data.phone,
+        )
+        old_data = await deps.old_db_repo.get_user_data(phone=event.pass_data.phone)
+        _log_step(
+            "update_consumer_old_db_read_done",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            old_data_found=old_data is not None,
+            old_data_has_merge_data=False if old_data is None else old_data.has_merge_data(),
+        )
+
+    _log_step(
+        "update_consumer_lock_start",
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+        wait_for_lock=wait_for_lock,
+    )
     await deps.users_repo.lock_user(user_id=user_id, wait=wait_for_lock)
+    _log_step(
+        "update_consumer_lock_done",
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+        wait_for_lock=wait_for_lock,
+    )
 
     merged_already = await deps.merge_repo.exists(user_id=user_id)
     if merged_already:
@@ -74,13 +129,8 @@ async def handle(
             trace_id=trace_id,
             source_event_id=source_event_id,
         )
-    profile = build_profile_from_pass(event.pass_data)
-    merge_applied = False
-    old_data = None
-    old_bonus_value: float | None = None
-    merge_needs_write = False
-    if not merged_already:
-        old_data = await deps.old_db_repo.get_user_data(phone=event.pass_data.phone)
+        old_data = None
+    else:
         merge_result = merge_profile_with_old_data(profile, old_data)
         profile = merge_result.profile
         if merge_result.merged and old_data is not None and old_data.has_merge_data():
@@ -97,7 +147,19 @@ async def handle(
             old_data_found=old_data is not None,
         )
 
+    _log_step(
+        "update_consumer_users_upsert_start",
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+    )
     await deps.users_repo.upsert(user_id=user_id, profile=profile)
+    _log_step(
+        "update_consumer_users_upsert_done",
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+    )
 
     target_list_ids = parse_list_ids(deps.settings.listmonk_list_ids)
     existing = await deps.listmonk_repo.get_by_user_id(user_id=user_id)
@@ -125,9 +187,24 @@ async def handle(
 
     valid_email = event.pass_data.email
     assert valid_email is not None
+    _log_step(
+        "update_consumer_email_conflict_check_start",
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+        email=valid_email.strip().lower(),
+    )
     conflicting_user_ids = await deps.listmonk_repo.get_other_user_ids_by_email(
         user_id=user_id,
         email=valid_email,
+    )
+    _log_step(
+        "update_consumer_email_conflict_check_done",
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+        email=valid_email.strip().lower(),
+        conflict_count=len(conflicting_user_ids),
     )
     if conflicting_user_ids:
         normalized_email = valid_email.strip().lower()
@@ -152,7 +229,7 @@ async def handle(
 
     await _commit_checkpoint(deps)
 
-    logger.info(
+    _log_step(
         "update_consumer_listmonk_upsert_start",
         user_id=user_id,
         trace_id=trace_id,
@@ -165,7 +242,7 @@ async def handle(
         attributes=build_listmonk_attributes(event.pass_data),
         subscriber_id=existing.subscriber_id if existing is not None else None,
     )
-    logger.info(
+    _log_step(
         "update_consumer_listmonk_upsert_done",
         user_id=user_id,
         trace_id=trace_id,
@@ -214,6 +291,14 @@ async def handle(
         return
     if merge_needs_write:
         await _commit_checkpoint(deps)
+        _log_step(
+            "update_consumer_merge_external_start",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            old_bonus_value=old_bonus_value,
+            bonus_write_needed=bool(old_bonus_value is not None and old_bonus_value > 0),
+        )
         if old_bonus_value is not None and old_bonus_value > 0:
             bonus = BonusOperation.one_shot(value=str(old_bonus_value))
             await deps.teyca_client.accrue_bonuses(user_id=user_id, bonuses=[bonus])
@@ -228,6 +313,14 @@ async def handle(
             trace_id=trace_id,
         )
         merge_applied = True
+        _log_step(
+            "update_consumer_merge_external_done",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            old_bonus_value=old_bonus_value,
+            bonus_written=bool(old_bonus_value is not None and old_bonus_value > 0),
+        )
         logger.info(
             "update_merge_applied",
             user_id=user_id,

@@ -1,6 +1,7 @@
 """Unit tests: webhook routing by type and static token auth."""
 
 import os
+from collections.abc import Generator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,7 +20,7 @@ def mock_publisher() -> AsyncMock:
 
 
 @pytest.fixture(autouse=True)
-def _override_publisher(mock_publisher: AsyncMock) -> None:
+def _override_publisher(mock_publisher: AsyncMock) -> Generator[None]:
     async def override_publisher() -> AsyncMock:
         return mock_publisher
 
@@ -29,7 +30,7 @@ def _override_publisher(mock_publisher: AsyncMock) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _restore_webhook_auth_env() -> None:
+def _restore_webhook_auth_env() -> Generator[None]:
     original_token = os.environ.get("WEBHOOK_AUTH_TOKEN")
     original_enabled = os.environ.get("WEBHOOK_AUTH_ENABLED")
     yield
