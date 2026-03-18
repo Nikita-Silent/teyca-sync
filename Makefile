@@ -10,7 +10,7 @@ down:
 	docker compose down
 
 migrate:
-	docker compose run --rm app alembic upgrade head
+	docker compose run --rm --build app alembic upgrade head
 
 test:
 	$(PYTHON) -m pytest tests/ -v
