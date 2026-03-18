@@ -97,7 +97,8 @@ class DuplicateEmailBackfill:
                     except DuplicateListmonkSubscriberIdError as exc:
                         raise DuplicateEmailBackfillError(
                             "subscriber_id="
-                            f"{subscriber.subscriber_id} has duplicate mappings for users {exc.user_ids}"
+                            f"{subscriber.subscriber_id} has duplicate mappings "
+                            f"for users {exc.user_ids}"
                         ) from exc
                     if winner_row is None:
                         raise DuplicateEmailBackfillError(

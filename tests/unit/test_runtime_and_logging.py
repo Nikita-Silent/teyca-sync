@@ -24,7 +24,6 @@ from app.logging_config import (
 )
 from app.workers import (
     run_consent_sync,
-    run_listmonk_duplicate_subscriber,
     run_listmonk_reconcile,
     run_queue_consumers,
 )
