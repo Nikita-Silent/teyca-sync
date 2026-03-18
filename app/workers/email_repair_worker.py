@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkClientError, ListmonkSDKClient
-from app.clients.teyca import TeycaAPIError, TeycaClient
+from app.clients.teyca import TeycaAPIError, TeycaClient, build_teyca_client
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.repositories.email_repair_log import EmailRepairLogRepository
@@ -300,5 +300,5 @@ def build_email_repair_worker() -> EmailRepairWorker:
         settings=settings,
         session_factory=SessionLocal,
         listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=TeycaClient(settings),
+        teyca_client=build_teyca_client(settings),
     )

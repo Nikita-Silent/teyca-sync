@@ -8,6 +8,7 @@
 Твоя задача — реализовывать бизнес-логику строго по roadmap.md, срез за срезом.
 Перед написанием кода: прочитай соответствующий раздел roadmap.md и список задач среза.
 После написания кода: убедись что `make test` зелёный.
+Перед коммитом: обязательно прогони `make typecheck` и `./.venv/bin/ruff check .`.
 Стиль кода: async/await везде, type hints везде, без bare except.
 Именование очередей — только через константы из app/mq/queues.py, никогда строками напрямую.
 Listmonk — только через Python SDK; прямые HTTP-вызовы к Listmonk API не использовать.
@@ -207,7 +208,7 @@ make test-integration
 make test-unit
 
 # Логи сервиса
-docker compose logs -f app
+# operational logs смотреть в Loki, а не в docker compose logs
 ```
 
 ---
@@ -217,7 +218,7 @@ docker compose logs -f app
 **Consumer не обрабатывает сообщения:**
 1. Проверь что RabbitMQ запущен: `docker compose ps`
 2. Проверь что очередь существует: открой RabbitMQ Management UI на `localhost:15672`
-3. Проверь логи: `docker compose logs -f app`
+3. Проверь логи в Loki по `service="teyca-sync"` и нужному `component`
 4. Убедись что имя очереди совпадает с константой в `app/mq/queues.py`
 
 **Ошибка подключения к БД:**

@@ -42,6 +42,14 @@ make test
 make test
 ```
 
+Перед любым коммитом обязательны как минимум:
+
+```bash
+./.venv/bin/ruff check .
+make typecheck
+make test
+```
+
 - `ruff` — линт и формат правил проекта.
 - `basedpyright` — основной type check в режиме `basic` по `app/` и `migrations/`.
 - `basedpyright --project pyrightconfig.tests.json` — отдельный rollout для типизации `tests/`; это не основной gate runtime-кода.
@@ -56,6 +64,7 @@ make test
 - `LOKI_URL` — URL Loki (обязателен, логирование только в Loki).
 - `LOKI_USERNAME` / `LOKI_PASSWORD` — Basic Auth для Loki.
 - `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `reconcile`, `consent-sync`).
+- Все operational logs для диагностики нужно смотреть в Loki; `docker compose logs` не считать источником истины.
 
 ## Process Flow
 

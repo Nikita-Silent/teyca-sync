@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app import main as app_main
 from app.api.webhook import get_mq_publisher
+from app.clients.teyca import TeycaAPIError
 from app.config import Settings
 from app.db import session as db_session
 from app.logging_config import (
@@ -327,6 +328,112 @@ async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -
 
 
 @pytest.mark.asyncio
+async def test_consumers_runner_callback_requeues_teyca_rate_limit_with_delay() -> None:
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+        old_db_repo=AsyncMock(),
+    )
+
+    message = AsyncMock()
+    message.headers = {}
+    message.body = b'{"type":"UPDATE","pass":{"user_id":5771594}}'
+    message.message_id = "msg-429"
+    message.correlation_id = "corr-429"
+    message.delivery_tag = 201
+    message.content_type = "application/json"
+    message.content_encoding = None
+    message.timestamp = None
+    message.type = None
+    message.app_id = None
+    channel = AsyncMock()
+    channel.default_exchange = AsyncMock()
+    runner._channel = channel
+
+    with (
+        patch.object(
+            run_queue_consumers.ConsumersRunner,
+            "_process",
+            new=AsyncMock(
+                side_effect=TeycaAPIError(
+                    "Teyca bonuses request failed: status=429, body=Retry later",
+                    status_code=429,
+                )
+            ),
+        ),
+        patch("app.workers.run_queue_consumers.logger") as logger,
+    ):
+        await runner._callback(message, run_queue_consumers.QUEUE_UPDATE)
+
+    message.ack.assert_awaited_once()
+    message.reject.assert_not_awaited()
+    logger.warning.assert_called_once()
+    warning_kwargs = logger.warning.call_args.kwargs
+    assert warning_kwargs["result"] == "teyca_rate_limited"
+    assert warning_kwargs["retry_count"] == 1
+    assert warning_kwargs["retry_queue_name"] == "queue-update-retry"
+    assert warning_kwargs["status_code"] == 429
+    published_message = channel.default_exchange.publish.await_args.args[0]
+    assert published_message.headers["x-teyca-rate-limit-retry-count"] == 1
+    assert published_message.headers["x-original-queue"] == run_queue_consumers.QUEUE_UPDATE
+    assert published_message.expiration == timedelta(minutes=1)
+    assert channel.default_exchange.publish.await_args.kwargs["routing_key"] == "queue-update-retry"
+
+
+@pytest.mark.asyncio
+async def test_consumers_runner_callback_dead_letters_teyca_rate_limit_after_limit() -> None:
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+        old_db_repo=AsyncMock(),
+    )
+
+    message = AsyncMock()
+    message.headers = {"x-teyca-rate-limit-retry-count": 10}
+    message.body = b'{"type":"CREATE","pass":{"user_id":42}}'
+    message.message_id = "msg-429-dead"
+    message.correlation_id = "corr-429-dead"
+    message.delivery_tag = 202
+    message.content_type = "application/json"
+    message.content_encoding = None
+    message.timestamp = None
+    message.type = None
+    message.app_id = None
+    channel = AsyncMock()
+    channel.default_exchange = AsyncMock()
+    runner._channel = channel
+
+    with (
+        patch.object(
+            run_queue_consumers.ConsumersRunner,
+            "_process",
+            new=AsyncMock(
+                side_effect=TeycaAPIError(
+                    "Teyca pass update failed: status=429, body=Retry later",
+                    status_code=429,
+                )
+            ),
+        ),
+        patch("app.workers.run_queue_consumers.logger") as logger,
+    ):
+        await runner._callback(message, run_queue_consumers.QUEUE_CREATE)
+
+    message.ack.assert_awaited_once()
+    message.reject.assert_not_awaited()
+    logger.warning.assert_called_once()
+    warning_kwargs = logger.warning.call_args.kwargs
+    assert warning_kwargs["result"] == "teyca_rate_limited_dead_lettered"
+    assert warning_kwargs["retry_count"] == 11
+    assert warning_kwargs["retry_queue_name"] == "queue-create-dead"
+    published_message = channel.default_exchange.publish.await_args.args[0]
+    assert published_message.headers["x-teyca-rate-limit-retry-count"] == 11
+    assert published_message.expiration is None
+    assert channel.default_exchange.publish.await_args.kwargs["routing_key"] == "queue-create-dead"
+
+
+@pytest.mark.asyncio
 async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
@@ -547,7 +654,7 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
             ),
         ),
         patch("app.workers.run_queue_consumers.ListmonkSDKClient"),
-        patch("app.workers.run_queue_consumers.TeycaClient"),
+        patch("app.workers.run_queue_consumers.build_teyca_client"),
         patch("app.workers.run_queue_consumers.OldDBRepository") as old_db_repo_cls,
         patch("app.workers.run_queue_consumers.configure_logging"),
         patch("app.workers.run_queue_consumers.shutdown_logging"),

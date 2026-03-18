@@ -638,7 +638,7 @@ def test_build_consent_sync_worker_and_inc_helper() -> None:
             return_value=SimpleNamespace(),
         ),
         patch("app.workers.consent_sync_worker.ListmonkSDKClient"),
-        patch("app.workers.consent_sync_worker.TeycaClient"),
+        patch("app.workers.consent_sync_worker.build_teyca_client"),
     ):
         worker = build_consent_sync_worker()
     assert worker is not None
