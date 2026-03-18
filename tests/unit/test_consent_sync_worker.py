@@ -460,7 +460,7 @@ async def test_run_once_uses_incremental_deltas_and_updates_watermark() -> None:
         updated_at=datetime(2026, 3, 6, 6, 0, tzinfo=UTC),
         subscriber_id=1001,
     )
-    session.commit.assert_awaited_once()
+    assert session.commit.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -515,6 +515,7 @@ async def test_run_once_skips_unmapped_subscribers_but_moves_watermark() -> None
 
     assert processed == 0
     process_mock.assert_not_awaited()
+    assert session.commit.await_count == 2
     sync_repo.update_watermark.assert_awaited_once_with(
         source="listmonk_consent",
         list_id=1,
@@ -573,6 +574,7 @@ async def test_run_once_skips_empty_deltas() -> None:
         )
         sync_cls.return_value = sync_repo
         assert await worker.run_once() == 0
+        session.commit.assert_awaited_once()
         sync_repo.update_watermark.assert_not_awaited()
 
 
@@ -649,6 +651,7 @@ async def test_run_once_skips_duplicate_subscriber_mapping_and_moves_watermark()
 
     assert processed == 0
     process_mock.assert_not_awaited()
+    assert session.commit.await_count == 2
     sync_repo.update_watermark.assert_awaited_once_with(
         source="listmonk_consent",
         list_id=1,
