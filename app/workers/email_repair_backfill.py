@@ -14,7 +14,10 @@ from app.clients.teyca import TeycaAPIError, TeycaClient
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.repositories.email_repair_log import EmailRepairLogRepository
-from app.repositories.listmonk_users import ListmonkUsersRepository
+from app.repositories.listmonk_users import (
+    DuplicateListmonkSubscriberIdError,
+    ListmonkUsersRepository,
+)
 from app.repositories.users import UsersRepository
 from app.workers.email_repair_worker import EMAIL_REPAIR_MAX_ATTEMPTS, TEYCA_KEY1_BAD_EMAIL
 
@@ -87,9 +90,15 @@ class DuplicateEmailBackfill:
                         raise DuplicateEmailBackfillError(
                             "subscriber_by_email returned no subscriber"
                         )
-                    winner_row = await listmonk_repo.get_by_subscriber_id(
-                        subscriber_id=subscriber.subscriber_id
-                    )
+                    try:
+                        winner_row = await listmonk_repo.get_by_subscriber_id(
+                            subscriber_id=subscriber.subscriber_id
+                        )
+                    except DuplicateListmonkSubscriberIdError as exc:
+                        raise DuplicateEmailBackfillError(
+                            "subscriber_id="
+                            f"{subscriber.subscriber_id} has duplicate mappings for users {exc.user_ids}"
+                        ) from exc
                     if winner_row is None:
                         raise DuplicateEmailBackfillError(
                             "subscriber_id="

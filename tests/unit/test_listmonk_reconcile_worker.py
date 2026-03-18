@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.clients.listmonk import ListmonkClientError, SubscriberDelta
+from app.repositories.listmonk_users import DuplicateListmonkSubscriberIdError
 from app.workers.listmonk_reconcile_worker import (
     ListmonkReconcileWorker,
     ReconcileMetrics,
@@ -432,6 +433,27 @@ async def test_reconcile_delta_additional_branches() -> None:
         metrics=metrics,
     )
     assert metrics.email_not_found >= 3
+
+    listmonk_repo.get_by_subscriber_id.side_effect = DuplicateListmonkSubscriberIdError(
+        subscriber_id=407,
+        rows=[],
+    )
+    delta_duplicate = SubscriberDelta(
+        subscriber_id=407,
+        status="enabled",
+        list_ids=[1],
+        updated_at=datetime(2026, 3, 6, 7, 18, tzinfo=UTC),
+        email="dup@example.com",
+        attributes=None,
+    )
+    await worker._reconcile_delta(
+        delta=delta_duplicate,
+        list_id=1,
+        listmonk_repo=listmonk_repo,
+        users_repo=users_repo,
+        metrics=metrics,
+    )
+    assert metrics.duplicate_subscriber_mappings == 1
 
 
 @pytest.mark.asyncio

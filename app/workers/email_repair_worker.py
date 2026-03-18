@@ -14,7 +14,10 @@ from app.clients.teyca import TeycaAPIError, TeycaClient
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.repositories.email_repair_log import EmailRepairLogRepository
-from app.repositories.listmonk_users import ListmonkUsersRepository
+from app.repositories.listmonk_users import (
+    DuplicateListmonkSubscriberIdError,
+    ListmonkUsersRepository,
+)
 from app.repositories.users import UsersRepository
 
 logger = structlog.get_logger()
@@ -109,9 +112,15 @@ class EmailRepairWorker:
             if subscriber is None:
                 raise EmailRepairResolutionError("subscriber_by_email returned no subscriber")
 
-            winner_row = await listmonk_repo.get_by_subscriber_id(
-                subscriber_id=subscriber.subscriber_id
-            )
+            try:
+                winner_row = await listmonk_repo.get_by_subscriber_id(
+                    subscriber_id=subscriber.subscriber_id
+                )
+            except DuplicateListmonkSubscriberIdError as exc:
+                raise EmailRepairResolutionError(
+                    "subscriber_id="
+                    f"{subscriber.subscriber_id} has duplicate mappings for users {exc.user_ids}"
+                ) from exc
             if winner_row is None:
                 raise EmailRepairResolutionError(
                     f"subscriber_id={subscriber.subscriber_id} is not mapped in listmonk_users"

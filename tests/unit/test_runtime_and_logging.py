@@ -22,7 +22,12 @@ from app.logging_config import (
     configure_logging,
     shutdown_logging,
 )
-from app.workers import run_consent_sync, run_listmonk_reconcile, run_queue_consumers
+from app.workers import (
+    run_consent_sync,
+    run_listmonk_duplicate_subscriber,
+    run_listmonk_reconcile,
+    run_queue_consumers,
+)
 
 
 class DummyAwaitableTask:
@@ -157,6 +162,10 @@ def test_get_mq_publisher_and_main_guards() -> None:
 
     with patch("asyncio.run", side_effect=_close_coro):
         runpy.run_path(str(worker_dir / "run_consent_sync.py"), run_name="__main__")
+    with patch("asyncio.run", side_effect=_close_coro):
+        runpy.run_path(
+            str(worker_dir / "run_listmonk_duplicate_subscriber.py"), run_name="__main__"
+        )
     with patch("asyncio.run", side_effect=_close_coro):
         runpy.run_path(str(worker_dir / "run_listmonk_reconcile.py"), run_name="__main__")
     with patch("asyncio.run", side_effect=_close_coro):

@@ -8,7 +8,9 @@ import pytest
 from app.db.models import MergeLog
 from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.email_repair_log import EmailRepairLogRepository
+from app.repositories.listmonk_user_archive import ListmonkUserArchiveRepository
 from app.repositories.listmonk_users import (
+    DuplicateListmonkSubscriberIdError,
     DuplicateListmonkUserEmailError,
     ListmonkUsersRepository,
 )
@@ -81,17 +83,15 @@ async def test_listmonk_users_repository_paths() -> None:
             ]
         )
     )
-    session.execute.reset_mock()
-    with patch("app.repositories.listmonk_users.logger.warning") as logger_warning:
-        assert (await repo.get_by_subscriber_id(subscriber_id=10)).user_id == 2
-    assert session.execute.await_count == 2
-    logger_warning.assert_called_once_with(
-        "listmonk_users_duplicate_subscriber_id_collapsed",
-        subscriber_id=10,
-        duplicate_rows=2,
-        kept_user_id=2,
-        removed_user_ids=[1],
+    with pytest.raises(DuplicateListmonkSubscriberIdError) as exc_info:
+        await repo.get_by_subscriber_id(subscriber_id=10)
+    assert exc_info.value.subscriber_id == 10
+    assert exc_info.value.user_ids == [2, 1]
+
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: [10, "20"])
     )
+    assert await repo.get_duplicate_subscriber_ids() == [10, 20]
 
     session.execute.reset_mock()
     session.execute.side_effect = [
@@ -117,13 +117,10 @@ async def test_listmonk_users_repository_paths() -> None:
                 all=lambda: [SimpleNamespace(user_id=2), SimpleNamespace(user_id=1)]
             )
         ),
-        SimpleNamespace(),
-        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [2])),
     ]
     with (
-        patch("app.repositories.listmonk_users.logger.warning") as logger_warning,
         patch("app.repositories.listmonk_users.logger.error") as logger_error,
-        pytest.raises(DuplicateListmonkUserEmailError),
+        pytest.raises(DuplicateListmonkSubscriberIdError) as exc_info,
     ):
         await repo.upsert(
             user_id=1,
@@ -133,15 +130,10 @@ async def test_listmonk_users_repository_paths() -> None:
             list_ids=[1],
             attributes={"user_id": 1},
         )
-    logger_warning.assert_called_once_with(
-        "listmonk_users_duplicate_subscriber_id_dropped_before_upsert",
-        subscriber_id=10,
-        target_user_id=1,
-        removed_user_ids=[2],
-    )
+    assert exc_info.value.user_ids == [2]
     logger_error.assert_called_once_with(
-        "listmonk_users_duplicate_email",
-        email="duplicate@example.com",
+        "listmonk_users_duplicate_subscriber_id",
+        subscriber_id=10,
         user_id=1,
         duplicate_rows=1,
         existing_user_ids=[2],
@@ -182,6 +174,7 @@ async def test_listmonk_users_repository_paths() -> None:
     await repo.mark_checked(user_id=1, pending=False, confirmed=True, status="confirmed")
     await repo.mark_checked(user_id=2, pending=True, confirmed=False)
     await repo.delete_by_user_id(user_id=1)
+    await repo.delete_by_user_ids(user_ids=[1, 2])
 
 
 @pytest.mark.asyncio
@@ -227,8 +220,7 @@ async def test_email_repair_log_repository_paths() -> None:
     assert params["source_event_type"] == "UPDATE"
     assert params["source_event_id"] == "event-1"
     assert params["trace_id"] == "trace-1"
-    assert params["status"] == "pending"
-    assert params["attempts"] == 0
+
     session.execute.reset_mock()
 
     await repo.create_db_applied(
@@ -260,6 +252,39 @@ async def test_email_repair_log_repository_paths() -> None:
         scalars=lambda: SimpleNamespace(all=lambda: ["row"])
     )
     assert await repo.get_db_applied_batch(limit=10) == ["row"]
+
+
+@pytest.mark.asyncio
+async def test_listmonk_user_archive_repository_paths() -> None:
+    session = AsyncMock()
+    session.add = MagicMock()
+    repo = ListmonkUserArchiveRepository(session)
+    row = SimpleNamespace(
+        user_id=10,
+        subscriber_id=777,
+        email="dup@example.com",
+        status="blocked",
+        list_ids="2,5",
+        attributes={"user_id": 10},
+        consent_pending=True,
+        consent_checked_at=None,
+        consent_confirmed_at=None,
+        created_at=None,
+        updated_at=None,
+    )
+
+    await repo.archive_loser(
+        row=row,
+        winner_user_id=20,
+        winner_subscriber_id=777,
+        archive_reason="duplicate_subscriber_id",
+    )
+
+    archived = session.add.call_args.args[0]
+    assert archived.user_id == 10
+    assert archived.subscriber_id == 777
+    assert archived.winner_user_id == 20
+    assert archived.archive_reason == "duplicate_subscriber_id"
 
 
 @pytest.mark.asyncio

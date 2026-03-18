@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ListmonkUser
@@ -26,6 +28,29 @@ class DuplicateListmonkUserEmailError(RuntimeError):
         super().__init__(
             f"Email {normalized_email} already linked to another user in listmonk_users"
         )
+
+
+@dataclass(slots=True)
+class DuplicateSubscriberMappingRow:
+    user_id: int
+    email: str | None
+    status: str | None
+    updated_at: datetime | None
+
+
+class DuplicateListmonkSubscriberIdError(RuntimeError):
+    """Raised when one subscriber_id is linked to multiple users in listmonk_users."""
+
+    def __init__(self, *, subscriber_id: int, rows: list[DuplicateSubscriberMappingRow]) -> None:
+        self.subscriber_id = subscriber_id
+        self.rows = rows
+        super().__init__(
+            f"Subscriber {subscriber_id} already linked to another user in listmonk_users"
+        )
+
+    @property
+    def user_ids(self) -> list[int]:
+        return [row.user_id for row in self.rows]
 
 
 class ListmonkUsersRepository:
@@ -55,9 +80,9 @@ class ListmonkUsersRepository:
         if not rows:
             return None
         if len(rows) > 1:
-            rows = await self._collapse_duplicate_subscriber_rows(
+            raise DuplicateListmonkSubscriberIdError(
                 subscriber_id=subscriber_id,
-                rows=rows,
+                rows=_to_duplicate_mapping_rows(rows),
             )
         return rows[0]
 
@@ -88,6 +113,19 @@ class ListmonkUsersRepository:
         result = await self._session.execute(stmt)
         return [str(value) for value in result.scalars().all()]
 
+    async def get_duplicate_subscriber_ids(self, *, limit: int | None = None) -> list[int]:
+        """Return subscriber_ids that currently point to multiple users."""
+        stmt: Select[tuple[int]] = (
+            select(ListmonkUser.subscriber_id)
+            .group_by(ListmonkUser.subscriber_id)
+            .having(func.count(ListmonkUser.user_id) > 1)
+            .order_by(ListmonkUser.subscriber_id.asc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(max(1, limit))
+        result = await self._session.execute(stmt)
+        return [int(value) for value in result.scalars().all()]
+
     async def get_other_user_ids_by_email(self, *, user_id: int, email: str) -> list[int]:
         """Return other user ids already mapped to the same normalized email."""
         normalized_email = _normalize_email(email)
@@ -107,10 +145,21 @@ class ListmonkUsersRepository:
     ) -> None:
         """Insert/update listmonk state row."""
         normalized_email = _normalize_email(email)
-        await self._drop_other_rows_for_subscriber_id(
-            user_id=user_id,
-            subscriber_id=subscriber_id,
+        duplicate_subscriber_rows = await self._get_other_rows_for_subscriber_id(
+            user_id=user_id, subscriber_id=subscriber_id
         )
+        if duplicate_subscriber_rows:
+            logger.error(
+                "listmonk_users_duplicate_subscriber_id",
+                subscriber_id=subscriber_id,
+                user_id=user_id,
+                duplicate_rows=len(duplicate_subscriber_rows),
+                existing_user_ids=[int(row.user_id) for row in duplicate_subscriber_rows],
+            )
+            raise DuplicateListmonkSubscriberIdError(
+                subscriber_id=subscriber_id,
+                rows=_to_duplicate_mapping_rows(duplicate_subscriber_rows),
+            )
         if normalized_email is not None:
             duplicate_user_ids = await self._find_other_user_ids_by_email(
                 user_id=user_id,
@@ -148,7 +197,19 @@ class ListmonkUsersRepository:
                 "attributes": attributes,
             },
         )
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            if "uq_listmonk_users_subscriber_id" not in str(exc.orig):
+                raise
+            duplicate_rows = await self._get_other_rows_for_subscriber_id(
+                user_id=user_id,
+                subscriber_id=subscriber_id,
+            )
+            raise DuplicateListmonkSubscriberIdError(
+                subscriber_id=subscriber_id,
+                rows=_to_duplicate_mapping_rows(duplicate_rows),
+            ) from exc
 
     async def get_pending_batch(self, *, limit: int) -> list[ListmonkUser]:
         """Return batch of pending users ordered by user_id."""
@@ -203,6 +264,13 @@ class ListmonkUsersRepository:
         stmt = update(ListmonkUser).where(ListmonkUser.user_id == user_id).values(email=None)
         await self._session.execute(stmt)
 
+    async def delete_by_user_ids(self, *, user_ids: list[int]) -> None:
+        """Delete multiple listmonk rows by user ids."""
+        if not user_ids:
+            return
+        stmt = delete(ListmonkUser).where(ListmonkUser.user_id.in_(user_ids))
+        await self._session.execute(stmt)
+
     async def _find_other_user_ids_by_email(self, *, user_id: int, email: str) -> list[int]:
         stmt: Select[tuple[int]] = (
             select(ListmonkUser.user_id)
@@ -225,38 +293,15 @@ class ListmonkUsersRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def _collapse_duplicate_subscriber_rows(
-        self,
-        *,
-        subscriber_id: int,
-        rows: list[ListmonkUser],
-    ) -> list[ListmonkUser]:
-        canonical = rows[0]
-        duplicate_user_ids = [int(row.user_id) for row in rows[1:]]
-        stmt = delete(ListmonkUser).where(ListmonkUser.user_id.in_(duplicate_user_ids))
-        await self._session.execute(stmt)
-        logger.warning(
-            "listmonk_users_duplicate_subscriber_id_collapsed",
-            subscriber_id=subscriber_id,
-            duplicate_rows=len(rows),
-            kept_user_id=int(canonical.user_id),
-            removed_user_ids=duplicate_user_ids,
-        )
-        return [canonical]
+    async def get_rows_by_subscriber_id(self, *, subscriber_id: int) -> list[ListmonkUser]:
+        """Return all rows for one subscriber_id."""
+        return await self._get_rows_by_subscriber_id(subscriber_id=subscriber_id, limit=100)
 
-    async def _drop_other_rows_for_subscriber_id(self, *, user_id: int, subscriber_id: int) -> None:
+    async def _get_other_rows_for_subscriber_id(
+        self, *, user_id: int, subscriber_id: int
+    ) -> list[ListmonkUser]:
         rows = await self._get_rows_by_subscriber_id(subscriber_id=subscriber_id, limit=100)
-        duplicate_user_ids = [int(row.user_id) for row in rows if int(row.user_id) != user_id]
-        if not duplicate_user_ids:
-            return
-        stmt = delete(ListmonkUser).where(ListmonkUser.user_id.in_(duplicate_user_ids))
-        await self._session.execute(stmt)
-        logger.warning(
-            "listmonk_users_duplicate_subscriber_id_dropped_before_upsert",
-            subscriber_id=subscriber_id,
-            target_user_id=user_id,
-            removed_user_ids=duplicate_user_ids,
-        )
+        return [row for row in rows if int(row.user_id) != user_id]
 
 
 def _normalize_email(raw: object) -> str | None:
@@ -264,3 +309,15 @@ def _normalize_email(raw: object) -> str | None:
         return None
     normalized = raw.strip().lower()
     return normalized or None
+
+
+def _to_duplicate_mapping_rows(rows: list[ListmonkUser]) -> list[DuplicateSubscriberMappingRow]:
+    return [
+        DuplicateSubscriberMappingRow(
+            user_id=int(row.user_id),
+            email=getattr(row, "email", None),
+            status=getattr(row, "status", None),
+            updated_at=getattr(row, "updated_at", None),
+        )
+        for row in rows
+    ]

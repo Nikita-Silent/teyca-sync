@@ -6,6 +6,7 @@ import pytest
 
 from app.clients.listmonk import SubscriberDelta, SubscriberState
 from app.clients.teyca import TeycaAPIError
+from app.repositories.listmonk_users import DuplicateListmonkSubscriberIdError
 from app.workers.consent_sync_worker import (
     ConsentSyncMetrics,
     ConsentSyncWorker,
@@ -591,3 +592,66 @@ def test_build_consent_sync_worker_and_inc_helper() -> None:
     _inc(metrics, "teyca_errors")
     _inc(None, "teyca_errors")
     assert metrics.teyca_errors == 1
+
+
+@pytest.mark.asyncio
+async def test_run_once_skips_duplicate_subscriber_mapping_and_moves_watermark() -> None:
+    session = AsyncMock()
+    context_manager = AsyncMock()
+    context_manager.__aenter__.return_value = session
+    context_manager.__aexit__.return_value = False
+    session_factory = MagicMock(return_value=context_manager)
+
+    worker = ConsentSyncWorker(
+        settings=SimpleNamespace(
+            consent_bonus_amount="100.0",
+            consent_bonus_ttl_days=30,
+            listmonk_list_ids="1",
+            consent_sync_batch_size=500,
+        ),
+        session_factory=session_factory,
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+    )
+    worker.listmonk_client.get_updated_subscribers.return_value = [
+        SubscriberDelta(
+            subscriber_id=3003,
+            status="confirmed",
+            list_ids=[1],
+            updated_at=datetime(2026, 3, 6, 6, 20, tzinfo=UTC),
+        )
+    ]
+
+    with (
+        patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
+        patch("app.workers.consent_sync_worker.BonusAccrualRepository") as accrual_cls,
+        patch("app.workers.consent_sync_worker.SyncStateRepository") as sync_cls,
+        patch.object(
+            ConsentSyncWorker, "_process_pending_user", new_callable=AsyncMock
+        ) as process_mock,
+    ):
+        listmonk_repo = AsyncMock()
+        listmonk_repo.get_by_subscriber_id.side_effect = DuplicateListmonkSubscriberIdError(
+            subscriber_id=3003,
+            rows=[],
+        )
+        repo_cls.return_value = listmonk_repo
+        accrual_cls.return_value = AsyncMock()
+
+        sync_repo = AsyncMock()
+        sync_repo.get_or_create.return_value = SimpleNamespace(
+            watermark_updated_at=None,
+            watermark_subscriber_id=None,
+        )
+        sync_cls.return_value = sync_repo
+
+        processed = await worker.run_once()
+
+    assert processed == 0
+    process_mock.assert_not_awaited()
+    sync_repo.update_watermark.assert_awaited_once_with(
+        source="listmonk_consent",
+        list_id=1,
+        updated_at=datetime(2026, 3, 6, 6, 20, tzinfo=UTC),
+        subscriber_id=3003,
+    )
