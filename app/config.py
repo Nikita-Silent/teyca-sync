@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     teyca_base_url: str = "https://api.teyca.ru"
     teyca_api_key: str = ""
     teyca_token: str = ""
+    teyca_rate_limit_redis_url: str = ""
+    teyca_rate_limit_redis_prefix: str = "teyca-rate-limit"
 
     # Old DB (read-only, merge)
     export_db_url: str = ""

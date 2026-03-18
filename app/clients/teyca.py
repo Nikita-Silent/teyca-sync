@@ -6,11 +6,14 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from hashlib import sha1
 from time import monotonic
+from typing import Any, Protocol
 from uuid import uuid4
 
 import httpx
 import structlog
+from redis.asyncio import Redis
 
 from app.config import Settings
 
@@ -34,6 +37,13 @@ class BonusOperation:
     def one_shot(value: str) -> BonusOperation:
         """Create operation payload with a single value."""
         return BonusOperation(value=value)
+
+
+class RateLimiter(Protocol):
+    """Minimal async contract shared by local and Redis limiters."""
+
+    async def acquire(self) -> None:
+        """Wait until a request slot becomes available."""
 
 
 class SlidingWindowRateLimiter:
@@ -76,6 +86,102 @@ class SlidingWindowRateLimiter:
             await asyncio.sleep(wait_seconds)
 
 
+class RedisSlidingWindowRateLimiter:
+    """Distributed sliding-window limiter backed by Redis sorted sets."""
+
+    _ACQUIRE_SCRIPT = """
+local request_id = ARGV[1]
+local pair_count = tonumber(ARGV[2])
+local time_result = redis.call("TIME")
+local now_ms = (tonumber(time_result[1]) * 1000) + math.floor(tonumber(time_result[2]) / 1000)
+local wait_ms = 0
+
+for index = 1, pair_count do
+    local key = KEYS[index]
+    local arg_offset = 2 + ((index - 1) * 2)
+    local window_ms = tonumber(ARGV[arg_offset + 1])
+    local max_requests = tonumber(ARGV[arg_offset + 2])
+    local cutoff = now_ms - window_ms
+    redis.call("ZREMRANGEBYSCORE", key, 0, cutoff)
+
+    local current = redis.call("ZCARD", key)
+    if current >= max_requests then
+        local oldest = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
+        if oldest[2] ~= nil then
+            local candidate_wait_ms = math.ceil((tonumber(oldest[2]) + window_ms) - now_ms)
+            if candidate_wait_ms > wait_ms then
+                wait_ms = candidate_wait_ms
+            end
+        end
+    end
+end
+
+if wait_ms > 0 then
+    return {0, wait_ms}
+end
+
+for index = 1, pair_count do
+    local key = KEYS[index]
+    local arg_offset = 2 + ((index - 1) * 2)
+    local window_ms = tonumber(ARGV[arg_offset + 1])
+    redis.call("ZADD", key, now_ms, request_id)
+    redis.call("PEXPIRE", key, window_ms + 60000)
+end
+
+return {1, 0}
+"""
+
+    def __init__(
+        self,
+        *,
+        redis_client: Redis,
+        limits: tuple[tuple[float, int], ...],
+        key_prefix: str,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        min_sleep_seconds: float = 0.05,
+        request_id_factory: Callable[[], str] | None = None,
+    ) -> None:
+        self._redis = redis_client
+        self._limits = limits
+        self._key_prefix = key_prefix
+        self._sleep = sleep
+        self._min_sleep_seconds = min_sleep_seconds
+        self._request_id_factory = request_id_factory or (lambda: uuid4().hex)
+
+    async def acquire(self) -> None:
+        """Wait until a shared request slot becomes available in Redis."""
+        keys = [
+            f"{self._key_prefix}:window:{int(window_seconds * 1000)}"
+            for window_seconds, _ in self._limits
+        ]
+        args: list[str] = [self._request_id_factory(), str(len(self._limits))]
+        for window_seconds, max_requests in self._limits:
+            args.extend((str(int(window_seconds * 1000)), str(max_requests)))
+
+        while True:
+            try:
+                result = await self._redis.eval(self._ACQUIRE_SCRIPT, len(keys), *keys, *args)
+            except Exception:
+                logger.exception(
+                    "teyca_rate_limiter_redis_failed",
+                    key_prefix=self._key_prefix,
+                )
+                raise
+
+            allowed = int(result[0])
+            wait_ms = max(0, int(result[1]))
+            if allowed == 1:
+                return
+
+            wait_seconds = max(wait_ms / 1000.0, self._min_sleep_seconds)
+            logger.info(
+                "teyca_rate_limited",
+                backend="redis",
+                wait_seconds=round(wait_seconds, 3),
+            )
+            await self._sleep(wait_seconds)
+
+
 class TeycaClient:
     """HTTP client for Teyca bonuses endpoints."""
 
@@ -90,11 +196,11 @@ class TeycaClient:
         self,
         settings: Settings,
         http_client: httpx.AsyncClient | None = None,
-        rate_limiter: SlidingWindowRateLimiter | None = None,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self._settings = settings
         self._client = http_client
-        self._rate_limiter = rate_limiter or SlidingWindowRateLimiter(limits=self._DEFAULT_LIMITS)
+        self._rate_limiter = rate_limiter or build_teyca_rate_limiter(settings)
 
     async def accrue_bonuses(self, *, user_id: int, bonuses: list[BonusOperation]) -> None:
         """Call POST /v1/{token}/passes/{user_id}/bonuses."""
@@ -198,3 +304,31 @@ class TeycaClient:
             f"{self._settings.teyca_base_url.rstrip('/')}"
             f"/v1/{self._settings.teyca_token}/passes/{user_id}"
         )
+
+
+def build_teyca_rate_limiter(settings: Settings) -> RateLimiter:
+    """Create either a shared Redis-backed limiter or the local fallback."""
+    redis_url = str(getattr(settings, "teyca_rate_limit_redis_url", "") or "").strip()
+    if not redis_url:
+        return SlidingWindowRateLimiter(limits=TeycaClient._DEFAULT_LIMITS)
+
+    redis_client = Redis.from_url(redis_url)
+    return RedisSlidingWindowRateLimiter(
+        redis_client=redis_client,
+        limits=TeycaClient._DEFAULT_LIMITS,
+        key_prefix=_build_redis_key_prefix(settings),
+    )
+
+
+def _build_redis_key_prefix(settings: Settings) -> str:
+    """Scope limiter keys to one configured Teyca account."""
+    configured_prefix = (
+        str(getattr(settings, "teyca_rate_limit_redis_prefix", "teyca-rate-limit") or "").strip()
+        or "teyca-rate-limit"
+    )
+    raw_namespace = (
+        f"{str(getattr(settings, 'teyca_base_url', '')).rstrip('/')}"
+        f"|{str(getattr(settings, 'teyca_token', ''))}"
+    )
+    namespace_hash = sha1(raw_namespace.encode("utf-8")).hexdigest()[:12]
+    return f"{configured_prefix}:{namespace_hash}"

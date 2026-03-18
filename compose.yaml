@@ -15,11 +15,14 @@ services:
       - "8000:8000"
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: app
     env_file:
       - .env
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -40,11 +43,14 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: consumers
     env_file:
       - .env
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -65,11 +71,14 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: consent-sync
     env_file:
       - .env
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -90,11 +99,14 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: reconcile
     env_file:
       - .env
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -119,6 +131,17 @@ services:
       - "127.0.0.1:15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5

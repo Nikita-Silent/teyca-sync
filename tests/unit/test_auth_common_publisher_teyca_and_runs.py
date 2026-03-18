@@ -4,12 +4,20 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 
 from app.api.auth import verify_webhook_token
-from app.clients.teyca import BonusOperation, SlidingWindowRateLimiter, TeycaAPIError, TeycaClient
+from app.clients.teyca import (
+    BonusOperation,
+    RedisSlidingWindowRateLimiter,
+    SlidingWindowRateLimiter,
+    TeycaAPIError,
+    TeycaClient,
+    build_teyca_rate_limiter,
+)
 from app.config import Settings
 from app.consumers.common import (
     _to_optional_float,
@@ -26,6 +34,53 @@ from app.mq.publisher import MQPublisher
 from app.repositories.old_db import OldUserData
 from app.schemas.webhook import PassData
 from app.workers import run_consent_sync, run_listmonk_reconcile
+
+
+class FakeRedisEvalClient:
+    def __init__(self) -> None:
+        self._requests_by_key: dict[str, list[tuple[str, int]]] = {}
+        self.now_ms = 0
+
+    async def eval(self, script: str, numkeys: int, *args: object) -> list[int]:
+        del script
+        keys = [str(item) for item in args[:numkeys]]
+        argv = [str(item) for item in args[numkeys:]]
+        request_id = argv[0]
+        pair_count = int(argv[1])
+
+        wait_ms = 0
+        for index in range(pair_count):
+            key = keys[index]
+            window_ms = int(argv[2 + (index * 2)])
+            max_requests = int(argv[3 + (index * 2)])
+            requests = [
+                item
+                for item in self._requests_by_key.get(key, [])
+                if item[1] > self.now_ms - window_ms
+            ]
+            self._requests_by_key[key] = requests
+            if len(requests) >= max_requests:
+                candidate_wait_ms = (requests[0][1] + window_ms) - self.now_ms
+                wait_ms = max(wait_ms, candidate_wait_ms)
+
+        if wait_ms > 0:
+            return [0, wait_ms]
+
+        for index in range(pair_count):
+            key = keys[index]
+            requests = self._requests_by_key.setdefault(key, [])
+            requests.append((request_id, self.now_ms))
+        return [1, 0]
+
+
+class FakeRedisFactory:
+    def __init__(self) -> None:
+        self.client = object()
+        self.calls: list[str] = []
+
+    def from_url(self, redis_url: str) -> object:
+        self.calls.append(redis_url)
+        return self.client
 
 
 @pytest.mark.asyncio
@@ -273,6 +328,62 @@ async def test_teyca_sliding_window_rate_limiter_waits_when_limit_is_reached() -
 
     assert len(sleep_calls) == 1
     assert sleep_calls[0] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_teyca_redis_sliding_window_rate_limiter_waits_when_limit_is_reached() -> None:
+    redis_client = FakeRedisEvalClient()
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        redis_client.now_ms += int(seconds * 1000)
+
+    limiter = RedisSlidingWindowRateLimiter(
+        redis_client=cast(object, redis_client),
+        limits=((1.0, 2),),
+        key_prefix="teyca:test",
+        sleep=fake_sleep,
+        request_id_factory=lambda: uuid4().hex,
+    )
+
+    await limiter.acquire()
+    await limiter.acquire()
+    await limiter.acquire()
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(1.0)
+
+
+def test_build_teyca_rate_limiter_uses_redis_when_configured() -> None:
+    settings = SimpleNamespace(
+        teyca_base_url="https://api.example.com/",
+        teyca_api_key="api-key",
+        teyca_token="token-1",
+        teyca_rate_limit_redis_url="redis://redis:6379/0",
+        teyca_rate_limit_redis_prefix="teyca-rate-limit",
+    )
+    factory = FakeRedisFactory()
+
+    with patch("app.clients.teyca.Redis", factory):
+        limiter = build_teyca_rate_limiter(cast(Settings, settings))
+
+    assert isinstance(limiter, RedisSlidingWindowRateLimiter)
+    assert factory.calls == ["redis://redis:6379/0"]
+
+
+def test_build_teyca_rate_limiter_falls_back_to_local_when_redis_is_disabled() -> None:
+    settings = SimpleNamespace(
+        teyca_base_url="https://api.example.com/",
+        teyca_api_key="api-key",
+        teyca_token="token-1",
+        teyca_rate_limit_redis_url="",
+        teyca_rate_limit_redis_prefix="teyca-rate-limit",
+    )
+
+    limiter = build_teyca_rate_limiter(cast(Settings, settings))
+
+    assert isinstance(limiter, SlidingWindowRateLimiter)
 
 
 def test_run_entrypoints_call_asyncio_run() -> None:
