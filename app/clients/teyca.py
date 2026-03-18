@@ -23,6 +23,15 @@ logger = structlog.get_logger()
 class TeycaAPIError(Exception):
     """Raised when Teyca API call fails."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def is_rate_limited(self) -> bool:
+        """Return True when Teyca rejected the request with HTTP 429."""
+        return self.status_code == 429
+
 
 @dataclass(slots=True)
 class BonusOperation:
@@ -242,7 +251,11 @@ class TeycaClient:
                 response_body=response.text,
             )
             raise TeycaAPIError(
-                f"Teyca bonuses request failed: status={response.status_code}, body={response.text}"
+                (
+                    "Teyca bonuses request failed: "
+                    f"status={response.status_code}, body={response.text}"
+                ),
+                status_code=response.status_code,
             )
         logger.info(
             "teyca_accrue_bonuses_done",
@@ -288,7 +301,8 @@ class TeycaClient:
                 response_body=response.text,
             )
             raise TeycaAPIError(
-                f"Teyca pass update failed: status={response.status_code}, body={response.text}"
+                (f"Teyca pass update failed: status={response.status_code}, body={response.text}"),
+                status_code=response.status_code,
             )
         logger.info(
             "teyca_update_pass_done",

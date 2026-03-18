@@ -14,7 +14,7 @@ from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
 from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkSDKClient
-from app.clients.teyca import TeycaClient
+from app.clients.teyca import TeycaAPIError, TeycaClient
 from app.config import Settings, get_settings
 from app.consumers.create_user import CreateConsumerDeps
 from app.consumers.create_user import handle as handle_create
@@ -50,6 +50,10 @@ LOCK_BUSY_ORIGINAL_QUEUE_HEADER = "x-original-queue"
 LOCK_BUSY_BASE_DELAY_MS = 1_000
 LOCK_BUSY_MAX_DELAY_MS = 30_000
 LOCK_BUSY_MAX_RETRIES = 5
+RATE_LIMIT_RETRY_HEADER = "x-teyca-rate-limit-retry-count"
+RATE_LIMIT_BASE_DELAY_MS = 60_000
+RATE_LIMIT_MAX_DELAY_MS = 15 * 60_000
+RATE_LIMIT_MAX_RETRIES = 10
 RETRY_QUEUE_BY_MAIN_QUEUE = {
     QUEUE_CREATE: QUEUE_CREATE_RETRY,
     QUEUE_UPDATE: QUEUE_UPDATE_RETRY,
@@ -231,6 +235,71 @@ class ConsumersRunner:
         )
         await message.ack()
 
+    async def _schedule_rate_limit_retry(
+        self,
+        *,
+        message: AbstractIncomingMessage,
+        queue_name: str,
+        error: TeycaAPIError,
+    ) -> None:
+        channel = self._channel
+        if channel is None:
+            raise RuntimeError("Retry channel is not initialized")
+
+        payload = await self._parse_payload(message)
+        headers = dict(getattr(message, "headers", {}) or {})
+        retry_count = _coerce_retry_count(headers.get(RATE_LIMIT_RETRY_HEADER)) + 1
+        headers[RATE_LIMIT_RETRY_HEADER] = retry_count
+        headers[LOCK_BUSY_ORIGINAL_QUEUE_HEADER] = queue_name
+
+        retry_queue = RETRY_QUEUE_BY_MAIN_QUEUE[queue_name]
+        dead_queue = DEAD_QUEUE_BY_MAIN_QUEUE[queue_name]
+        target_queue = retry_queue
+        expiration_ms: int | None = _compute_rate_limit_retry_delay_ms(retry_count)
+        expiration: timedelta | None = None
+        result = "teyca_rate_limited"
+        log_event = "consumer_message_requeued_teyca_rate_limit"
+
+        if retry_count > RATE_LIMIT_MAX_RETRIES:
+            target_queue = dead_queue
+            expiration_ms = None
+            result = "teyca_rate_limited_dead_lettered"
+            log_event = "consumer_message_dead_lettered_teyca_rate_limit"
+        elif expiration_ms is not None:
+            expiration = timedelta(milliseconds=expiration_ms)
+
+        await channel.default_exchange.publish(
+            aio_pika.Message(
+                body=message.body,
+                headers=headers,
+                content_type=getattr(message, "content_type", None),
+                content_encoding=getattr(message, "content_encoding", None),
+                correlation_id=getattr(message, "correlation_id", None),
+                message_id=getattr(message, "message_id", None),
+                timestamp=getattr(message, "timestamp", None),
+                type=getattr(message, "type", None),
+                app_id=getattr(message, "app_id", None),
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                expiration=expiration,
+            ),
+            routing_key=target_queue,
+        )
+        logger.warning(
+            log_event,
+            result=result,
+            queue_name=queue_name,
+            retry_count=retry_count,
+            retry_delay_ms=expiration_ms,
+            retry_queue_name=target_queue,
+            error=str(error),
+            status_code=error.status_code,
+            user_id=_extract_user_id(payload),
+            message_id=getattr(message, "message_id", None),
+            correlation_id=getattr(message, "correlation_id", None),
+            delivery_tag=getattr(message, "delivery_tag", None),
+        )
+        await message.ack()
+
     async def _callback(self, message: AbstractIncomingMessage, queue_name: str) -> None:
         try:
             semaphore = self._process_semaphore
@@ -266,6 +335,36 @@ class ConsumersRunner:
                     delivery_tag=getattr(message, "delivery_tag", None),
                 )
                 await message.reject(requeue=True)
+        except TeycaAPIError as exc:
+            if exc.is_rate_limited and queue_name in RETRY_QUEUE_BY_MAIN_QUEUE:
+                try:
+                    await self._schedule_rate_limit_retry(
+                        message=message,
+                        queue_name=queue_name,
+                        error=exc,
+                    )
+                    return
+                except Exception as retry_exc:
+                    logger.exception(
+                        "consumer_message_teyca_rate_limit_retry_failed",
+                        result="teyca_rate_limit_retry_failed",
+                        queue_name=queue_name,
+                        error=str(retry_exc),
+                        original_error=str(exc),
+                        status_code=exc.status_code,
+                        message_id=getattr(message, "message_id", None),
+                        correlation_id=getattr(message, "correlation_id", None),
+                        delivery_tag=getattr(message, "delivery_tag", None),
+                    )
+            logger.exception(
+                "consumer_message_failed",
+                queue_name=queue_name,
+                error=str(exc),
+                message_id=getattr(message, "message_id", None),
+                correlation_id=getattr(message, "correlation_id", None),
+                delivery_tag=getattr(message, "delivery_tag", None),
+            )
+            await message.reject(requeue=True)
         except Exception as exc:
             logger.exception(
                 "consumer_message_failed",
@@ -414,6 +513,12 @@ def _compute_lock_retry_delay_ms(retry_count: int) -> int:
     bounded_retry_count = max(1, retry_count)
     delay_ms = LOCK_BUSY_BASE_DELAY_MS * (2 ** (bounded_retry_count - 1))
     return min(delay_ms, LOCK_BUSY_MAX_DELAY_MS)
+
+
+def _compute_rate_limit_retry_delay_ms(retry_count: int) -> int:
+    bounded_retry_count = max(1, retry_count)
+    delay_ms = RATE_LIMIT_BASE_DELAY_MS * (2 ** (bounded_retry_count - 1))
+    return min(delay_ms, RATE_LIMIT_MAX_DELAY_MS)
 
 
 async def _run() -> None:
