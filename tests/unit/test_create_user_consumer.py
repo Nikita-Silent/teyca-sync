@@ -52,7 +52,7 @@ async def test_create_without_old_data_no_merge() -> None:
 
     await handle(_payload(), deps=deps)
 
-    deps.users_repo.lock_user.assert_awaited_once_with(user_id=10)
+    deps.users_repo.lock_user.assert_awaited_once_with(user_id=10, wait=False)
     deps.old_db_repo.get_user_data.assert_awaited_once_with(phone="79039859055")
     deps.users_repo.upsert.assert_awaited_once()
     deps.listmonk_client.upsert_subscriber.assert_awaited_once()

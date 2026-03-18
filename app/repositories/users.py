@@ -35,17 +35,34 @@ USER_UPSERT_FIELDS: tuple[str, ...] = (
 )
 
 
+class UserLockNotAcquiredError(RuntimeError):
+    """Raised when a transaction-scoped user advisory lock is already held."""
+
+    def __init__(self, *, user_id: int) -> None:
+        self.user_id = user_id
+        super().__init__(f"User advisory lock is busy: user_id={user_id}")
+
+
 class UsersRepository:
     """Data access for users table."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def lock_user(self, *, user_id: int) -> None:
+    async def lock_user(self, *, user_id: int, wait: bool = True) -> None:
         """Acquire transaction-scoped advisory lock for user_id."""
-        await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": user_id}
+        if wait:
+            await self._session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": user_id}
+            )
+            return
+
+        result = await self._session.execute(
+            text("SELECT pg_try_advisory_xact_lock(:lock_key)"), {"lock_key": user_id}
         )
+        acquired = result.scalar_one()
+        if acquired is not True:
+            raise UserLockNotAcquiredError(user_id=user_id)
 
     async def get_by_user_id(self, *, user_id: int) -> User | None:
         """Return user by primary key."""
