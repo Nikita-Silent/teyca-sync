@@ -18,11 +18,32 @@ make up
 # - reconcile (периодический worker)
 ```
 
+## Migrations
+
+```bash
+make migrate
+```
+
+- `make migrate` запускает `docker compose run --rm --build app alembic upgrade head`.
+- `--build` обязателен: Alembic работает внутри Docker-образа, и без пересборки контейнер может не увидеть свежие файлы в `migrations/versions`.
+
 ## Test
 
 ```bash
 make test
 ```
+
+## Quality Gates
+
+```bash
+./.venv/bin/ruff check .
+./.venv/bin/basedpyright
+make test
+```
+
+- `ruff` — линт и формат правил проекта.
+- `basedpyright` — type check в режиме `basic` по `app/` и `migrations/`.
+- `make test` — полный unit/integration набор, доступный в текущем репозитории.
 
 ## Env
 
@@ -42,6 +63,7 @@ make test
 - `consent-sync` периодически читает изменившихся подписчиков из Listmonk, подтверждает consent в Teyca и начисляет бонусы.
 - `listmonk-reconcile` восстанавливает потерянные связи `subscriber_id -> user_id`.
 - `email-repair` разбирает duplicate email кейсы через `email_repair_log`, определяет winner по Listmonk и очищает loser'ов локально и в Teyca.
+- `listmonk-duplicate-subscriber` запускается вручную как repair-flow для duplicate `subscriber_id` в `listmonk_users`: выбирает winner по `Listmonk attributes.user_id`, loser'ов архивирует и удаляет.
 
 Подтверждённый контракт Teyca:
 - `PUT /passes/{user_id}` ведёт себя как partial update.
@@ -104,6 +126,30 @@ make test
   - loser'у отправляет в Teyca `PUT /passes/{user_id}` с `email=null`, `key1="bad email"`, `key6="bugs"`,
   - помечает repair как `teyca_synced`, `failed` или `manual_review`.
 - Это нужно, чтобы очередь `queue-update`/`queue-create` не зацикливалась на одном конфликте и данные могли актуализироваться дальше.
+
+## Duplicate Subscriber Remediation
+
+- `listmonk_users.subscriber_id` теперь защищён unique constraint на уровне БД.
+- До финального constraint rollout текущие дубли очищаются отдельным repair-worker:
+  ```bash
+  docker compose run --rm app python -m app.workers.run_listmonk_duplicate_subscriber
+  ```
+- Worker:
+  - находит `subscriber_id` с несколькими строками в `listmonk_users`,
+  - читает subscriber из Listmonk через SDK,
+  - берёт authoritative `attributes.user_id`,
+  - если winner определяется однозначно, loser-строки пишет в `listmonk_user_archive` и удаляет из `listmonk_users`,
+  - если winner не определяется, логирует `manual_review` и ничего не удаляет.
+- Runtime-защита:
+  - `CREATE/UPDATE` не создают вторую строку с тем же `subscriber_id`,
+  - `consent-sync` и `reconcile` не зацикливаются на duplicate-subscriber кейсах и пропускают конфликтную запись.
+- Для текущей диагностики:
+  ```sql
+  SELECT subscriber_id, COUNT(*)
+  FROM public.listmonk_users
+  GROUP BY subscriber_id
+  HAVING COUNT(*) > 1;
+  ```
 
 ## Listmonk Upsert Rules
 
