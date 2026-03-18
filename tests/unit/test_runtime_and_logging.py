@@ -232,14 +232,87 @@ async def test_consumers_runner_callback_ack_and_reject() -> None:
     message.reject.assert_awaited_once_with(requeue=True)
 
     message = AsyncMock()
-    with patch.object(
-        run_queue_consumers.ConsumersRunner,
-        "_process",
-        new=AsyncMock(side_effect=UserLockNotAcquiredError(user_id=42)),
+    message.headers = {}
+    message.body = b'{"type":"UPDATE"}'
+    message.message_id = "msg-1"
+    message.correlation_id = "corr-1"
+    message.delivery_tag = 101
+    message.content_type = "application/json"
+    message.content_encoding = None
+    message.timestamp = None
+    message.type = None
+    message.app_id = None
+    channel = AsyncMock()
+    channel.default_exchange = AsyncMock()
+    runner._channel = channel
+    with (
+        patch.object(
+            run_queue_consumers.ConsumersRunner,
+            "_process",
+            new=AsyncMock(side_effect=UserLockNotAcquiredError(user_id=42)),
+        ),
+        patch("app.workers.run_queue_consumers.logger") as logger,
     ):
         await runner._callback(message, run_queue_consumers.QUEUE_UPDATE)
-    message.reject.assert_awaited_once_with(requeue=True)
-    message.ack.assert_not_awaited()
+    message.ack.assert_awaited_once()
+    message.reject.assert_not_awaited()
+    logger.warning.assert_called_once()
+    warning_kwargs = logger.warning.call_args.kwargs
+    assert warning_kwargs["result"] == "user_lock_busy"
+    assert warning_kwargs["user_id"] == 42
+    assert warning_kwargs["queue_name"] == run_queue_consumers.QUEUE_UPDATE
+    published_message = channel.default_exchange.publish.await_args.args[0]
+    assert published_message.headers["x-lock-busy-retry-count"] == 1
+    assert published_message.headers["x-original-queue"] == run_queue_consumers.QUEUE_UPDATE
+    assert published_message.expiration == "1000"
+    assert channel.default_exchange.publish.await_args.kwargs["routing_key"] == "queue-update-retry"
+
+
+@pytest.mark.asyncio
+async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -> None:
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+        old_db_repo=AsyncMock(),
+    )
+
+    message = AsyncMock()
+    message.headers = {"x-lock-busy-retry-count": 5}
+    message.body = b'{"type":"UPDATE"}'
+    message.message_id = "msg-2"
+    message.correlation_id = "corr-2"
+    message.delivery_tag = 102
+    message.content_type = "application/json"
+    message.content_encoding = None
+    message.timestamp = None
+    message.type = None
+    message.app_id = None
+    channel = AsyncMock()
+    channel.default_exchange = AsyncMock()
+    runner._channel = channel
+
+    with (
+        patch.object(
+            run_queue_consumers.ConsumersRunner,
+            "_process",
+            new=AsyncMock(side_effect=UserLockNotAcquiredError(user_id=77)),
+        ),
+        patch("app.workers.run_queue_consumers.logger") as logger,
+    ):
+        await runner._callback(message, run_queue_consumers.QUEUE_UPDATE)
+
+    message.ack.assert_awaited_once()
+    message.reject.assert_not_awaited()
+    logger.warning.assert_called_once()
+    warning_kwargs = logger.warning.call_args.kwargs
+    assert warning_kwargs["result"] == "user_lock_busy_dead_lettered"
+    assert warning_kwargs["retry_count"] == 6
+    assert warning_kwargs["retry_queue_name"] == "queue-update-dead"
+    published_message = channel.default_exchange.publish.await_args.args[0]
+    assert published_message.headers["x-lock-busy-retry-count"] == 6
+    assert published_message.expiration is None
+    assert channel.default_exchange.publish.await_args.kwargs["routing_key"] == "queue-update-dead"
 
 
 @pytest.mark.asyncio
