@@ -81,6 +81,30 @@ async def handle(
         trace_id=trace_id,
         source_event_id=source_event_id,
     )
+    profile = build_profile_from_pass(event.pass_data)
+    merge_applied = False
+    old_data = None
+    old_bonus_value: float | None = None
+    merge_needs_write = False
+    merge_exists_hint = await deps.merge_repo.exists(user_id=user_id)
+    if not merge_exists_hint:
+        _log_step(
+            "update_consumer_old_db_read_start",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            phone=event.pass_data.phone,
+        )
+        old_data = await deps.old_db_repo.get_user_data(phone=event.pass_data.phone)
+        _log_step(
+            "update_consumer_old_db_read_done",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            old_data_found=old_data is not None,
+            old_data_has_merge_data=False if old_data is None else old_data.has_merge_data(),
+        )
+
     _log_step(
         "update_consumer_lock_start",
         user_id=user_id,
@@ -105,28 +129,8 @@ async def handle(
             trace_id=trace_id,
             source_event_id=source_event_id,
         )
-    profile = build_profile_from_pass(event.pass_data)
-    merge_applied = False
-    old_data = None
-    old_bonus_value: float | None = None
-    merge_needs_write = False
-    if not merged_already:
-        _log_step(
-            "update_consumer_old_db_read_start",
-            user_id=user_id,
-            trace_id=trace_id,
-            source_event_id=source_event_id,
-            phone=event.pass_data.phone,
-        )
-        old_data = await deps.old_db_repo.get_user_data(phone=event.pass_data.phone)
-        _log_step(
-            "update_consumer_old_db_read_done",
-            user_id=user_id,
-            trace_id=trace_id,
-            source_event_id=source_event_id,
-            old_data_found=old_data is not None,
-            old_data_has_merge_data=False if old_data is None else old_data.has_merge_data(),
-        )
+        old_data = None
+    else:
         merge_result = merge_profile_with_old_data(profile, old_data)
         profile = merge_result.profile
         if merge_result.merged and old_data is not None and old_data.has_merge_data():

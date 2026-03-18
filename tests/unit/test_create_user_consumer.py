@@ -96,6 +96,30 @@ async def test_create_with_old_data_and_existing_subscriber() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_skips_merge_if_merge_log_appears_after_old_db_prefetch() -> None:
+    deps = _deps()
+    deps.merge_repo.exists.side_effect = [False, True]
+    deps.old_db_repo.get_user_data.return_value = OldUserData(
+        bonus=55.0,
+        summ=10,
+    )
+    deps.listmonk_repo.get_by_user_id.return_value = None
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = []
+    deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
+        subscriber_id=500,
+        status="enabled",
+        list_ids=[1, 2],
+    )
+
+    await handle(_payload(), deps=deps)
+
+    deps.old_db_repo.get_user_data.assert_awaited_once_with(phone="79039859055")
+    deps.merge_repo.create.assert_not_awaited()
+    deps.teyca_client.accrue_bonuses.assert_not_awaited()
+    deps.teyca_client.update_pass_fields.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_create_skips_merge_when_merge_already_exists() -> None:
     deps = _deps()
     deps.merge_repo.exists.return_value = True

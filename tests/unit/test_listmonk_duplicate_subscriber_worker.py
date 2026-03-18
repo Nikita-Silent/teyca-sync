@@ -27,13 +27,20 @@ def _worker() -> ListmonkDuplicateSubscriberWorker:
 @pytest.mark.asyncio
 async def test_run_once_repairs_duplicate_subscriber_and_archives_losers() -> None:
     worker = _worker()
-    worker.listmonk_client.get_subscriber_profile.return_value = SubscriberProfile(
-        subscriber_id=777,
-        email="winner@example.com",
-        status="confirmed",
-        list_ids=[2, 5],
-        attributes={"user_id": "20"},
-    )
+    session = worker.session_factory.return_value.__aenter__.return_value
+
+    async def get_subscriber_profile(*, subscriber_id: int) -> SubscriberProfile:
+        assert subscriber_id == 777
+        assert session.commit.await_count >= 2
+        return SubscriberProfile(
+            subscriber_id=777,
+            email="winner@example.com",
+            status="confirmed",
+            list_ids=[2, 5],
+            attributes={"user_id": "20"},
+        )
+
+    worker.listmonk_client.get_subscriber_profile.side_effect = get_subscriber_profile
 
     with (
         patch(
@@ -66,13 +73,20 @@ async def test_run_once_repairs_duplicate_subscriber_and_archives_losers() -> No
 @pytest.mark.asyncio
 async def test_run_once_marks_manual_review_when_authoritative_user_missing() -> None:
     worker = _worker()
-    worker.listmonk_client.get_subscriber_profile.return_value = SubscriberProfile(
-        subscriber_id=777,
-        email="winner@example.com",
-        status="confirmed",
-        list_ids=[2, 5],
-        attributes={},
-    )
+    session = worker.session_factory.return_value.__aenter__.return_value
+
+    async def get_subscriber_profile(*, subscriber_id: int) -> SubscriberProfile:
+        assert subscriber_id == 777
+        assert session.commit.await_count >= 2
+        return SubscriberProfile(
+            subscriber_id=777,
+            email="winner@example.com",
+            status="confirmed",
+            list_ids=[2, 5],
+            attributes={},
+        )
+
+    worker.listmonk_client.get_subscriber_profile.side_effect = get_subscriber_profile
 
     with (
         patch(

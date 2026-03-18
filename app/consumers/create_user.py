@@ -66,6 +66,11 @@ async def handle(
         trace_id=trace_id,
         source_event_id=source_event_id,
     )
+    old_data = None
+    merge_exists_hint = await deps.merge_repo.exists(user_id=user_id)
+    if not merge_exists_hint:
+        old_data = await deps.old_db_repo.get_user_data(phone=event.pass_data.phone)
+
     await deps.users_repo.lock_user(user_id=user_id, wait=wait_for_lock)
 
     merged_already = await deps.merge_repo.exists(user_id=user_id)
@@ -76,9 +81,7 @@ async def handle(
             trace_id=trace_id,
             source_event_id=source_event_id,
         )
-    old_data = None
-    if not merged_already:
-        old_data = await deps.old_db_repo.get_user_data(phone=event.pass_data.phone)
+        old_data = None
 
     profile = build_profile_from_pass(event.pass_data)
     merge_result = merge_profile_with_old_data(profile, old_data)

@@ -150,13 +150,7 @@ async def test_apply_rejects_partial_execution_when_issues_exist() -> None:
 @pytest.mark.asyncio
 async def test_sync_teyca_marks_rows_synced() -> None:
     backfill = _backfill()
-    session = AsyncMock()
-    session_cm = AsyncMock()
-    session_cm.__aenter__.return_value = session
-    backfill.session_factory.return_value = session_cm
-
-    repair_repo = AsyncMock()
-    repair_repo.get_db_applied_batch.return_value = [
+    rows = [
         SimpleNamespace(
             id=1,
             incoming_user_id=10,
@@ -166,8 +160,13 @@ async def test_sync_teyca_marks_rows_synced() -> None:
         )
     ]
 
-    with patch(
-        "app.workers.email_repair_backfill.EmailRepairLogRepository", return_value=repair_repo
+    with (
+        patch.object(
+            DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
+        ),
+        patch.object(
+            DuplicateEmailBackfill, "_mark_teyca_synced", new=AsyncMock()
+        ) as mark_teyca_synced,
     ):
         summary = await backfill.sync_teyca(batch_size=10)
 
@@ -181,25 +180,18 @@ async def test_sync_teyca_marks_rows_synced() -> None:
         user_id=10,
         fields={"email": None, "key1": "bad email", "key6": "bugs"},
     )
-    repair_repo.mark_teyca_synced.assert_awaited_once_with(
+    mark_teyca_synced.assert_awaited_once_with(
         repair_id=1,
         winner_user_id=20,
         winner_subscriber_id=777,
     )
-    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_sync_teyca_marks_retry_on_teyca_error() -> None:
     backfill = _backfill()
-    session = AsyncMock()
-    session_cm = AsyncMock()
-    session_cm.__aenter__.return_value = session
-    backfill.session_factory.return_value = session_cm
     backfill.teyca_client.update_pass_fields.side_effect = httpx.ReadTimeout("boom")
-
-    repair_repo = AsyncMock()
-    repair_repo.get_db_applied_batch.return_value = [
+    rows = [
         SimpleNamespace(
             id=1,
             incoming_user_id=10,
@@ -208,17 +200,20 @@ async def test_sync_teyca_marks_retry_on_teyca_error() -> None:
             attempts=0,
         )
     ]
-    repair_repo.mark_retry.return_value = "failed"
 
-    with patch(
-        "app.workers.email_repair_backfill.EmailRepairLogRepository", return_value=repair_repo
+    with (
+        patch.object(
+            DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
+        ),
+        patch.object(
+            DuplicateEmailBackfill, "_mark_retry", new=AsyncMock(return_value="failed")
+        ) as mark_retry,
     ):
         summary = await backfill.sync_teyca(batch_size=10)
 
     assert summary.teyca_failed == 1
-    repair_repo.mark_retry.assert_awaited_once_with(
+    mark_retry.assert_awaited_once_with(
         repair_id=1,
         attempts=1,
         error_text="boom",
-        max_attempts=3,
     )

@@ -178,43 +178,26 @@ async def test_run_once_processes_rows_and_commits() -> None:
         source_event_id="event-1",
         attempts=0,
     )
-    repair_repo = AsyncMock()
-    repair_repo.get_pending_batch.return_value = [row]
-    listmonk_repo = AsyncMock()
-    users_repo = AsyncMock()
     process_row = AsyncMock()
 
     with (
-        patch("app.workers.email_repair_worker.EmailRepairLogRepository", return_value=repair_repo),
-        patch(
-            "app.workers.email_repair_worker.ListmonkUsersRepository", return_value=listmonk_repo
-        ),
-        patch("app.workers.email_repair_worker.UsersRepository", return_value=users_repo),
+        patch.object(EmailRepairWorker, "_load_pending_rows", new=AsyncMock(return_value=[row])),
+        patch.object(EmailRepairWorker, "_mark_processing", new=AsyncMock()) as mark_processing,
         patch.object(EmailRepairWorker, "_process_row", new=process_row),
     ):
         processed = await worker.run_once()
 
     assert processed == 1
-    repair_repo.mark_processing.assert_awaited_once_with(repair_id=1)
+    mark_processing.assert_awaited_once_with(repair_id=1)
     process_row.assert_awaited_once()
-    session.commit.assert_awaited_once()
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_run_once_logs_no_pending_rows() -> None:
     worker = _worker()
-    session = AsyncMock()
-    context_manager = AsyncMock()
-    context_manager.__aenter__.return_value = session
-    context_manager.__aexit__.return_value = False
-    worker.session_factory = MagicMock(return_value=context_manager)
-    repair_repo = AsyncMock()
-    repair_repo.get_pending_batch.return_value = []
-
     with (
-        patch("app.workers.email_repair_worker.EmailRepairLogRepository", return_value=repair_repo),
-        patch("app.workers.email_repair_worker.ListmonkUsersRepository", return_value=AsyncMock()),
-        patch("app.workers.email_repair_worker.UsersRepository", return_value=AsyncMock()),
+        patch.object(EmailRepairWorker, "_load_pending_rows", new=AsyncMock(return_value=[])),
         patch("app.workers.email_repair_worker.logger.info") as logger_info,
     ):
         processed = await worker.run_once()

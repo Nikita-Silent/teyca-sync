@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 import structlog
@@ -46,42 +48,117 @@ class EmailRepairWorker:
     listmonk_client: ListmonkSDKClient
     teyca_client: TeycaClient
 
+    async def _run_in_session(
+        self,
+        operation: Callable[[AsyncSession], Awaitable[Any]],
+    ) -> Any:
+        """Run one short database phase in its own transaction."""
+        async with self.session_factory() as session:
+            try:
+                result = await operation(session)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+        return result
+
+    async def _load_pending_rows(self, *, limit: int) -> list[Any]:
+        """Load a batch of pending repair rows without holding the transaction open."""
+
+        async def operation(session: AsyncSession) -> list[Any]:
+            repair_repo = EmailRepairLogRepository(session)
+            return await repair_repo.get_pending_batch(limit=limit)
+
+        return await self._run_in_session(operation)
+
+    async def _mark_processing(self, *, repair_id: int) -> None:
+        """Claim a repair row for processing in a short transaction."""
+
+        async def operation(session: AsyncSession) -> None:
+            repair_repo = EmailRepairLogRepository(session)
+            await repair_repo.mark_processing(repair_id=repair_id)
+
+        await self._run_in_session(operation)
+
+    async def _lookup_winner_row(self, *, subscriber_id: int) -> Any | None:
+        """Resolve winner mapping for a subscriber in a short transaction."""
+
+        async def operation(session: AsyncSession) -> Any | None:
+            listmonk_repo = ListmonkUsersRepository(session)
+            return await listmonk_repo.get_by_subscriber_id(subscriber_id=subscriber_id)
+
+        return await self._run_in_session(operation)
+
+    async def _apply_cleanup_success(
+        self,
+        *,
+        repair_id: int,
+        loser_user_id: int,
+        winner_user_id: int,
+        winner_subscriber_id: int,
+    ) -> None:
+        """Persist successful loser cleanup after external calls complete."""
+
+        async def operation(session: AsyncSession) -> None:
+            repair_repo = EmailRepairLogRepository(session)
+            listmonk_repo = ListmonkUsersRepository(session)
+            users_repo = UsersRepository(session)
+            await users_repo.clear_email(user_id=loser_user_id)
+            await listmonk_repo.clear_email(user_id=loser_user_id)
+            await repair_repo.mark_teyca_synced(
+                repair_id=repair_id,
+                winner_user_id=winner_user_id,
+                winner_subscriber_id=winner_subscriber_id,
+            )
+
+        await self._run_in_session(operation)
+
+    async def _mark_retry(
+        self,
+        *,
+        repair_id: int,
+        attempts: int,
+        error_text: str,
+    ) -> str:
+        """Persist retry/manual-review status in a short transaction."""
+
+        async def operation(session: AsyncSession) -> str:
+            repair_repo = EmailRepairLogRepository(session)
+            return await repair_repo.mark_retry(
+                repair_id=repair_id,
+                attempts=attempts,
+                error_text=error_text,
+                max_attempts=EMAIL_REPAIR_MAX_ATTEMPTS,
+            )
+
+        return str(await self._run_in_session(operation))
+
     async def run_once(self) -> int:
         """Process one batch of pending email repairs."""
         batch_size = max(1, self.settings.consent_sync_batch_size)
         metrics = EmailRepairMetrics(batch_size=batch_size)
-        async with self.session_factory() as session:
-            repair_repo = EmailRepairLogRepository(session)
-            listmonk_repo = ListmonkUsersRepository(session)
-            users_repo = UsersRepository(session)
-
-            rows = await repair_repo.get_pending_batch(limit=batch_size)
-            if not rows:
-                logger.info("email_repair_no_pending_rows", batch_size=batch_size)
-            for row in rows:
-                metrics.processed += 1
-                log_contextvars.bind_contextvars(
-                    trace_id=row.trace_id,
-                    source_event_id=row.source_event_id,
-                    user_id=row.incoming_user_id,
+        rows = await self._load_pending_rows(limit=batch_size)
+        if not rows:
+            logger.info("email_repair_no_pending_rows", batch_size=batch_size)
+        for row in rows:
+            metrics.processed += 1
+            log_contextvars.bind_contextvars(
+                trace_id=row.trace_id,
+                source_event_id=row.source_event_id,
+                user_id=row.incoming_user_id,
+            )
+            try:
+                await self._mark_processing(repair_id=int(row.id))
+                await self._process_row(
+                    row=row,
+                    metrics=metrics,
                 )
-                try:
-                    await repair_repo.mark_processing(repair_id=int(row.id))
-                    await self._process_row(
-                        row=row,
-                        repair_repo=repair_repo,
-                        listmonk_repo=listmonk_repo,
-                        users_repo=users_repo,
-                        metrics=metrics,
-                    )
-                finally:
-                    log_contextvars.unbind_contextvars(
-                        "trace_id",
-                        "source_event_id",
-                        "user_id",
-                    )
-
-            await session.commit()
+            finally:
+                log_contextvars.unbind_contextvars(
+                    "trace_id",
+                    "source_event_id",
+                    "user_id",
+                )
         logger.info(
             "email_repair_metrics",
             batch_size=metrics.batch_size,
@@ -96,9 +173,9 @@ class EmailRepairWorker:
         self,
         *,
         row: object,
-        repair_repo: EmailRepairLogRepository,
-        listmonk_repo: ListmonkUsersRepository,
-        users_repo: UsersRepository,
+        repair_repo: EmailRepairLogRepository | None = None,
+        listmonk_repo: ListmonkUsersRepository | None = None,
+        users_repo: UsersRepository | None = None,
         metrics: EmailRepairMetrics | None = None,
     ) -> None:
         repair_id = int(getattr(row, "id"))
@@ -113,9 +190,14 @@ class EmailRepairWorker:
                 raise EmailRepairResolutionError("subscriber_by_email returned no subscriber")
 
             try:
-                winner_row = await listmonk_repo.get_by_subscriber_id(
-                    subscriber_id=subscriber.subscriber_id
-                )
+                if listmonk_repo is not None:
+                    winner_row = await listmonk_repo.get_by_subscriber_id(
+                        subscriber_id=subscriber.subscriber_id
+                    )
+                else:
+                    winner_row = await self._lookup_winner_row(
+                        subscriber_id=subscriber.subscriber_id
+                    )
             except DuplicateListmonkSubscriberIdError as exc:
                 raise EmailRepairResolutionError(
                     "subscriber_id="
@@ -137,8 +219,6 @@ class EmailRepairWorker:
             loser_user_id = (
                 existing_user_id if winner_user_id == incoming_user_id else incoming_user_id
             )
-            await users_repo.clear_email(user_id=loser_user_id)
-            await listmonk_repo.clear_email(user_id=loser_user_id)
             await self.teyca_client.update_pass_fields(
                 user_id=loser_user_id,
                 fields={
@@ -146,11 +226,21 @@ class EmailRepairWorker:
                     "key1": TEYCA_KEY1_BAD_EMAIL,
                 },
             )
-            await repair_repo.mark_teyca_synced(
-                repair_id=repair_id,
-                winner_user_id=winner_user_id,
-                winner_subscriber_id=subscriber.subscriber_id,
-            )
+            if repair_repo is not None and listmonk_repo is not None and users_repo is not None:
+                await users_repo.clear_email(user_id=loser_user_id)
+                await listmonk_repo.clear_email(user_id=loser_user_id)
+                await repair_repo.mark_teyca_synced(
+                    repair_id=repair_id,
+                    winner_user_id=winner_user_id,
+                    winner_subscriber_id=subscriber.subscriber_id,
+                )
+            else:
+                await self._apply_cleanup_success(
+                    repair_id=repair_id,
+                    loser_user_id=loser_user_id,
+                    winner_user_id=winner_user_id,
+                    winner_subscriber_id=subscriber.subscriber_id,
+                )
             _inc(metrics, "synced")
             logger.info(
                 "email_repair_synced",
@@ -168,12 +258,19 @@ class EmailRepairWorker:
             TeycaAPIError,
             httpx.HTTPError,
         ) as exc:
-            status = await repair_repo.mark_retry(
-                repair_id=repair_id,
-                attempts=attempts,
-                error_text=str(exc),
-                max_attempts=EMAIL_REPAIR_MAX_ATTEMPTS,
-            )
+            if repair_repo is not None:
+                status = await repair_repo.mark_retry(
+                    repair_id=repair_id,
+                    attempts=attempts,
+                    error_text=str(exc),
+                    max_attempts=EMAIL_REPAIR_MAX_ATTEMPTS,
+                )
+            else:
+                status = await self._mark_retry(
+                    repair_id=repair_id,
+                    attempts=attempts,
+                    error_text=str(exc),
+                )
             _inc(metrics, status)
             logger.error(
                 "email_repair_failed",
