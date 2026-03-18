@@ -60,7 +60,7 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
         trace_id=trace_id,
         source_event_id=source_event_id,
     )
-    await deps.users_repo.lock_user(user_id=user_id)
+    await deps.users_repo.lock_user(user_id=user_id, wait=False)
 
     merged_already = await deps.merge_repo.exists(user_id=user_id)
     if merged_already:

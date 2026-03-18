@@ -18,7 +18,7 @@ from app.repositories.listmonk_users import (
 )
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.sync_state import SyncStateRepository
-from app.repositories.users import UsersRepository
+from app.repositories.users import UserLockNotAcquiredError, UsersRepository
 
 
 @pytest.mark.asyncio
@@ -28,6 +28,18 @@ async def test_users_repository_paths() -> None:
 
     await repo.lock_user(user_id=1)
     session.execute.assert_awaited()
+
+    session.execute.reset_mock()
+    session.execute.return_value = SimpleNamespace(scalar_one=lambda: True)
+    await repo.lock_user(user_id=2, wait=False)
+    lock_stmt = session.execute.await_args.args[0]
+    assert "pg_try_advisory_xact_lock" in str(lock_stmt)
+
+    session.execute.reset_mock()
+    session.execute.return_value = SimpleNamespace(scalar_one=lambda: False)
+    with pytest.raises(UserLockNotAcquiredError) as exc_info:
+        await repo.lock_user(user_id=3, wait=False)
+    assert exc_info.value.user_id == 3
 
     session.execute.reset_mock()
     session.execute.return_value = SimpleNamespace(

@@ -22,6 +22,7 @@ from app.logging_config import (
     configure_logging,
     shutdown_logging,
 )
+from app.repositories.users import UserLockNotAcquiredError
 from app.workers import (
     run_consent_sync,
     run_listmonk_reconcile,
@@ -229,6 +230,16 @@ async def test_consumers_runner_callback_ack_and_reject() -> None:
     ):
         await runner._callback(message, run_queue_consumers.QUEUE_CREATE)
     message.reject.assert_awaited_once_with(requeue=True)
+
+    message = AsyncMock()
+    with patch.object(
+        run_queue_consumers.ConsumersRunner,
+        "_process",
+        new=AsyncMock(side_effect=UserLockNotAcquiredError(user_id=42)),
+    ):
+        await runner._callback(message, run_queue_consumers.QUEUE_UPDATE)
+    message.reject.assert_awaited_once_with(requeue=True)
+    message.ack.assert_not_awaited()
 
 
 @pytest.mark.asyncio

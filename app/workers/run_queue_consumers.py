@@ -29,7 +29,7 @@ from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
-from app.repositories.users import UsersRepository
+from app.repositories.users import UserLockNotAcquiredError, UsersRepository
 from app.service_health import write_heartbeat
 from app.utils import to_optional_str
 
@@ -146,6 +146,16 @@ class ConsumersRunner:
                 correlation_id=getattr(message, "correlation_id", None),
                 delivery_tag=getattr(message, "delivery_tag", None),
             )
+        except UserLockNotAcquiredError as exc:
+            logger.warning(
+                "consumer_message_requeued_user_lock_busy",
+                queue_name=queue_name,
+                user_id=exc.user_id,
+                message_id=getattr(message, "message_id", None),
+                correlation_id=getattr(message, "correlation_id", None),
+                delivery_tag=getattr(message, "delivery_tag", None),
+            )
+            await message.reject(requeue=True)
         except Exception as exc:
             logger.exception(
                 "consumer_message_failed",

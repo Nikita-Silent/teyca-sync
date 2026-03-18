@@ -34,7 +34,7 @@ async def test_delete_with_subscriber_id() -> None:
 
     await handle(_payload(), deps=deps)
 
-    deps.users_repo.lock_user.assert_awaited_once_with(user_id=30)
+    deps.users_repo.lock_user.assert_awaited_once_with(user_id=30, wait=False)
     deps.listmonk_repo.delete_by_user_id.assert_awaited_once_with(user_id=30)
     deps.merge_repo.delete_by_user_id.assert_awaited_once_with(user_id=30)
     deps.bonus_accrual_repo.delete_by_user_id.assert_awaited_once_with(user_id=30)
