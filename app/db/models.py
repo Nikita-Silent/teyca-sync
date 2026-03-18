@@ -58,6 +58,7 @@ class ListmonkUser(Base):
     """Listmonk sync state per user."""
 
     __tablename__ = "listmonk_users"
+    __table_args__ = (UniqueConstraint("subscriber_id", name="uq_listmonk_users_subscriber_id"),)
 
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.user_id", ondelete="RESTRICT"), primary_key=True
@@ -80,6 +81,37 @@ class ListmonkUser(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True
     )
+
+
+class ListmonkUserArchive(Base):
+    """Archived loser rows from duplicate subscriber remediation."""
+
+    __tablename__ = "listmonk_user_archive"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    subscriber_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    list_ids: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attributes: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    consent_pending: Mapped[bool] = mapped_column(default=False)
+    consent_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    consent_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    original_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    original_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    winner_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    winner_subscriber_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
 class MergeLog(Base):

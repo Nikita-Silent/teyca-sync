@@ -1,6 +1,6 @@
 # DB Flow (куда смотреть и зачем)
 
-Дата актуальности: 2026-03-17
+Дата актуальности: 2026-03-18
 
 ## 1) Где лежат таблицы
 
@@ -10,9 +10,10 @@
   - `users`
   - `listmonk_users`
   - `merge_log`
-  - `bonus_accrual_log`
-  - `email_repair_log`
-  - `sync_state` (используется в инкрементальном consent sync как watermark)
+- `bonus_accrual_log`
+- `email_repair_log`
+- `listmonk_user_archive`
+- `sync_state` (используется в инкрементальном consent sync как watermark)
 
 ## 2) Таблицы и их назначение
 
@@ -23,6 +24,7 @@
 
 2. `listmonk_users`
 - Связка нашего `user_id` с Listmonk (`subscriber_id`), status, list_ids, attributes.
+- `subscriber_id` зажат unique constraint `uq_listmonk_users_subscriber_id`.
 - Флаги consent-процесса:
   - `consent_pending`
   - `consent_checked_at`
@@ -59,6 +61,17 @@
   - `error_text`
 - Сюда смотреть, если email "пропал" у loser-пользователя или если duplicate-email больше не ретраится через RabbitMQ.
 
+7. `listmonk_user_archive`
+- Архив loser-строк из duplicate-subscriber remediation.
+- Полезные поля:
+  - `user_id`
+  - `subscriber_id`
+  - `winner_user_id`
+  - `winner_subscriber_id`
+  - `archive_reason`
+  - `archived_at`
+- Сюда смотреть, если duplicate `subscriber_id` уже разрешён, но нужно восстановить историю удалённой строки.
+
 ## 3) Flow по событиям (что меняется в БД)
 
 ## CREATE (`queue-create`)
@@ -81,11 +94,18 @@
 5. Listmonk этим сообщением не мутируется
 6. consumer завершает обработку без `requeue`
 
+Если локальный duplicate `subscriber_id`:
+1. `users`: upsert уже выполнен
+2. перед записью в `listmonk_users` берётся advisory lock по `subscriber_id`
+3. если этот `subscriber_id` уже связан с другим `user_id`, `listmonk_users` не обновляется
+4. consumer логирует конфликт и завершает обработку без `requeue`
+
 Куда смотреть:
 1. `users` (профиль)
 2. `listmonk_users` (subscriber/status + consent_pending)
 3. `merge_log` (был ли merge)
 4. `email_repair_log` (если sync в Listmonk не прошёл из-за duplicate email)
+5. логи `*_duplicate_subscriber_id` (если sync не дошёл до `listmonk_users` из-за duplicate subscriber mapping)
 
 ## UPDATE (`queue-update`)
 
@@ -100,12 +120,14 @@
 При успешном merge дополнительно обновляется `key2` в Teyca.
 Если локальный email-дубликат, вместо бесконечного retry создаётся запись в `email_repair_log`, а сообщение ack-ается.
 Локальный duplicate pre-check выполняется до `listmonk_client.upsert_subscriber(...)`, поэтому сам Listmonk в этом сценарии не успевает обновиться.
+Если локальный duplicate `subscriber_id`, вместо повторных попыток логируется конфликтная привязка и сообщение ack-ается.
 
 Куда смотреть:
 1. `users.updated_at`
 2. `merge_log` (есть/нет записи)
 3. `listmonk_users` (обновился ли subscriber и pending-флаг)
 4. `email_repair_log` (если update "не дошёл" до `listmonk_users` из-за duplicate email)
+5. логи `update_consumer_duplicate_subscriber_id` / `create_consumer_duplicate_subscriber_id`
 
 ## DELETE (`queue-delete`)
 
@@ -173,6 +195,20 @@
 2. `users.email` и `listmonk_users.email` у winner/loser
 3. логи `email_repair_*`
 
+## Duplicate subscriber repair-worker
+
+1. читает duplicate `subscriber_id` группы из `listmonk_users`
+2. читает authoritative subscriber из Listmonk через SDK
+3. определяет winner по `attributes.user_id`
+4. loser-строки пишет в `listmonk_user_archive`
+5. loser-строки удаляет из `listmonk_users`
+6. если authoritative `user_id` отсутствует, невалиден или не даёт однозначный winner, переводит кейс в manual review через логи и не меняет данные
+
+Куда смотреть:
+1. `listmonk_users` по `subscriber_id`
+2. `listmonk_user_archive` по `subscriber_id`
+3. логи `listmonk_duplicate_subscriber_*`
+
 ## 3.1) Маппинг old DB -> текущая БД
 
 Текущая интеграция old DB читает таблицу `public.users` и использует алиасы колонок.
@@ -220,6 +256,25 @@ SELECT *
 FROM email_repair_log
 WHERE incoming_user_id = :user_id
 ORDER BY created_at DESC;
+
+-- 6) Archived loser rows after duplicate subscriber remediation
+SELECT *
+FROM listmonk_user_archive
+WHERE user_id = :user_id
+ORDER BY archived_at DESC;
+```
+
+Проверка duplicate `subscriber_id`:
+
+```sql
+SELECT
+  subscriber_id,
+  COUNT(*) AS row_count,
+  array_agg(user_id ORDER BY user_id) AS user_ids
+FROM public.listmonk_users
+GROUP BY subscriber_id
+HAVING COUNT(*) > 1
+ORDER BY subscriber_id;
 ```
 
 ## 5) Что проверять в первую очередь по типовым вопросам

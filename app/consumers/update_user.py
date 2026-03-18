@@ -18,7 +18,11 @@ from app.consumers.common import (
     merge_profile_with_old_data,
 )
 from app.repositories.email_repair_log import EmailRepairLogRepository
-from app.repositories.listmonk_users import DuplicateListmonkUserEmailError, ListmonkUsersRepository
+from app.repositories.listmonk_users import (
+    DuplicateListmonkSubscriberIdError,
+    DuplicateListmonkUserEmailError,
+    ListmonkUsersRepository,
+)
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
@@ -190,6 +194,16 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
             list_ids=subscriber_state.list_ids,
             attributes=build_listmonk_attributes(event.pass_data),
         )
+    except DuplicateListmonkSubscriberIdError as exc:
+        logger.error(
+            "update_consumer_duplicate_subscriber_id",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            subscriber_id=exc.subscriber_id,
+            existing_user_ids=exc.user_ids,
+        )
+        return
     except DuplicateListmonkUserEmailError as exc:
         for existing_user_id in exc.existing_user_ids:
             await deps.email_repair_repo.create_pending(

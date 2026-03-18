@@ -98,6 +98,18 @@ class SubscriberDelta:
     list_statuses: dict[int, str] | None = None
 
 
+@dataclass(slots=True)
+class SubscriberProfile:
+    """Full subscriber snapshot used for repair/diagnostics."""
+
+    subscriber_id: int
+    email: str | None
+    status: str
+    list_ids: list[int]
+    attributes: dict[str, Any] | None = None
+    list_statuses: dict[int, str] | None = None
+
+
 class ListmonkSDKClient:
     """Thin wrapper over listmonk Python SDK."""
 
@@ -248,6 +260,33 @@ class ListmonkSDKClient:
             list_ids=state.list_ids,
         )
         return state
+
+    async def get_subscriber_profile(self, *, subscriber_id: int) -> SubscriberProfile | None:
+        """Fetch full subscriber snapshot from Listmonk SDK."""
+        try:
+            import listmonk  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise ListmonkClientError("listmonk package is not installed") from exc
+
+        await self._ensure_login()
+        payload = await self._sdk_call(
+            listmonk.subscriber_by_id,
+            subscriber_id,
+            action="subscriber_by_id",
+        )
+        if payload is None:
+            return None
+        state = await self.get_subscriber_state(subscriber_id=subscriber_id)
+        if state is None:
+            return None
+        return SubscriberProfile(
+            subscriber_id=state.subscriber_id,
+            email=_extract_email(payload),
+            status=state.status,
+            list_ids=state.list_ids,
+            attributes=_extract_attributes(payload),
+            list_statuses=state.list_statuses,
+        )
 
     async def get_subscriber_by_email(self, *, email: str) -> SubscriberState | None:
         """Fetch subscriber state from Listmonk by normalized email."""

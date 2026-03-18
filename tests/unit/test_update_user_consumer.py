@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.consumers.update_user import UpdateConsumerDeps, handle
+from app.repositories.listmonk_users import DuplicateListmonkSubscriberIdError
 from app.repositories.old_db import OldUserData
 
 
@@ -161,4 +162,26 @@ async def test_update_duplicate_email_schedules_repair_and_skips_requeue_path() 
     )
     deps.listmonk_client.upsert_subscriber.assert_not_awaited()
     deps.listmonk_repo.upsert.assert_not_awaited()
+    deps.listmonk_repo.set_consent_pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_duplicate_subscriber_id_stops_retry_path() -> None:
+    deps = _deps()
+    deps.merge_repo.exists.return_value = True
+    deps.listmonk_repo.get_by_user_id.return_value = None
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = []
+    deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
+        subscriber_id=903,
+        status="enabled",
+        list_ids=[3],
+    )
+    deps.listmonk_repo.upsert.side_effect = DuplicateListmonkSubscriberIdError(
+        subscriber_id=903,
+        rows=[],
+    )
+
+    await handle(_payload(), deps=deps)
+
+    deps.email_repair_repo.create_pending.assert_not_awaited()
     deps.listmonk_repo.set_consent_pending.assert_not_awaited()

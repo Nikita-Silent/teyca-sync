@@ -13,7 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.clients.listmonk import ListmonkClientError, ListmonkSDKClient, SubscriberDelta
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
-from app.repositories.listmonk_users import ListmonkUsersRepository
+from app.repositories.listmonk_users import (
+    DuplicateListmonkSubscriberIdError,
+    ListmonkUsersRepository,
+)
 from app.repositories.sync_state import SyncStateRepository
 from app.repositories.users import UsersRepository
 from app.workers.consent_sync_worker import parse_list_ids
@@ -119,6 +122,7 @@ class ListmonkReconcileWorker:
             invalid_attribute_user_id=metrics.invalid_attribute_user_id,
             email_not_found=metrics.email_not_found,
             email_ambiguous=metrics.email_ambiguous,
+            duplicate_subscriber_mappings=metrics.duplicate_subscriber_mappings,
             consistency_scanned=metrics.consistency_scanned,
             consistency_missing=metrics.consistency_missing,
             consistency_restored=metrics.consistency_restored,
@@ -171,7 +175,10 @@ class ListmonkReconcileWorker:
                 continue
 
             metrics.consistency_missing += 1
-            parsed_list_ids = _parse_list_ids_text(row.list_ids)
+            parsed_list_ids = _resolve_restore_list_ids(
+                stored_list_ids=row.list_ids,
+                configured_list_ids=self.settings.listmonk_list_ids,
+            )
             try:
                 restored = await self.listmonk_client.restore_subscriber(
                     email=row.email,
@@ -225,7 +232,17 @@ class ListmonkReconcileWorker:
         users_repo: UsersRepository,
         metrics: ReconcileMetrics,
     ) -> None:
-        existing = await listmonk_repo.get_by_subscriber_id(subscriber_id=delta.subscriber_id)
+        try:
+            existing = await listmonk_repo.get_by_subscriber_id(subscriber_id=delta.subscriber_id)
+        except DuplicateListmonkSubscriberIdError as exc:
+            metrics.duplicate_subscriber_mappings += 1
+            logger.error(
+                "listmonk_reconcile_duplicate_subscriber_mapping",
+                subscriber_id=delta.subscriber_id,
+                list_id=list_id,
+                user_ids=exc.user_ids,
+            )
+            return
         if existing is not None:
             metrics.already_mapped += 1
             return
@@ -337,6 +354,7 @@ class ReconcileMetrics:
     consistency_missing: int = 0
     consistency_restored: int = 0
     consistency_errors: int = 0
+    duplicate_subscriber_mappings: int = 0
 
 
 def _extract_attr_user_id(attributes: dict[str, Any] | None) -> int | None:
@@ -363,3 +381,12 @@ def _parse_list_ids_text(raw: str | None) -> list[int]:
         except ValueError:
             continue
     return result
+
+
+def _resolve_restore_list_ids(
+    *, stored_list_ids: str | None, configured_list_ids: str
+) -> list[int]:
+    stored = _parse_list_ids_text(stored_list_ids)
+    if stored:
+        return stored
+    return parse_list_ids(configured_list_ids)

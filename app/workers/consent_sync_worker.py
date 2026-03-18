@@ -16,7 +16,10 @@ from app.clients.teyca import BonusOperation, TeycaAPIError, TeycaClient
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.repositories.bonus_accrual import BonusAccrualRepository
-from app.repositories.listmonk_users import ListmonkUsersRepository
+from app.repositories.listmonk_users import (
+    DuplicateListmonkSubscriberIdError,
+    ListmonkUsersRepository,
+)
 from app.repositories.sync_state import SyncStateRepository
 
 logger = structlog.get_logger()
@@ -283,9 +286,19 @@ class ConsentSyncWorker:
                 for delta in deltas:
                     last_updated_at = delta.updated_at
                     last_subscriber_id = delta.subscriber_id
-                    mapped = await listmonk_repo.get_by_subscriber_id(
-                        subscriber_id=delta.subscriber_id
-                    )
+                    try:
+                        mapped = await listmonk_repo.get_by_subscriber_id(
+                            subscriber_id=delta.subscriber_id
+                        )
+                    except DuplicateListmonkSubscriberIdError as exc:
+                        metrics.duplicate_subscriber_mappings += 1
+                        logger.error(
+                            "consent_sync_duplicate_subscriber_mapping",
+                            subscriber_id=delta.subscriber_id,
+                            list_id=list_id,
+                            user_ids=exc.user_ids,
+                        )
+                        continue
                     if mapped is None:
                         metrics.unmapped_subscribers += 1
                         logger.info(
@@ -331,6 +344,7 @@ class ConsentSyncWorker:
             consent_bonus_amount=self.settings.consent_bonus_amount,
             deltas_fetched=metrics.deltas_fetched,
             unmapped_subscribers=metrics.unmapped_subscribers,
+            duplicate_subscriber_mappings=metrics.duplicate_subscriber_mappings,
             subscriber_not_found=metrics.subscriber_not_found,
             blocked_done=metrics.blocked_done,
             not_confirmed=metrics.not_confirmed,
@@ -392,6 +406,7 @@ class ConsentSyncMetrics:
     batch_size: int
     deltas_fetched: int = 0
     unmapped_subscribers: int = 0
+    duplicate_subscriber_mappings: int = 0
     subscriber_not_found: int = 0
     blocked_done: int = 0
     not_confirmed: int = 0

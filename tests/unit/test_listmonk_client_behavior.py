@@ -218,6 +218,8 @@ async def test_ensure_login_and_get_subscriber_state() -> None:
     fake.subscriber_by_id = MagicMock(
         return_value=SimpleNamespace(
             status="enabled",
+            email="x@y.z",
+            attribs={"user_id": "11"},
             lists=[{"id": 1, "subscription_status": "confirmed"}],
         )
     )
@@ -230,11 +232,15 @@ async def test_ensure_login_and_get_subscriber_state() -> None:
         await client._ensure_login()
         await client._ensure_login()
         state = await client.get_subscriber_state(subscriber_id=11)
+        profile = await client.get_subscriber_profile(subscriber_id=11)
 
     fake.login.assert_called_once()
     assert state is not None
     assert state.subscriber_id == 11
     assert state.list_statuses == {1: "confirmed"}
+    assert profile is not None
+    assert profile.email == "x@y.z"
+    assert profile.attributes == {"user_id": "11"}
 
 
 @pytest.mark.asyncio
