@@ -78,7 +78,9 @@ class ConsumersRunner:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("Invalid message body JSON") from exc
 
-    async def _consume_create(self, payload: dict[str, Any]) -> None:
+    async def _consume_create(
+        self, payload: dict[str, Any], *, wait_for_lock: bool = False
+    ) -> None:
         async with SessionLocal() as session:
             deps = CreateConsumerDeps(
                 settings=self.settings,
@@ -89,15 +91,18 @@ class ConsumersRunner:
                 old_db_repo=self.old_db_repo,
                 listmonk_client=self.listmonk_client,
                 teyca_client=self.teyca_client,
+                commit_checkpoint=session.commit,
             )
             try:
-                await handle_create(payload, deps=deps)
+                await handle_create(payload, deps=deps, wait_for_lock=wait_for_lock)
                 await session.commit()
             except Exception:
                 await session.rollback()
                 raise
 
-    async def _consume_update(self, payload: dict[str, Any]) -> None:
+    async def _consume_update(
+        self, payload: dict[str, Any], *, wait_for_lock: bool = False
+    ) -> None:
         async with SessionLocal() as session:
             deps = UpdateConsumerDeps(
                 settings=self.settings,
@@ -108,15 +113,18 @@ class ConsumersRunner:
                 old_db_repo=self.old_db_repo,
                 listmonk_client=self.listmonk_client,
                 teyca_client=self.teyca_client,
+                commit_checkpoint=session.commit,
             )
             try:
-                await handle_update(payload, deps=deps)
+                await handle_update(payload, deps=deps, wait_for_lock=wait_for_lock)
                 await session.commit()
             except Exception:
                 await session.rollback()
                 raise
 
-    async def _consume_delete(self, payload: dict[str, Any]) -> None:
+    async def _consume_delete(
+        self, payload: dict[str, Any], *, wait_for_lock: bool = False
+    ) -> None:
         async with SessionLocal() as session:
             deps = DeleteConsumerDeps(
                 users_repo=UsersRepository(session),
@@ -127,13 +135,17 @@ class ConsumersRunner:
                 session=session,
             )
             try:
-                await handle_delete(payload, deps=deps)
+                await handle_delete(payload, deps=deps, wait_for_lock=wait_for_lock)
             except Exception:
                 await session.rollback()
                 raise
 
     async def _process(self, message: AbstractIncomingMessage, queue_name: str) -> None:
         payload = await self._parse_payload(message)
+        wait_for_lock = (
+            _coerce_retry_count((getattr(message, "headers", {}) or {}).get(LOCK_BUSY_RETRY_HEADER))
+            > 0
+        )
         with log_contextvars.bound_contextvars(
             trace_id=_resolve_trace_id(payload=payload, message=message),
             source_event_id=_resolve_source_event_id(payload=payload, message=message),
@@ -146,13 +158,13 @@ class ConsumersRunner:
                 redelivered=getattr(message, "redelivered", None),
             )
             if queue_name == QUEUE_CREATE:
-                await self._consume_create(payload)
+                await self._consume_create(payload, wait_for_lock=wait_for_lock)
                 return
             if queue_name == QUEUE_UPDATE:
-                await self._consume_update(payload)
+                await self._consume_update(payload, wait_for_lock=wait_for_lock)
                 return
             if queue_name == QUEUE_DELETE:
-                await self._consume_delete(payload)
+                await self._consume_delete(payload, wait_for_lock=wait_for_lock)
                 return
             raise ValueError(f"Unsupported queue: {queue_name}")
 

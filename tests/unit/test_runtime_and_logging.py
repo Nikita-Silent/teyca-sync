@@ -316,6 +316,39 @@ async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -
 
 
 @pytest.mark.asyncio
+async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> None:
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+        old_db_repo=AsyncMock(),
+    )
+    message = AsyncMock()
+    message.body = b'{"type":"UPDATE","pass":{"user_id":42}}'
+    message.headers = {run_queue_consumers.LOCK_BUSY_RETRY_HEADER: 1}
+
+    with (
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_create", new=AsyncMock()
+        ) as consume_create,
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_update", new=AsyncMock()
+        ) as consume_update,
+        patch.object(
+            run_queue_consumers.ConsumersRunner, "_consume_delete", new=AsyncMock()
+        ) as consume_delete,
+    ):
+        await runner._process(message, run_queue_consumers.QUEUE_UPDATE)
+
+    consume_create.assert_not_awaited()
+    consume_delete.assert_not_awaited()
+    consume_update.assert_awaited_once_with(
+        {"type": "UPDATE", "pass": {"user_id": 42}},
+        wait_for_lock=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=SimpleNamespace(rabbitmq_url="amqp://x"),

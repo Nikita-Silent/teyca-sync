@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,9 +49,12 @@ class CreateConsumerDeps:
     old_db_repo: OldDBRepository
     listmonk_client: ListmonkSDKClient
     teyca_client: TeycaClient
+    commit_checkpoint: Callable[[], Awaitable[None]] | None = None
 
 
-async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
+async def handle(
+    payload: dict[str, Any], *, deps: CreateConsumerDeps, wait_for_lock: bool = False
+) -> None:
     """Handle CREATE payload."""
     trace_id = to_optional_str(payload.get("trace_id"))
     source_event_id = to_optional_str(payload.get("source_event_id"))
@@ -62,7 +66,7 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
         trace_id=trace_id,
         source_event_id=source_event_id,
     )
-    await deps.users_repo.lock_user(user_id=user_id, wait=False)
+    await deps.users_repo.lock_user(user_id=user_id, wait=wait_for_lock)
 
     merged_already = await deps.merge_repo.exists(user_id=user_id)
     if merged_already:
@@ -83,6 +87,7 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
     target_list_ids = parse_list_ids(deps.settings.listmonk_list_ids)
     existing = await deps.listmonk_repo.get_by_user_id(user_id=user_id)
     if not is_valid_email(event.pass_data.email):
+        await _commit_checkpoint(deps)
         await deps.teyca_client.update_pass_fields(
             user_id=user_id,
             fields={"key1": TEYCA_KEY1_BLOCKED},
@@ -129,6 +134,8 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
             existing_user_ids=conflicting_user_ids,
         )
         return
+
+    await _commit_checkpoint(deps)
 
     logger.info(
         "create_consumer_listmonk_upsert_start",
@@ -193,6 +200,8 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
 
     merge_needs_write = merge_result.merged and (old_data is not None) and old_data.has_merge_data()
     if merge_needs_write and not merged_already:
+        await _commit_checkpoint(deps)
+    if merge_needs_write and not merged_already:
         old_bonus_value = old_data.bonus if old_data is not None else None
         if old_bonus_value is not None and old_bonus_value > 0:
             bonus = BonusOperation.one_shot(value=str(old_bonus_value))
@@ -236,3 +245,8 @@ async def handle(payload: dict[str, Any], *, deps: CreateConsumerDeps) -> None:
             BONUS_REASON_MERGE_OLD_DB if merge_needs_write and not merged_already else "none"
         ),
     )
+
+
+async def _commit_checkpoint(deps: CreateConsumerDeps) -> None:
+    if deps.commit_checkpoint is not None:
+        await deps.commit_checkpoint()

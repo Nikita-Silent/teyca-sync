@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,9 +47,12 @@ class UpdateConsumerDeps:
     old_db_repo: OldDBRepository
     listmonk_client: ListmonkSDKClient
     teyca_client: TeycaClient
+    commit_checkpoint: Callable[[], Awaitable[None]] | None = None
 
 
-async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
+async def handle(
+    payload: dict[str, Any], *, deps: UpdateConsumerDeps, wait_for_lock: bool = False
+) -> None:
     """Handle UPDATE payload."""
     trace_id = to_optional_str(payload.get("trace_id"))
     source_event_id = to_optional_str(payload.get("source_event_id"))
@@ -60,7 +64,7 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
         trace_id=trace_id,
         source_event_id=source_event_id,
     )
-    await deps.users_repo.lock_user(user_id=user_id, wait=False)
+    await deps.users_repo.lock_user(user_id=user_id, wait=wait_for_lock)
 
     merged_already = await deps.merge_repo.exists(user_id=user_id)
     if merged_already:
@@ -73,35 +77,17 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
     profile = build_profile_from_pass(event.pass_data)
     merge_applied = False
     old_data = None
+    old_bonus_value: float | None = None
+    merge_needs_write = False
     if not merged_already:
         old_data = await deps.old_db_repo.get_user_data(phone=event.pass_data.phone)
         merge_result = merge_profile_with_old_data(profile, old_data)
         profile = merge_result.profile
         if merge_result.merged and old_data is not None and old_data.has_merge_data():
             old_bonus_value = old_data.bonus
-            if old_bonus_value is not None and old_bonus_value > 0:
-                bonus = BonusOperation.one_shot(value=str(old_bonus_value))
-                await deps.teyca_client.accrue_bonuses(user_id=user_id, bonuses=[bonus])
-            await deps.teyca_client.update_pass_fields(
-                user_id=user_id,
-                fields={"key2": build_merge_key2_value()},
-            )
-            await deps.merge_repo.create(
-                user_id=user_id,
-                source_event_type=event.type,
-                source_event_id=source_event_id,
-                trace_id=trace_id,
-            )
-            merge_applied = True
-            logger.info(
-                "update_merge_applied",
-                user_id=user_id,
-                trace_id=trace_id,
-                source_event_id=source_event_id,
-                old_bonus_value=old_bonus_value,
-            )
+            merge_needs_write = True
 
-    if not merge_applied:
+    if not merge_needs_write:
         logger.info(
             "update_merge_not_applied",
             user_id=user_id,
@@ -116,6 +102,7 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
     target_list_ids = parse_list_ids(deps.settings.listmonk_list_ids)
     existing = await deps.listmonk_repo.get_by_user_id(user_id=user_id)
     if not is_valid_email(event.pass_data.email):
+        await _commit_checkpoint(deps)
         await deps.teyca_client.update_pass_fields(
             user_id=user_id,
             fields={"key1": TEYCA_KEY1_BLOCKED},
@@ -162,6 +149,8 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
             existing_user_ids=conflicting_user_ids,
         )
         return
+
+    await _commit_checkpoint(deps)
 
     logger.info(
         "update_consumer_listmonk_upsert_start",
@@ -223,6 +212,29 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
             existing_user_ids=exc.existing_user_ids,
         )
         return
+    if merge_needs_write:
+        await _commit_checkpoint(deps)
+        if old_bonus_value is not None and old_bonus_value > 0:
+            bonus = BonusOperation.one_shot(value=str(old_bonus_value))
+            await deps.teyca_client.accrue_bonuses(user_id=user_id, bonuses=[bonus])
+        await deps.teyca_client.update_pass_fields(
+            user_id=user_id,
+            fields={"key2": build_merge_key2_value()},
+        )
+        await deps.merge_repo.create(
+            user_id=user_id,
+            source_event_type=event.type,
+            source_event_id=source_event_id,
+            trace_id=trace_id,
+        )
+        merge_applied = True
+        logger.info(
+            "update_merge_applied",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            old_bonus_value=old_bonus_value,
+        )
     await deps.listmonk_repo.set_consent_pending(user_id=user_id)
 
     logger.info(
@@ -233,3 +245,8 @@ async def handle(payload: dict[str, Any], *, deps: UpdateConsumerDeps) -> None:
         merge_applied_this_event=merge_applied,
         merge_log_exists_before=merged_already,
     )
+
+
+async def _commit_checkpoint(deps: UpdateConsumerDeps) -> None:
+    if deps.commit_checkpoint is not None:
+        await deps.commit_checkpoint()

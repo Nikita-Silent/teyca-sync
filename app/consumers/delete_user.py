@@ -30,11 +30,13 @@ class DeleteConsumerDeps:
     session: AsyncSession
 
 
-async def handle(payload: dict[str, Any], *, deps: DeleteConsumerDeps) -> None:
+async def handle(
+    payload: dict[str, Any], *, deps: DeleteConsumerDeps, wait_for_lock: bool = False
+) -> None:
     """Handle DELETE payload."""
     event = WebhookPayload.model_validate(payload)
     user_id = event.pass_data.user_id
-    await deps.users_repo.lock_user(user_id=user_id, wait=False)
+    await deps.users_repo.lock_user(user_id=user_id, wait=wait_for_lock)
 
     existing = await deps.listmonk_repo.get_by_user_id(user_id=user_id)
     subscriber_id = existing.subscriber_id if existing is not None else None
