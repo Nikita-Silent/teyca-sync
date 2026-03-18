@@ -41,7 +41,12 @@ async def test_process_pending_user_subscriber_not_found() -> None:
         accrual_repo=accrual_repo,
     )
 
-    listmonk_repo.mark_checked.assert_awaited_once_with(user_id=1, pending=True, confirmed=False)
+    listmonk_repo.mark_checked.assert_awaited_once_with(
+        user_id=1,
+        pending=True,
+        confirmed=False,
+        status=None,
+    )
     accrual_repo.reserve.assert_not_awaited()
     worker.teyca_client.accrue_bonuses.assert_not_awaited()
 
@@ -417,14 +422,19 @@ async def test_run_once_uses_incremental_deltas_and_updates_watermark() -> None:
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
     )
-    worker.listmonk_client.get_updated_subscribers.return_value = [
-        SubscriberDelta(
-            subscriber_id=1001,
-            status="confirmed",
-            list_ids=[1],
-            updated_at=datetime(2026, 3, 6, 6, 0, tzinfo=UTC),
-        )
-    ]
+
+    async def get_updated_subscribers(**_: object) -> list[SubscriberDelta]:
+        assert session.commit.await_count == 1
+        return [
+            SubscriberDelta(
+                subscriber_id=1001,
+                status="confirmed",
+                list_ids=[1],
+                updated_at=datetime(2026, 3, 6, 6, 0, tzinfo=UTC),
+            )
+        ]
+
+    worker.listmonk_client.get_updated_subscribers.side_effect = get_updated_subscribers
 
     with (
         patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
@@ -460,7 +470,7 @@ async def test_run_once_uses_incremental_deltas_and_updates_watermark() -> None:
         updated_at=datetime(2026, 3, 6, 6, 0, tzinfo=UTC),
         subscriber_id=1001,
     )
-    assert session.commit.await_count == 2
+    assert session.commit.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -482,14 +492,19 @@ async def test_run_once_skips_unmapped_subscribers_but_moves_watermark() -> None
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
     )
-    worker.listmonk_client.get_updated_subscribers.return_value = [
-        SubscriberDelta(
-            subscriber_id=2002,
-            status="blocked",
-            list_ids=[1],
-            updated_at=datetime(2026, 3, 6, 6, 10, tzinfo=UTC),
-        )
-    ]
+
+    async def get_updated_subscribers(**_: object) -> list[SubscriberDelta]:
+        assert session.commit.await_count == 1
+        return [
+            SubscriberDelta(
+                subscriber_id=2002,
+                status="blocked",
+                list_ids=[1],
+                updated_at=datetime(2026, 3, 6, 6, 10, tzinfo=UTC),
+            )
+        ]
+
+    worker.listmonk_client.get_updated_subscribers.side_effect = get_updated_subscribers
 
     with (
         patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
@@ -515,7 +530,7 @@ async def test_run_once_skips_unmapped_subscribers_but_moves_watermark() -> None
 
     assert processed == 0
     process_mock.assert_not_awaited()
-    assert session.commit.await_count == 2
+    assert session.commit.await_count == 3
     sync_repo.update_watermark.assert_awaited_once_with(
         source="listmonk_consent",
         list_id=1,
@@ -615,14 +630,19 @@ async def test_run_once_skips_duplicate_subscriber_mapping_and_moves_watermark()
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
     )
-    worker.listmonk_client.get_updated_subscribers.return_value = [
-        SubscriberDelta(
-            subscriber_id=3003,
-            status="confirmed",
-            list_ids=[1],
-            updated_at=datetime(2026, 3, 6, 6, 20, tzinfo=UTC),
-        )
-    ]
+
+    async def get_updated_subscribers(**_: object) -> list[SubscriberDelta]:
+        assert session.commit.await_count == 1
+        return [
+            SubscriberDelta(
+                subscriber_id=3003,
+                status="confirmed",
+                list_ids=[1],
+                updated_at=datetime(2026, 3, 6, 6, 20, tzinfo=UTC),
+            )
+        ]
+
+    worker.listmonk_client.get_updated_subscribers.side_effect = get_updated_subscribers
 
     with (
         patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
@@ -658,3 +678,55 @@ async def test_run_once_skips_duplicate_subscriber_mapping_and_moves_watermark()
         updated_at=datetime(2026, 3, 6, 6, 20, tzinfo=UTC),
         subscriber_id=3003,
     )
+
+
+@pytest.mark.asyncio
+async def test_process_pending_user_confirmed_commits_progress_before_external_steps() -> None:
+    session = AsyncMock()
+    context_manager = AsyncMock()
+    context_manager.__aenter__.return_value = session
+    context_manager.__aexit__.return_value = False
+    session_factory = MagicMock(return_value=context_manager)
+    worker = ConsentSyncWorker(
+        settings=SimpleNamespace(
+            consent_bonus_amount="100.0",
+            consent_bonus_ttl_days=30,
+        ),
+        session_factory=session_factory,
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+    )
+    worker.listmonk_client.get_subscriber_state.return_value = SubscriberState(
+        subscriber_id=404,
+        status="confirmed",
+        list_ids=[1],
+    )
+
+    with (
+        patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
+        patch("app.workers.consent_sync_worker.BonusAccrualRepository") as accrual_cls,
+    ):
+        listmonk_repo = AsyncMock()
+        listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=404)
+        repo_cls.return_value = listmonk_repo
+
+        accrual_repo = AsyncMock()
+        accrual_repo.reserve.return_value = True
+        accrual_repo.get_by_key.return_value = SimpleNamespace(payload=None)
+        accrual_cls.return_value = accrual_repo
+
+        async def accrue_side_effect(**_: object) -> None:
+            assert session.commit.await_count == 2
+
+        async def update_side_effect(**_: object) -> None:
+            assert session.commit.await_count == 3
+
+        worker.teyca_client.accrue_bonuses.side_effect = accrue_side_effect
+        worker.teyca_client.update_pass_fields.side_effect = update_side_effect
+
+        await worker._process_pending_user(
+            pending=SimpleNamespace(user_id=4, subscriber_id=404),
+            target_list_ids=[1],
+        )
+
+    assert session.commit.await_count == 6

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from types import SimpleNamespace
 from typing import Any
 
 import structlog
@@ -52,13 +52,213 @@ class ConsentSyncWorker:
     listmonk_client: ListmonkSDKClient
     teyca_client: TeycaClient
 
+    async def _run_in_session(
+        self,
+        operation: Callable[[AsyncSession], Awaitable[Any]],
+    ) -> Any:
+        """Run one short database phase in its own transaction."""
+        async with self.session_factory() as session:
+            try:
+                result = await operation(session)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+        return result
+
+    async def _load_watermark(self, *, list_id: int) -> tuple[datetime | None, int | None]:
+        """Load or create the current sync watermark for a list."""
+
+        async def operation(session: AsyncSession) -> tuple[datetime | None, int | None]:
+            sync_repo = SyncStateRepository(session)
+            state = await sync_repo.get_or_create(source="listmonk_consent", list_id=list_id)
+            return state.watermark_updated_at, state.watermark_subscriber_id
+
+        return await self._run_in_session(operation)
+
+    async def _update_watermark(
+        self,
+        *,
+        list_id: int,
+        updated_at: datetime | None,
+        subscriber_id: int | None,
+    ) -> None:
+        """Persist the latest successfully reviewed watermark for a list."""
+
+        async def operation(session: AsyncSession) -> None:
+            sync_repo = SyncStateRepository(session)
+            await sync_repo.get_or_create(source="listmonk_consent", list_id=list_id)
+            await sync_repo.update_watermark(
+                source="listmonk_consent",
+                list_id=list_id,
+                updated_at=updated_at,
+                subscriber_id=subscriber_id,
+            )
+
+        await self._run_in_session(operation)
+
+    async def _get_mapped_pending_user(self, *, subscriber_id: int) -> Any | None:
+        """Load the local user mapped to a Listmonk subscriber in a short transaction."""
+
+        async def operation(session: AsyncSession) -> Any | None:
+            listmonk_repo = ListmonkUsersRepository(session)
+            mapped = await listmonk_repo.get_by_subscriber_id(subscriber_id=subscriber_id)
+            if mapped is None:
+                return None
+            return PendingConsentUser(
+                user_id=int(mapped.user_id), subscriber_id=int(mapped.subscriber_id)
+            )
+
+        return await self._run_in_session(operation)
+
+    async def _mark_checked(
+        self,
+        *,
+        user_id: int,
+        subscriber_id: int,
+        pending: bool,
+        confirmed: bool,
+        status: str | None = None,
+        listmonk_repo: ListmonkUsersRepository | None = None,
+    ) -> None:
+        """Persist consent check result after verifying the current mapping."""
+        if listmonk_repo is not None:
+            await listmonk_repo.mark_checked(
+                user_id=user_id,
+                pending=pending,
+                confirmed=confirmed,
+                status=status,
+            )
+            return
+
+        async def operation(session: AsyncSession) -> None:
+            repo = ListmonkUsersRepository(session)
+            current = await repo.get_by_user_id(user_id=user_id)
+            if current is None or int(current.subscriber_id) != subscriber_id:
+                logger.warning(
+                    "consent_sync_mapping_changed_skip_mark_checked",
+                    user_id=user_id,
+                    subscriber_id=subscriber_id,
+                    current_subscriber_id=None if current is None else int(current.subscriber_id),
+                )
+                return
+            await repo.mark_checked(
+                user_id=user_id,
+                pending=pending,
+                confirmed=confirmed,
+                status=status,
+            )
+
+        await self._run_in_session(operation)
+
+    async def _reserve_operation(
+        self,
+        *,
+        user_id: int,
+        reason: str,
+        idempotency_key: str,
+        payload: dict[str, Any] | None,
+        accrual_repo: BonusAccrualRepository | None = None,
+    ) -> bool:
+        """Reserve an idempotent bonus operation."""
+        if accrual_repo is not None:
+            return await accrual_repo.reserve(
+                user_id=user_id,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+
+        async def operation(session: AsyncSession) -> bool:
+            repo = BonusAccrualRepository(session)
+            return await repo.reserve(
+                user_id=user_id,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+
+        return bool(await self._run_in_session(operation))
+
+    async def _get_operation_payload(
+        self,
+        *,
+        idempotency_key: str,
+        accrual_repo: BonusAccrualRepository | None = None,
+    ) -> dict[str, Any] | None:
+        """Load saved step-progress payload for an idempotent operation."""
+        if accrual_repo is not None:
+            operation = await accrual_repo.get_by_key(idempotency_key=idempotency_key)
+            return None if operation is None else dict(operation.payload or {})
+
+        async def operation(session: AsyncSession) -> dict[str, Any] | None:
+            repo = BonusAccrualRepository(session)
+            current = await repo.get_by_key(idempotency_key=idempotency_key)
+            return None if current is None else dict(current.payload or {})
+
+        return await self._run_in_session(operation)
+
+    async def _save_progress(
+        self,
+        *,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        status: str,
+        error_text: str | None,
+        accrual_repo: BonusAccrualRepository | None = None,
+    ) -> None:
+        """Persist intermediate consent bonus progress in a short transaction."""
+        if accrual_repo is not None:
+            await accrual_repo.save_progress(
+                idempotency_key=idempotency_key,
+                payload=payload,
+                status=status,
+                error_text=error_text,
+            )
+            return
+
+        async def operation(session: AsyncSession) -> None:
+            repo = BonusAccrualRepository(session)
+            await repo.save_progress(
+                idempotency_key=idempotency_key,
+                payload=payload,
+                status=status,
+                error_text=error_text,
+            )
+
+        await self._run_in_session(operation)
+
+    async def _mark_done(
+        self,
+        *,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        accrual_repo: BonusAccrualRepository | None = None,
+    ) -> None:
+        """Persist final completed step-progress state."""
+        if accrual_repo is not None:
+            await accrual_repo.mark_done_with_payload(
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            return
+
+        async def operation(session: AsyncSession) -> None:
+            repo = BonusAccrualRepository(session)
+            await repo.mark_done_with_payload(
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+
+        await self._run_in_session(operation)
+
     async def _process_pending_user(
         self,
         *,
         pending: Any,
         target_list_ids: list[int],
-        listmonk_repo: ListmonkUsersRepository,
-        accrual_repo: BonusAccrualRepository,
+        listmonk_repo: ListmonkUsersRepository | None = None,
+        accrual_repo: BonusAccrualRepository | None = None,
         subscriber_override: SubscriberState | None = None,
         metrics: ConsentSyncMetrics | None = None,
     ) -> None:
@@ -79,10 +279,12 @@ class ConsentSyncWorker:
             )
             if subscriber is None:
                 _inc(metrics, "subscriber_not_found")
-                await listmonk_repo.mark_checked(
+                await self._mark_checked(
                     user_id=user_id,
+                    subscriber_id=subscriber_id,
                     pending=True,
                     confirmed=False,
+                    listmonk_repo=listmonk_repo,
                 )
                 logger.info(
                     "consent_sync_subscriber_not_found",
@@ -100,11 +302,13 @@ class ConsentSyncWorker:
                         fields={"key1": TEYCA_KEY1_BLOCKED},
                     )
                     _inc(metrics, "blocked_done")
-                    await listmonk_repo.mark_checked(
+                    await self._mark_checked(
                         user_id=user_id,
+                        subscriber_id=subscriber_id,
                         pending=False,
                         confirmed=False,
                         status=TEYCA_KEY1_BLOCKED,
+                        listmonk_repo=listmonk_repo,
                     )
                     logger.info(
                         "consent_sync_blocked",
@@ -113,11 +317,13 @@ class ConsentSyncWorker:
                         status=subscriber.status,
                     )
                 except TeycaAPIError as exc:
-                    await listmonk_repo.mark_checked(
+                    await self._mark_checked(
                         user_id=user_id,
+                        subscriber_id=subscriber_id,
                         pending=True,
                         confirmed=False,
                         status=TEYCA_KEY1_BLOCKED,
+                        listmonk_repo=listmonk_repo,
                     )
                     _inc(metrics, "teyca_errors")
                     logger.error(
@@ -131,11 +337,13 @@ class ConsentSyncWorker:
             confirmed = subscriber.is_confirmed_for_all(target_list_ids=target_list_ids)
             if not confirmed:
                 _inc(metrics, "not_confirmed")
-                await listmonk_repo.mark_checked(
+                await self._mark_checked(
                     user_id=user_id,
+                    subscriber_id=subscriber_id,
                     pending=True,
                     confirmed=False,
                     status="unconfirmed",
+                    listmonk_repo=listmonk_repo,
                 )
                 logger.info(
                     "consent_sync_not_confirmed",
@@ -145,7 +353,7 @@ class ConsentSyncWorker:
                 )
                 return
 
-            reserved = await accrual_repo.reserve(
+            reserved = await self._reserve_operation(
                 user_id=user_id,
                 reason=BONUS_REASON_EMAIL_CONSENT,
                 idempotency_key=idempotency_key,
@@ -153,11 +361,15 @@ class ConsentSyncWorker:
                     subscriber_id=subscriber_id,
                     list_ids=subscriber.list_ids,
                 ),
+                accrual_repo=accrual_repo,
             )
             if not reserved:
                 _inc(metrics, "accrual_resumed")
-            operation = await accrual_repo.get_by_key(idempotency_key=idempotency_key)
-            if operation is None:
+            saved_payload = await self._get_operation_payload(
+                idempotency_key=idempotency_key,
+                accrual_repo=accrual_repo,
+            )
+            if saved_payload is None:
                 logger.error(
                     "consent_sync_operation_missing",
                     user_id=user_id,
@@ -165,11 +377,13 @@ class ConsentSyncWorker:
                     idempotency_key=idempotency_key,
                 )
                 _inc(metrics, "operation_missing")
-                await listmonk_repo.mark_checked(
+                await self._mark_checked(
                     user_id=user_id,
+                    subscriber_id=subscriber_id,
                     pending=True,
                     confirmed=False,
                     status=subscriber.status,
+                    listmonk_repo=listmonk_repo,
                 )
                 return
 
@@ -177,7 +391,7 @@ class ConsentSyncWorker:
                 value=self.settings.consent_bonus_amount,
             )
             payload = _normalize_progress_payload(
-                raw_payload=operation.payload,
+                raw_payload=saved_payload,
                 subscriber_id=subscriber_id,
                 list_ids=subscriber.list_ids,
             )
@@ -189,11 +403,12 @@ class ConsentSyncWorker:
                         bonuses=[bonus_operation],
                     )
                     payload["bonus_done"] = True
-                    await accrual_repo.save_progress(
+                    await self._save_progress(
                         idempotency_key=idempotency_key,
                         payload=payload,
                         status="pending",
                         error_text=None,
+                        accrual_repo=accrual_repo,
                     )
 
                 if not payload["key1_done"]:
@@ -202,22 +417,26 @@ class ConsentSyncWorker:
                         fields={"key1": TEYCA_KEY1_CONFIRMED},
                     )
                     payload["key1_done"] = True
-                    await accrual_repo.save_progress(
+                    await self._save_progress(
                         idempotency_key=idempotency_key,
                         payload=payload,
                         status="pending",
                         error_text=None,
+                        accrual_repo=accrual_repo,
                     )
 
-                await accrual_repo.mark_done_with_payload(
+                await self._mark_done(
                     idempotency_key=idempotency_key,
                     payload=payload,
+                    accrual_repo=accrual_repo,
                 )
-                await listmonk_repo.mark_checked(
+                await self._mark_checked(
                     user_id=user_id,
+                    subscriber_id=subscriber_id,
                     pending=False,
                     confirmed=True,
                     status=TEYCA_KEY1_CONFIRMED,
+                    listmonk_repo=listmonk_repo,
                 )
                 _inc(metrics, "confirmed_done")
                 logger.info(
@@ -229,17 +448,20 @@ class ConsentSyncWorker:
                     key1_done=payload["key1_done"],
                 )
             except TeycaAPIError as exc:
-                await accrual_repo.save_progress(
+                await self._save_progress(
                     idempotency_key=idempotency_key,
                     payload=payload,
                     status="failed",
                     error_text=str(exc),
+                    accrual_repo=accrual_repo,
                 )
-                await listmonk_repo.mark_checked(
+                await self._mark_checked(
                     user_id=user_id,
+                    subscriber_id=subscriber_id,
                     pending=True,
                     confirmed=False,
                     status=subscriber.status,
+                    listmonk_repo=listmonk_repo,
                 )
                 _inc(metrics, "teyca_errors")
                 logger.error(
@@ -264,89 +486,75 @@ class ConsentSyncWorker:
             return 0
 
         processed = 0
-        async with self.session_factory() as session:
-            listmonk_repo = ListmonkUsersRepository(session)
-            accrual_repo = BonusAccrualRepository(session)
-            sync_repo = SyncStateRepository(session)
-            try:
-                for list_id in target_list_ids:
-                    state = await sync_repo.get_or_create(
-                        source="listmonk_consent", list_id=list_id
-                    )
-                    deltas = await self.listmonk_client.get_updated_subscribers(
+        for list_id in target_list_ids:
+            watermark_updated_at, watermark_subscriber_id = await self._load_watermark(
+                list_id=list_id
+            )
+            deltas = await self.listmonk_client.get_updated_subscribers(
+                list_id=list_id,
+                watermark_updated_at=watermark_updated_at,
+                watermark_subscriber_id=watermark_subscriber_id,
+                limit=batch_size,
+            )
+            metrics.deltas_fetched += len(deltas)
+            if not deltas:
+                continue
+
+            last_updated_at: datetime | None = None
+            last_subscriber_id: int | None = None
+            for delta in deltas:
+                last_updated_at = delta.updated_at
+                last_subscriber_id = delta.subscriber_id
+                try:
+                    mapped = await self._get_mapped_pending_user(subscriber_id=delta.subscriber_id)
+                except DuplicateListmonkSubscriberIdError as exc:
+                    metrics.duplicate_subscriber_mappings += 1
+                    logger.error(
+                        "consent_sync_duplicate_subscriber_mapping",
+                        subscriber_id=delta.subscriber_id,
                         list_id=list_id,
-                        watermark_updated_at=state.watermark_updated_at,
-                        watermark_subscriber_id=state.watermark_subscriber_id,
-                        limit=batch_size,
+                        user_ids=exc.user_ids,
                     )
-                    metrics.deltas_fetched += len(deltas)
-                    if not deltas:
-                        await session.commit()
-                        continue
-
-                    last_updated_at: datetime | None = None
-                    last_subscriber_id: int | None = None
-                    for delta in deltas:
-                        last_updated_at = delta.updated_at
-                        last_subscriber_id = delta.subscriber_id
-                        try:
-                            mapped = await listmonk_repo.get_by_subscriber_id(
-                                subscriber_id=delta.subscriber_id
-                            )
-                        except DuplicateListmonkSubscriberIdError as exc:
-                            metrics.duplicate_subscriber_mappings += 1
-                            logger.error(
-                                "consent_sync_duplicate_subscriber_mapping",
-                                subscriber_id=delta.subscriber_id,
-                                list_id=list_id,
-                                user_ids=exc.user_ids,
-                            )
-                            await session.commit()
-                            continue
-                        if mapped is None:
-                            metrics.unmapped_subscribers += 1
-                            logger.info(
-                                "consent_sync_subscriber_not_mapped",
-                                subscriber_id=delta.subscriber_id,
-                                list_id=list_id,
-                            )
-                            await session.commit()
-                            continue
-
-                        processed += 1
-                        pending = SimpleNamespace(
-                            user_id=int(mapped.user_id),
-                            subscriber_id=delta.subscriber_id,
-                        )
-                        await self._process_pending_user(
-                            pending=pending,
-                            target_list_ids=target_list_ids,
-                            listmonk_repo=listmonk_repo,
-                            accrual_repo=accrual_repo,
-                            subscriber_override=_delta_to_state(delta),
-                            metrics=metrics,
-                        )
-                        await session.commit()
-
-                    await sync_repo.update_watermark(
-                        source="listmonk_consent",
+                    await self._update_watermark(
                         list_id=list_id,
                         updated_at=last_updated_at,
                         subscriber_id=last_subscriber_id,
                     )
+                    continue
+                if mapped is None:
+                    metrics.unmapped_subscribers += 1
                     logger.info(
-                        "consent_sync_list_processed",
+                        "consent_sync_subscriber_not_mapped",
+                        subscriber_id=delta.subscriber_id,
                         list_id=list_id,
-                        deltas=len(deltas),
-                        watermark_updated_at=last_updated_at.isoformat()
-                        if last_updated_at
-                        else None,
-                        watermark_subscriber_id=last_subscriber_id,
                     )
-                    await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
+                    await self._update_watermark(
+                        list_id=list_id,
+                        updated_at=last_updated_at,
+                        subscriber_id=last_subscriber_id,
+                    )
+                    continue
+
+                processed += 1
+                await self._process_pending_user(
+                    pending=mapped,
+                    target_list_ids=target_list_ids,
+                    subscriber_override=_delta_to_state(delta),
+                    metrics=metrics,
+                )
+                await self._update_watermark(
+                    list_id=list_id,
+                    updated_at=last_updated_at,
+                    subscriber_id=last_subscriber_id,
+                )
+
+            logger.info(
+                "consent_sync_list_processed",
+                list_id=list_id,
+                deltas=len(deltas),
+                watermark_updated_at=last_updated_at.isoformat() if last_updated_at else None,
+                watermark_subscriber_id=last_subscriber_id,
+            )
         logger.info(
             "consent_sync_metrics",
             processed=processed,
@@ -424,6 +632,14 @@ class ConsentSyncMetrics:
     accrual_resumed: int = 0
     operation_missing: int = 0
     teyca_errors: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class PendingConsentUser:
+    """Minimal mapped user state needed to process one consent delta."""
+
+    user_id: int
+    subscriber_id: int
 
 
 def _inc(metrics: ConsentSyncMetrics | None, field_name: str) -> None:
