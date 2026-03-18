@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -165,6 +165,37 @@ async def test_update_commits_before_external_calls() -> None:
 
     assert deps.commit_checkpoint.await_count == 2
     assert events[:4] == ["commit", "listmonk", "commit", "teyca_bonus"]
+
+
+@pytest.mark.asyncio
+async def test_update_emits_step_logs_for_major_phases() -> None:
+    deps = _deps()
+    deps.merge_repo.exists.return_value = False
+    deps.old_db_repo.get_user_data.return_value = OldUserData(bonus=40.0, summ=15)
+    deps.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=902)
+    deps.listmonk_repo.get_other_user_ids_by_email.return_value = []
+    deps.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
+        subscriber_id=902,
+        status="enabled",
+        list_ids=[3],
+    )
+
+    with patch("app.consumers.update_user.logger") as logger:
+        await handle(_payload(), deps=deps)
+
+    step_events = [call.args[0] for call in logger.info.call_args_list]
+    assert "update_consumer_lock_start" in step_events
+    assert "update_consumer_lock_done" in step_events
+    assert "update_consumer_old_db_read_start" in step_events
+    assert "update_consumer_old_db_read_done" in step_events
+    assert "update_consumer_users_upsert_start" in step_events
+    assert "update_consumer_users_upsert_done" in step_events
+    assert "update_consumer_email_conflict_check_start" in step_events
+    assert "update_consumer_email_conflict_check_done" in step_events
+    assert "update_consumer_listmonk_upsert_start" in step_events
+    assert "update_consumer_listmonk_upsert_done" in step_events
+    assert "update_consumer_merge_external_start" in step_events
+    assert "update_consumer_merge_external_done" in step_events
 
 
 @pytest.mark.asyncio
