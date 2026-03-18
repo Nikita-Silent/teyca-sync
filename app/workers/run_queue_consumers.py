@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import aio_pika
@@ -187,15 +188,18 @@ class ConsumersRunner:
         retry_queue = RETRY_QUEUE_BY_MAIN_QUEUE[queue_name]
         dead_queue = DEAD_QUEUE_BY_MAIN_QUEUE[queue_name]
         target_queue = retry_queue
-        expiration: int | None = _compute_lock_retry_delay_ms(retry_count)
+        expiration_ms: int | None = _compute_lock_retry_delay_ms(retry_count)
+        expiration: timedelta | None = None
         result = "user_lock_busy"
         log_event = "consumer_message_requeued_user_lock_busy"
 
         if retry_count > LOCK_BUSY_MAX_RETRIES:
             target_queue = dead_queue
-            expiration = None
+            expiration_ms = None
             result = "user_lock_busy_dead_lettered"
             log_event = "consumer_message_dead_lettered_user_lock_busy"
+        elif expiration_ms is not None:
+            expiration = timedelta(milliseconds=expiration_ms)
 
         await channel.default_exchange.publish(
             aio_pika.Message(
@@ -219,7 +223,7 @@ class ConsumersRunner:
             queue_name=queue_name,
             user_id=user_id,
             retry_count=retry_count,
-            retry_delay_ms=expiration,
+            retry_delay_ms=expiration_ms,
             retry_queue_name=target_queue,
             message_id=getattr(message, "message_id", None),
             correlation_id=getattr(message, "correlation_id", None),
