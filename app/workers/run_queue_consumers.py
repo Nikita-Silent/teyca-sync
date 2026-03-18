@@ -175,7 +175,7 @@ class ConsumersRunner:
         retry_queue = RETRY_QUEUE_BY_MAIN_QUEUE[queue_name]
         dead_queue = DEAD_QUEUE_BY_MAIN_QUEUE[queue_name]
         target_queue = retry_queue
-        expiration: str | None = str(_compute_lock_retry_delay_ms(retry_count))
+        expiration: int | None = _compute_lock_retry_delay_ms(retry_count)
         result = "user_lock_busy"
         log_event = "consumer_message_requeued_user_lock_busy"
 
@@ -207,7 +207,7 @@ class ConsumersRunner:
             queue_name=queue_name,
             user_id=user_id,
             retry_count=retry_count,
-            retry_delay_ms=int(expiration) if expiration is not None else None,
+            retry_delay_ms=expiration,
             retry_queue_name=target_queue,
             message_id=getattr(message, "message_id", None),
             correlation_id=getattr(message, "correlation_id", None),

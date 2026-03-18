@@ -264,7 +264,7 @@ async def test_consumers_runner_callback_ack_and_reject() -> None:
     published_message = channel.default_exchange.publish.await_args.args[0]
     assert published_message.headers["x-lock-busy-retry-count"] == 1
     assert published_message.headers["x-original-queue"] == run_queue_consumers.QUEUE_UPDATE
-    assert published_message.expiration == "1000"
+    assert published_message.expiration == 1000
     assert channel.default_exchange.publish.await_args.kwargs["routing_key"] == "queue-update-retry"
 
 
