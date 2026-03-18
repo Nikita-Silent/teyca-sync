@@ -268,75 +268,85 @@ class ConsentSyncWorker:
             listmonk_repo = ListmonkUsersRepository(session)
             accrual_repo = BonusAccrualRepository(session)
             sync_repo = SyncStateRepository(session)
-
-            for list_id in target_list_ids:
-                state = await sync_repo.get_or_create(source="listmonk_consent", list_id=list_id)
-                deltas = await self.listmonk_client.get_updated_subscribers(
-                    list_id=list_id,
-                    watermark_updated_at=state.watermark_updated_at,
-                    watermark_subscriber_id=state.watermark_subscriber_id,
-                    limit=batch_size,
-                )
-                metrics.deltas_fetched += len(deltas)
-                if not deltas:
-                    continue
-
-                last_updated_at: datetime | None = None
-                last_subscriber_id: int | None = None
-                for delta in deltas:
-                    last_updated_at = delta.updated_at
-                    last_subscriber_id = delta.subscriber_id
-                    try:
-                        mapped = await listmonk_repo.get_by_subscriber_id(
-                            subscriber_id=delta.subscriber_id
-                        )
-                    except DuplicateListmonkSubscriberIdError as exc:
-                        metrics.duplicate_subscriber_mappings += 1
-                        logger.error(
-                            "consent_sync_duplicate_subscriber_mapping",
-                            subscriber_id=delta.subscriber_id,
-                            list_id=list_id,
-                            user_ids=exc.user_ids,
-                        )
-                        continue
-                    if mapped is None:
-                        metrics.unmapped_subscribers += 1
-                        logger.info(
-                            "consent_sync_subscriber_not_mapped",
-                            subscriber_id=delta.subscriber_id,
-                            list_id=list_id,
-                        )
+            try:
+                for list_id in target_list_ids:
+                    state = await sync_repo.get_or_create(
+                        source="listmonk_consent", list_id=list_id
+                    )
+                    deltas = await self.listmonk_client.get_updated_subscribers(
+                        list_id=list_id,
+                        watermark_updated_at=state.watermark_updated_at,
+                        watermark_subscriber_id=state.watermark_subscriber_id,
+                        limit=batch_size,
+                    )
+                    metrics.deltas_fetched += len(deltas)
+                    if not deltas:
+                        await session.commit()
                         continue
 
-                    processed += 1
-                    pending = SimpleNamespace(
-                        user_id=int(mapped.user_id),
-                        subscriber_id=delta.subscriber_id,
-                    )
-                    await self._process_pending_user(
-                        pending=pending,
-                        target_list_ids=target_list_ids,
-                        listmonk_repo=listmonk_repo,
-                        accrual_repo=accrual_repo,
-                        subscriber_override=_delta_to_state(delta),
-                        metrics=metrics,
-                    )
+                    last_updated_at: datetime | None = None
+                    last_subscriber_id: int | None = None
+                    for delta in deltas:
+                        last_updated_at = delta.updated_at
+                        last_subscriber_id = delta.subscriber_id
+                        try:
+                            mapped = await listmonk_repo.get_by_subscriber_id(
+                                subscriber_id=delta.subscriber_id
+                            )
+                        except DuplicateListmonkSubscriberIdError as exc:
+                            metrics.duplicate_subscriber_mappings += 1
+                            logger.error(
+                                "consent_sync_duplicate_subscriber_mapping",
+                                subscriber_id=delta.subscriber_id,
+                                list_id=list_id,
+                                user_ids=exc.user_ids,
+                            )
+                            await session.commit()
+                            continue
+                        if mapped is None:
+                            metrics.unmapped_subscribers += 1
+                            logger.info(
+                                "consent_sync_subscriber_not_mapped",
+                                subscriber_id=delta.subscriber_id,
+                                list_id=list_id,
+                            )
+                            await session.commit()
+                            continue
 
-                await sync_repo.update_watermark(
-                    source="listmonk_consent",
-                    list_id=list_id,
-                    updated_at=last_updated_at,
-                    subscriber_id=last_subscriber_id,
-                )
-                logger.info(
-                    "consent_sync_list_processed",
-                    list_id=list_id,
-                    deltas=len(deltas),
-                    watermark_updated_at=last_updated_at.isoformat() if last_updated_at else None,
-                    watermark_subscriber_id=last_subscriber_id,
-                )
+                        processed += 1
+                        pending = SimpleNamespace(
+                            user_id=int(mapped.user_id),
+                            subscriber_id=delta.subscriber_id,
+                        )
+                        await self._process_pending_user(
+                            pending=pending,
+                            target_list_ids=target_list_ids,
+                            listmonk_repo=listmonk_repo,
+                            accrual_repo=accrual_repo,
+                            subscriber_override=_delta_to_state(delta),
+                            metrics=metrics,
+                        )
+                        await session.commit()
 
-            await session.commit()
+                    await sync_repo.update_watermark(
+                        source="listmonk_consent",
+                        list_id=list_id,
+                        updated_at=last_updated_at,
+                        subscriber_id=last_subscriber_id,
+                    )
+                    logger.info(
+                        "consent_sync_list_processed",
+                        list_id=list_id,
+                        deltas=len(deltas),
+                        watermark_updated_at=last_updated_at.isoformat()
+                        if last_updated_at
+                        else None,
+                        watermark_subscriber_id=last_subscriber_id,
+                    )
+                    await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
         logger.info(
             "consent_sync_metrics",
             processed=processed,
