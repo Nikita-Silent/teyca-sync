@@ -126,6 +126,8 @@ services:
   rabbitmq:
     image: rabbitmq:4-management-alpine
     restart: unless-stopped
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
     ports:
       - "127.0.0.1:5672:5672"
       - "127.0.0.1:15672:15672"
@@ -145,3 +147,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+volumes:
+  rabbitmq-data:
