@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from hashlib import sha1
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import httpx
@@ -44,6 +44,13 @@ class RateLimiter(Protocol):
 
     async def acquire(self) -> None:
         """Wait until a request slot becomes available."""
+
+
+class AsyncRedisEvalClient(Protocol):
+    """Minimal Redis contract required by the distributed limiter."""
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Any:
+        """Execute the limiter Lua script."""
 
 
 class SlidingWindowRateLimiter:
@@ -134,10 +141,10 @@ return {1, 0}
     def __init__(
         self,
         *,
-        redis_client: Redis,
+        redis_client: AsyncRedisEvalClient,
         limits: tuple[tuple[float, int], ...],
         key_prefix: str,
-        sleep: Callable[[float], Any] = asyncio.sleep,
+        sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         min_sleep_seconds: float = 0.05,
         request_id_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -312,7 +319,7 @@ def build_teyca_rate_limiter(settings: Settings) -> RateLimiter:
     if not redis_url:
         return SlidingWindowRateLimiter(limits=TeycaClient._DEFAULT_LIMITS)
 
-    redis_client = Redis.from_url(redis_url)
+    redis_client = cast(AsyncRedisEvalClient, Redis.from_url(redis_url))
     return RedisSlidingWindowRateLimiter(
         redis_client=redis_client,
         limits=TeycaClient._DEFAULT_LIMITS,
