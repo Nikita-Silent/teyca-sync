@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -27,17 +29,21 @@ from app.clients.listmonk import (
     _normalize_status_for_restore,
     _to_utc,
 )
+from app.config import Settings
 
 
-async def _run_to_thread(func: object, *args: object, **kwargs: object) -> object:
+async def _run_to_thread(func: Callable[..., object], *args: object, **kwargs: object) -> object:
     return func(*args, **kwargs)
 
 
-def _settings() -> SimpleNamespace:
-    return SimpleNamespace(
-        listmonk_url="http://listmonk",
-        listmonk_user="u",
-        listmonk_password="p",
+def _settings() -> Settings:
+    return cast(
+        Settings,
+        SimpleNamespace(
+            listmonk_url="http://listmonk",
+            listmonk_user="u",
+            listmonk_password="p",
+        ),
     )
 
 
@@ -715,7 +721,9 @@ async def test_get_updated_subscribers_retries_on_transient_timeout() -> None:
 
     subscribers_calls = 0
 
-    async def flaky_to_thread(func: object, *args: object, **kwargs: object) -> object:
+    async def flaky_to_thread(
+        func: Callable[..., object], *args: object, **kwargs: object
+    ) -> object:
         nonlocal subscribers_calls
         if func is fake.subscribers:
             subscribers_calls += 1
@@ -746,16 +754,21 @@ async def test_get_updated_subscribers_wraps_asyncio_timeout_as_client_error() -
     fake.login = MagicMock(return_value=True)
     fake.subscribers = MagicMock(return_value=[])
 
-    async def timeout_to_thread(func: object, *args: object, **kwargs: object) -> object:
+    async def timeout_to_thread(
+        func: Callable[..., object], *args: object, **kwargs: object
+    ) -> object:
         if func is fake.subscribers:
             raise TimeoutError()
         return func(*args, **kwargs)
 
-    settings = SimpleNamespace(
-        listmonk_url="http://listmonk",
-        listmonk_user="u",
-        listmonk_password="p",
-        listmonk_request_max_retries=0,
+    settings = cast(
+        Settings,
+        SimpleNamespace(
+            listmonk_url="http://listmonk",
+            listmonk_user="u",
+            listmonk_password="p",
+            listmonk_request_max_retries=0,
+        ),
     )
 
     with (
@@ -783,18 +796,23 @@ async def test_upsert_subscriber_does_not_retry_mutating_call_after_timeout() ->
 
     create_attempts = 0
 
-    async def timeout_once_per_write(func: object, *args: object, **kwargs: object) -> object:
+    async def timeout_once_per_write(
+        func: Callable[..., object], *args: object, **kwargs: object
+    ) -> object:
         nonlocal create_attempts
         if func is fake.create_subscriber:
             create_attempts += 1
             raise TimeoutError()
         return func(*args, **kwargs)
 
-    settings = SimpleNamespace(
-        listmonk_url="http://listmonk",
-        listmonk_user="u",
-        listmonk_password="p",
-        listmonk_request_max_retries=5,
+    settings = cast(
+        Settings,
+        SimpleNamespace(
+            listmonk_url="http://listmonk",
+            listmonk_user="u",
+            listmonk_password="p",
+            listmonk_request_max_retries=5,
+        ),
     )
 
     with (

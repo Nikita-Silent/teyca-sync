@@ -1,9 +1,12 @@
+from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.clients.listmonk import SubscriberProfile
+from app.config import Settings
 from app.workers.listmonk_duplicate_subscriber_worker import (
     ListmonkDuplicateSubscriberWorker,
     _extract_authoritative_user_id,
@@ -11,23 +14,35 @@ from app.workers.listmonk_duplicate_subscriber_worker import (
 )
 
 
-def _worker() -> ListmonkDuplicateSubscriberWorker:
+@dataclass(slots=True)
+class _WorkerMocks:
+    session_factory: MagicMock
+    listmonk_client: AsyncMock
+    session: AsyncMock
+
+
+def _worker() -> tuple[ListmonkDuplicateSubscriberWorker, _WorkerMocks]:
     session = AsyncMock()
     context_manager = AsyncMock()
     context_manager.__aenter__.return_value = session
     context_manager.__aexit__.return_value = False
-    session_factory = MagicMock(return_value=context_manager)
-    return ListmonkDuplicateSubscriberWorker(
-        settings=SimpleNamespace(consent_sync_batch_size=100),
-        session_factory=session_factory,
+    mocks = _WorkerMocks(
+        session_factory=MagicMock(return_value=context_manager),
         listmonk_client=AsyncMock(),
+        session=session,
     )
+    worker = ListmonkDuplicateSubscriberWorker(
+        settings=cast(Settings, SimpleNamespace(consent_sync_batch_size=100)),
+        session_factory=mocks.session_factory,
+        listmonk_client=mocks.listmonk_client,
+    )
+    return worker, mocks
 
 
 @pytest.mark.asyncio
 async def test_run_once_repairs_duplicate_subscriber_and_archives_losers() -> None:
-    worker = _worker()
-    session = worker.session_factory.return_value.__aenter__.return_value
+    worker, mocks = _worker()
+    session = mocks.session
 
     async def get_subscriber_profile(*, subscriber_id: int) -> SubscriberProfile:
         assert subscriber_id == 777
@@ -40,7 +55,7 @@ async def test_run_once_repairs_duplicate_subscriber_and_archives_losers() -> No
             attributes={"user_id": "20"},
         )
 
-    worker.listmonk_client.get_subscriber_profile.side_effect = get_subscriber_profile
+    mocks.listmonk_client.get_subscriber_profile.side_effect = get_subscriber_profile
 
     with (
         patch(
@@ -72,8 +87,8 @@ async def test_run_once_repairs_duplicate_subscriber_and_archives_losers() -> No
 
 @pytest.mark.asyncio
 async def test_run_once_marks_manual_review_when_authoritative_user_missing() -> None:
-    worker = _worker()
-    session = worker.session_factory.return_value.__aenter__.return_value
+    worker, mocks = _worker()
+    session = mocks.session
 
     async def get_subscriber_profile(*, subscriber_id: int) -> SubscriberProfile:
         assert subscriber_id == 777
@@ -86,7 +101,7 @@ async def test_run_once_marks_manual_review_when_authoritative_user_missing() ->
             attributes={},
         )
 
-    worker.listmonk_client.get_subscriber_profile.side_effect = get_subscriber_profile
+    mocks.listmonk_client.get_subscriber_profile.side_effect = get_subscriber_profile
 
     with (
         patch(

@@ -8,14 +8,18 @@ import runpy
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from aio_pika.abc import AbstractIncomingMessage
+from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
 from app import main as app_main
 from app.api.webhook import get_mq_publisher
+from app.config import Settings
 from app.db import session as db_session
 from app.logging_config import (
     _add_static_fields,
@@ -45,7 +49,7 @@ class DummyAwaitableTask:
 
 @pytest.mark.asyncio
 async def test_lifespan_testing_branch_sets_mock_publisher() -> None:
-    app = SimpleNamespace(state=SimpleNamespace())
+    app = cast(FastAPI, SimpleNamespace(state=SimpleNamespace()))
     with (
         patch.dict("os.environ", {"TESTING": "1"}, clear=False),
         patch("app.main.get_settings", return_value=SimpleNamespace(loki_url=None)),
@@ -59,7 +63,7 @@ async def test_lifespan_testing_branch_sets_mock_publisher() -> None:
 
 @pytest.mark.asyncio
 async def test_lifespan_runtime_branch_connects_and_closes_connection() -> None:
-    app = SimpleNamespace(state=SimpleNamespace())
+    app = cast(FastAPI, SimpleNamespace(state=SimpleNamespace()))
     connection = AsyncMock()
     with (
         patch.dict("os.environ", {}, clear=True),
@@ -83,7 +87,7 @@ async def test_lifespan_runtime_branch_connects_and_closes_connection() -> None:
 
 @pytest.mark.asyncio
 async def test_lifespan_always_shuts_logging_on_error() -> None:
-    app = SimpleNamespace(state=SimpleNamespace())
+    app = cast(FastAPI, SimpleNamespace(state=SimpleNamespace()))
     with (
         patch.dict("os.environ", {"TESTING": "1"}, clear=False),
         patch("app.main.get_settings", return_value=SimpleNamespace(loki_url=None)),
@@ -151,14 +155,18 @@ def test_add_static_fields_processor() -> None:
 
 
 def test_get_mq_publisher_and_main_guards() -> None:
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(mq_publisher="publisher")))
+    request = cast(
+        Request[Any],
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(mq_publisher="publisher"))),
+    )
     assert get_mq_publisher(request) == "publisher"
 
     worker_dir = Path(__file__).resolve().parents[2] / "app" / "workers"
 
     def _close_coro(coro: object) -> None:
-        if hasattr(coro, "close"):
-            coro.close()
+        closeable = cast(Any, coro)
+        if hasattr(closeable, "close"):
+            closeable.close()
         return None
 
     with patch("asyncio.run", side_effect=_close_coro):
@@ -176,16 +184,18 @@ def test_get_mq_publisher_and_main_guards() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_core_paths() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
 
-    msg = SimpleNamespace(body=b'{"x": 1}')
+    msg = cast(AbstractIncomingMessage, SimpleNamespace(body=b'{"x": 1}'))
     assert await runner._parse_payload(msg) == {"x": 1}
     with pytest.raises(ValueError):
-        await runner._parse_payload(SimpleNamespace(body=b"not-json"))
+        await runner._parse_payload(
+            cast(AbstractIncomingMessage, SimpleNamespace(body=b"not-json"))
+        )
 
     with (
         patch.object(
@@ -212,7 +222,7 @@ async def test_consumers_runner_core_paths() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_callback_ack_and_reject() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -272,7 +282,7 @@ async def test_consumers_runner_callback_ack_and_reject() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -319,7 +329,7 @@ async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -
 @pytest.mark.asyncio
 async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -352,7 +362,7 @@ async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> N
 @pytest.mark.asyncio
 async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -398,7 +408,7 @@ async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_consume_commit_and_rollback_paths() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -491,7 +501,7 @@ async def test_consumers_runner_consume_commit_and_rollback_paths() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_run_and_entrypoints() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=SimpleNamespace(rabbitmq_url="amqp://x"),
+        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -519,7 +529,8 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
         with pytest.raises(RuntimeError):
             await runner.run()
 
-    runner.old_db_repo.close.assert_awaited_once()
+    old_db_repo = cast(AsyncMock, runner.old_db_repo)
+    old_db_repo.close.assert_awaited_once()
     connection.close.assert_awaited_once()
     heartbeat_task.cancel.assert_called_once()
     assert heartbeat_task.awaited is True
@@ -527,9 +538,12 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
     with (
         patch(
             "app.workers.run_queue_consumers.get_settings",
-            return_value=SimpleNamespace(
-                export_db_url="db",
-                export_db_request_timeout_seconds=12.5,
+            return_value=cast(
+                Settings,
+                SimpleNamespace(
+                    export_db_url="db",
+                    export_db_request_timeout_seconds=12.5,
+                ),
             ),
         ),
         patch("app.workers.run_queue_consumers.ListmonkSDKClient"),
@@ -552,12 +566,15 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_run_clamps_concurrency_to_db_capacity() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=SimpleNamespace(
-            rabbitmq_url="amqp://x",
-            rabbitmq_consumer_prefetch_count=10,
-            rabbitmq_consumer_max_concurrency=9,
-            database_pool_size=2,
-            database_pool_max_overflow=0,
+        settings=cast(
+            Settings,
+            SimpleNamespace(
+                rabbitmq_url="amqp://x",
+                rabbitmq_consumer_prefetch_count=10,
+                rabbitmq_consumer_max_concurrency=9,
+                database_pool_size=2,
+                database_pool_max_overflow=0,
+            ),
         ),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),

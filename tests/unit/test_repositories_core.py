@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -306,18 +307,21 @@ async def test_listmonk_user_archive_repository_paths() -> None:
     session = AsyncMock()
     session.add = MagicMock()
     repo = ListmonkUserArchiveRepository(session)
-    row = SimpleNamespace(
-        user_id=10,
-        subscriber_id=777,
-        email="dup@example.com",
-        status="blocked",
-        list_ids="2,5",
-        attributes={"user_id": 10},
-        consent_pending=True,
-        consent_checked_at=None,
-        consent_confirmed_at=None,
-        created_at=None,
-        updated_at=None,
+    row = cast(
+        Any,
+        SimpleNamespace(
+            user_id=10,
+            subscriber_id=777,
+            email="dup@example.com",
+            status="blocked",
+            list_ids="2,5",
+            attributes={"user_id": 10},
+            consent_pending=True,
+            consent_checked_at=None,
+            consent_confirmed_at=None,
+            created_at=None,
+            updated_at=None,
+        ),
     )
 
     await repo.archive_loser(

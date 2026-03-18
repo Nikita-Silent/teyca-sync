@@ -175,6 +175,8 @@ async def test_import_users_maps_referal_and_tags() -> None:
     assert imported == 1
     assert skipped == 0
     importer._insert_rows_in_chunks.assert_awaited_once()
-    rows = importer._insert_rows_in_chunks.await_args.kwargs["rows"]
+    await_args = importer._insert_rows_in_chunks.await_args
+    assert await_args is not None
+    rows = await_args.kwargs["rows"]
     assert rows[0]["referal"] == "4243447"
     assert rows[0]["tags"] == [892, 899]
