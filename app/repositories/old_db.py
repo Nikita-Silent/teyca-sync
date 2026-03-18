@@ -112,7 +112,7 @@ class OldDBRepository:
                     timeout=self._request_timeout_seconds,
                 )
                 row = result.mappings().first()
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise OldDBRepositoryError(
                 f"Old DB query timeout after {self._request_timeout_seconds}s"
             ) from exc
@@ -159,7 +159,7 @@ class OldDBRepository:
                     timeout=self._request_timeout_seconds,
                 )
                 self._columns_cache = {str(row[0]) for row in result.fetchall()}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._columns_cache = set()
         except SQLAlchemyError:
             self._columns_cache = set()

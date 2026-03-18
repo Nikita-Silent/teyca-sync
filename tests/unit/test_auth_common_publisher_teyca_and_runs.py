@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi import HTTPException
 
 from app.api.auth import verify_webhook_token
 from app.clients.teyca import BonusOperation, SlidingWindowRateLimiter, TeycaAPIError, TeycaClient
+from app.config import Settings
 from app.consumers.common import (
     _to_optional_float,
     _to_optional_int,
@@ -191,7 +193,11 @@ async def test_teyca_client_all_branches_with_injected_http_client() -> None:
     http_client.post.return_value = SimpleNamespace(status_code=200, text="ok")
     http_client.put.return_value = SimpleNamespace(status_code=200, text="ok")
     rate_limiter = AsyncMock()
-    client = TeycaClient(settings=settings, http_client=http_client, rate_limiter=rate_limiter)
+    client = TeycaClient(
+        settings=cast(Settings, settings),
+        http_client=http_client,
+        rate_limiter=rate_limiter,
+    )
 
     op = BonusOperation.one_shot(value="10")
     assert op.to_dict()["value"] == "10"
@@ -216,7 +222,7 @@ def test_teyca_client_settings_validation() -> None:
         teyca_api_key="",
         teyca_token="",
     )
-    client = TeycaClient(settings=settings)
+    client = TeycaClient(settings=cast(Settings, settings))
     with pytest.raises(TeycaAPIError):
         client._get_headers()
 
@@ -228,7 +234,7 @@ async def test_teyca_client_uses_internal_httpx_client_when_not_injected() -> No
         teyca_api_key="api-key",
         teyca_token="token-1",
     )
-    client = TeycaClient(settings=settings, http_client=None)
+    client = TeycaClient(settings=cast(Settings, settings), http_client=None)
 
     httpx_client = AsyncMock()
     httpx_client.post.return_value = SimpleNamespace(status_code=200, text="ok")

@@ -188,8 +188,8 @@ class ConsentSyncWorker:
     ) -> dict[str, Any] | None:
         """Load saved step-progress payload for an idempotent operation."""
         if accrual_repo is not None:
-            operation = await accrual_repo.get_by_key(idempotency_key=idempotency_key)
-            return None if operation is None else dict(operation.payload or {})
+            current = await accrual_repo.get_by_key(idempotency_key=idempotency_key)
+            return None if current is None else dict(current.payload or {})
 
         async def operation(session: AsyncSession) -> dict[str, Any] | None:
             repo = BonusAccrualRepository(session)
