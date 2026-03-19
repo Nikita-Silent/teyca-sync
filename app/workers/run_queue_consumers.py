@@ -47,13 +47,7 @@ from app.utils import to_optional_str
 logger = structlog.get_logger()
 LOCK_BUSY_RETRY_HEADER = "x-lock-busy-retry-count"
 LOCK_BUSY_ORIGINAL_QUEUE_HEADER = "x-original-queue"
-LOCK_BUSY_BASE_DELAY_MS = 1_000
-LOCK_BUSY_MAX_DELAY_MS = 30_000
-LOCK_BUSY_MAX_RETRIES = 5
 RATE_LIMIT_RETRY_HEADER = "x-teyca-rate-limit-retry-count"
-RATE_LIMIT_BASE_DELAY_MS = 60_000
-RATE_LIMIT_MAX_DELAY_MS = 15 * 60_000
-RATE_LIMIT_MAX_RETRIES = 10
 RETRY_QUEUE_BY_MAIN_QUEUE = {
     QUEUE_CREATE: QUEUE_CREATE_RETRY,
     QUEUE_UPDATE: QUEUE_UPDATE_RETRY,
@@ -192,12 +186,16 @@ class ConsumersRunner:
         retry_queue = RETRY_QUEUE_BY_MAIN_QUEUE[queue_name]
         dead_queue = DEAD_QUEUE_BY_MAIN_QUEUE[queue_name]
         target_queue = retry_queue
-        expiration_ms: int | None = _compute_lock_retry_delay_ms(retry_count)
+        expiration_ms: int | None = _compute_lock_retry_delay_ms(
+            retry_count=retry_count,
+            base_delay_ms=self.settings.rabbitmq_lock_busy_retry_base_delay_ms,
+            max_delay_ms=self.settings.rabbitmq_lock_busy_retry_max_delay_ms,
+        )
         expiration: timedelta | None = None
         result = "user_lock_busy"
         log_event = "consumer_message_requeued_user_lock_busy"
 
-        if retry_count > LOCK_BUSY_MAX_RETRIES:
+        if retry_count > self.settings.rabbitmq_lock_busy_retry_max_retries:
             target_queue = dead_queue
             expiration_ms = None
             result = "user_lock_busy_dead_lettered"
@@ -255,12 +253,16 @@ class ConsumersRunner:
         retry_queue = RETRY_QUEUE_BY_MAIN_QUEUE[queue_name]
         dead_queue = DEAD_QUEUE_BY_MAIN_QUEUE[queue_name]
         target_queue = retry_queue
-        expiration_ms: int | None = _compute_rate_limit_retry_delay_ms(retry_count)
+        expiration_ms: int | None = _compute_rate_limit_retry_delay_ms(
+            retry_count=retry_count,
+            base_delay_ms=self.settings.rabbitmq_teyca_rate_limit_retry_base_delay_ms,
+            max_delay_ms=self.settings.rabbitmq_teyca_rate_limit_retry_max_delay_ms,
+        )
         expiration: timedelta | None = None
         result = "teyca_rate_limited"
         log_event = "consumer_message_requeued_teyca_rate_limit"
 
-        if retry_count > RATE_LIMIT_MAX_RETRIES:
+        if retry_count > self.settings.rabbitmq_teyca_rate_limit_retry_max_retries:
             target_queue = dead_queue
             expiration_ms = None
             result = "teyca_rate_limited_dead_lettered"
@@ -509,16 +511,18 @@ def _coerce_retry_count(raw: object) -> int:
     return 0
 
 
-def _compute_lock_retry_delay_ms(retry_count: int) -> int:
+def _compute_lock_retry_delay_ms(*, retry_count: int, base_delay_ms: int, max_delay_ms: int) -> int:
     bounded_retry_count = max(1, retry_count)
-    delay_ms = LOCK_BUSY_BASE_DELAY_MS * (2 ** (bounded_retry_count - 1))
-    return min(delay_ms, LOCK_BUSY_MAX_DELAY_MS)
+    delay_ms = max(1, base_delay_ms) * (2 ** (bounded_retry_count - 1))
+    return min(delay_ms, max(1, max_delay_ms))
 
 
-def _compute_rate_limit_retry_delay_ms(retry_count: int) -> int:
+def _compute_rate_limit_retry_delay_ms(
+    *, retry_count: int, base_delay_ms: int, max_delay_ms: int
+) -> int:
     bounded_retry_count = max(1, retry_count)
-    delay_ms = RATE_LIMIT_BASE_DELAY_MS * (2 ** (bounded_retry_count - 1))
-    return min(delay_ms, RATE_LIMIT_MAX_DELAY_MS)
+    delay_ms = max(1, base_delay_ms) * (2 ** (bounded_retry_count - 1))
+    return min(delay_ms, max(1, max_delay_ms))
 
 
 async def _run() -> None:
