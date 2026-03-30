@@ -14,7 +14,7 @@ from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
 from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkSDKClient
-from app.clients.teyca import TeycaAPIError, TeycaClient, build_teyca_client
+from app.clients.teyca import TeycaAPIError, build_teyca_client
 from app.config import Settings, get_settings
 from app.consumers.create_user import CreateConsumerDeps
 from app.consumers.create_user import handle as handle_create
@@ -37,6 +37,7 @@ from app.mq.queues import (
 )
 from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.email_repair_log import EmailRepairLogRepository
+from app.repositories.external_call_outbox import ExternalCallOutboxRepository
 from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
@@ -47,13 +48,7 @@ from app.utils import to_optional_str
 logger = structlog.get_logger()
 LOCK_BUSY_RETRY_HEADER = "x-lock-busy-retry-count"
 LOCK_BUSY_ORIGINAL_QUEUE_HEADER = "x-original-queue"
-LOCK_BUSY_BASE_DELAY_MS = 1_000
-LOCK_BUSY_MAX_DELAY_MS = 30_000
-LOCK_BUSY_MAX_RETRIES = 5
 RATE_LIMIT_RETRY_HEADER = "x-teyca-rate-limit-retry-count"
-RATE_LIMIT_BASE_DELAY_MS = 60_000
-RATE_LIMIT_MAX_DELAY_MS = 15 * 60_000
-RATE_LIMIT_MAX_RETRIES = 10
 RETRY_QUEUE_BY_MAIN_QUEUE = {
     QUEUE_CREATE: QUEUE_CREATE_RETRY,
     QUEUE_UPDATE: QUEUE_UPDATE_RETRY,
@@ -71,9 +66,9 @@ class ConsumersRunner:
     """Queue consumers lifecycle manager."""
 
     settings: Settings
-    listmonk_client: ListmonkSDKClient
-    teyca_client: TeycaClient
     old_db_repo: OldDBRepository
+    listmonk_client: object | None = None
+    teyca_client: object | None = None
     _process_semaphore: asyncio.Semaphore | None = None
     _channel: AbstractChannel | None = None
 
@@ -92,11 +87,9 @@ class ConsumersRunner:
                 users_repo=UsersRepository(session),
                 listmonk_repo=ListmonkUsersRepository(session),
                 email_repair_repo=EmailRepairLogRepository(session),
+                outbox_repo=ExternalCallOutboxRepository(session),
                 merge_repo=MergeLogRepository(session),
                 old_db_repo=self.old_db_repo,
-                listmonk_client=self.listmonk_client,
-                teyca_client=self.teyca_client,
-                commit_checkpoint=session.commit,
             )
             try:
                 await handle_create(payload, deps=deps, wait_for_lock=wait_for_lock)
@@ -114,11 +107,9 @@ class ConsumersRunner:
                 users_repo=UsersRepository(session),
                 listmonk_repo=ListmonkUsersRepository(session),
                 email_repair_repo=EmailRepairLogRepository(session),
+                outbox_repo=ExternalCallOutboxRepository(session),
                 merge_repo=MergeLogRepository(session),
                 old_db_repo=self.old_db_repo,
-                listmonk_client=self.listmonk_client,
-                teyca_client=self.teyca_client,
-                commit_checkpoint=session.commit,
             )
             try:
                 await handle_update(payload, deps=deps, wait_for_lock=wait_for_lock)
@@ -136,11 +127,11 @@ class ConsumersRunner:
                 listmonk_repo=ListmonkUsersRepository(session),
                 merge_repo=MergeLogRepository(session),
                 bonus_accrual_repo=BonusAccrualRepository(session),
-                listmonk_client=self.listmonk_client,
-                session=session,
+                outbox_repo=ExternalCallOutboxRepository(session),
             )
             try:
                 await handle_delete(payload, deps=deps, wait_for_lock=wait_for_lock)
+                await session.commit()
             except Exception:
                 await session.rollback()
                 raise
@@ -192,12 +183,16 @@ class ConsumersRunner:
         retry_queue = RETRY_QUEUE_BY_MAIN_QUEUE[queue_name]
         dead_queue = DEAD_QUEUE_BY_MAIN_QUEUE[queue_name]
         target_queue = retry_queue
-        expiration_ms: int | None = _compute_lock_retry_delay_ms(retry_count)
+        expiration_ms: int | None = _compute_lock_retry_delay_ms(
+            retry_count=retry_count,
+            base_delay_ms=self.settings.rabbitmq_lock_busy_retry_base_delay_ms,
+            max_delay_ms=self.settings.rabbitmq_lock_busy_retry_max_delay_ms,
+        )
         expiration: timedelta | None = None
         result = "user_lock_busy"
         log_event = "consumer_message_requeued_user_lock_busy"
 
-        if retry_count > LOCK_BUSY_MAX_RETRIES:
+        if retry_count > self.settings.rabbitmq_lock_busy_retry_max_retries:
             target_queue = dead_queue
             expiration_ms = None
             result = "user_lock_busy_dead_lettered"
@@ -255,12 +250,16 @@ class ConsumersRunner:
         retry_queue = RETRY_QUEUE_BY_MAIN_QUEUE[queue_name]
         dead_queue = DEAD_QUEUE_BY_MAIN_QUEUE[queue_name]
         target_queue = retry_queue
-        expiration_ms: int | None = _compute_rate_limit_retry_delay_ms(retry_count)
+        expiration_ms: int | None = _compute_rate_limit_retry_delay_ms(
+            retry_count=retry_count,
+            base_delay_ms=self.settings.rabbitmq_teyca_rate_limit_retry_base_delay_ms,
+            max_delay_ms=self.settings.rabbitmq_teyca_rate_limit_retry_max_delay_ms,
+        )
         expiration: timedelta | None = None
         result = "teyca_rate_limited"
         log_event = "consumer_message_requeued_teyca_rate_limit"
 
-        if retry_count > RATE_LIMIT_MAX_RETRIES:
+        if retry_count > self.settings.rabbitmq_teyca_rate_limit_retry_max_retries:
             target_queue = dead_queue
             expiration_ms = None
             result = "teyca_rate_limited_dead_lettered"
@@ -509,16 +508,18 @@ def _coerce_retry_count(raw: object) -> int:
     return 0
 
 
-def _compute_lock_retry_delay_ms(retry_count: int) -> int:
+def _compute_lock_retry_delay_ms(*, retry_count: int, base_delay_ms: int, max_delay_ms: int) -> int:
     bounded_retry_count = max(1, retry_count)
-    delay_ms = LOCK_BUSY_BASE_DELAY_MS * (2 ** (bounded_retry_count - 1))
-    return min(delay_ms, LOCK_BUSY_MAX_DELAY_MS)
+    delay_ms = max(1, base_delay_ms) * (2 ** (bounded_retry_count - 1))
+    return min(delay_ms, max(1, max_delay_ms))
 
 
-def _compute_rate_limit_retry_delay_ms(retry_count: int) -> int:
+def _compute_rate_limit_retry_delay_ms(
+    *, retry_count: int, base_delay_ms: int, max_delay_ms: int
+) -> int:
     bounded_retry_count = max(1, retry_count)
-    delay_ms = RATE_LIMIT_BASE_DELAY_MS * (2 ** (bounded_retry_count - 1))
-    return min(delay_ms, RATE_LIMIT_MAX_DELAY_MS)
+    delay_ms = max(1, base_delay_ms) * (2 ** (bounded_retry_count - 1))
+    return min(delay_ms, max(1, max_delay_ms))
 
 
 async def _run() -> None:

@@ -167,6 +167,19 @@
 - сохраняем текущий step-progress в `bonus_accrual_log.payload`
 - `consent_pending` остается `true` (для ретрая)
 
+Известный баг на 2026-03-18:
+- в `app/clients/listmonk.py` обычный upsert на UPDATE использует SDK `update_subscriber(...)`
+- используемая версия Listmonk Python SDK внутри `update_subscriber(...)` всегда отправляет `preconfirm_subscriptions=true`
+- из-за этого double opt-in список может стать `confirmed` без явного подтверждения клиента после очередного UPDATE
+- issue: `teyca-sync-b7j`
+
+Транзакционность и повторная доставка:
+- consumers работают в модели at-least-once: `ack` отправляется только после успешного завершения handler и commit локальной БД
+- если consumer/process/RabbitMQ connection падает после внешнего вызова, но до `ack`, сообщение может быть доставлено повторно
+- `consent` бонусы частично защищены журналом `bonus_accrual_log` через `idempotency_key` и payload-шаги `bonus_done/key1_done`
+- но есть окно между внешним `POST /bonuses` и записью `bonus_done=true`; в этом окне crash приводит к риску повторного начисления
+- `merge` бонусы в CREATE/UPDATE отдельным журналом идемпотентности пока не защищены, поэтому повторная доставка после успешного вызова Teyca может начислить бонус повторно
+
 Куда смотреть:
 1. `listmonk_users.consent_pending`
 2. `bonus_accrual_log` по `reason='email_consent'`

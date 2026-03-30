@@ -199,3 +199,30 @@ class SyncState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class ExternalCallOutbox(Base):
+    """Durable outbox for external side effects executed after local commit."""
+
+    __tablename__ = "external_call_outbox"
+    __table_args__ = (UniqueConstraint("dedupe_key", name="uq_external_call_outbox_dedupe_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    queue_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )

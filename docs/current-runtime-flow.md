@@ -210,6 +210,21 @@ sequenceDiagram
     W->>DB: commit
 ```
 
+Примечание по текущему поведению Listmonk на 2026-03-18:
+- найден баг в интеграции `app/clients/listmonk.py`: при обычном `UPDATE` мы вызываем SDK-метод `update_subscriber(...)`
+- в используемой версии Python SDK этот метод всегда отправляет `preconfirm_subscriptions=true`
+- следствие: повторный `UPDATE` может автоматически подтвердить подписку в double opt-in списке без действия клиента
+- issue: `teyca-sync-b7j`
+
+Примечание по delivery semantics:
+- RabbitMQ consumer делает `ack` только после успешного завершения handler: см. `ConsumersRunner._callback`
+- при любой ошибке до `ack` сообщение уходит в `reject(requeue=true)` или в delayed retry/dead-letter path для rate limit / lock contention
+- это at-least-once обработка, а не exactly-once
+- внешний вызов в Teyca/Listmonk может выполниться повторно, если процесс/соединение упадёт после внешнего side effect, но до `ack`
+- для `consent_sync_worker` RabbitMQ не участвует; там повторяемость зависит от `bonus_accrual_log` и сохранённого step-progress
+- `consent` бонус защищён частично: есть `idempotency_key=email_consent:{user_id}` и шаги `bonus_done/key1_done`, но если процесс упадёт после `POST /bonuses` и до `save_progress(bonus_done=true)`, повторное начисление всё ещё возможно
+- `merge` бонусы в CREATE/UPDATE сейчас не имеют отдельного idempotency log, поэтому повторная доставка сообщения после внешнего начисления и до `ack` может привести к повторному начислению
+
 ## 6) Sequence: email repair-worker
 
 ```mermaid

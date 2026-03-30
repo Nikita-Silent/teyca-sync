@@ -48,6 +48,20 @@ class DummyAwaitableTask:
         return _wait().__await__()
 
 
+def _runner_settings(**overrides: object) -> Settings:
+    defaults: dict[str, object] = {
+        "rabbitmq_url": "amqp://x",
+        "rabbitmq_lock_busy_retry_base_delay_ms": 1_000,
+        "rabbitmq_lock_busy_retry_max_delay_ms": 30_000,
+        "rabbitmq_lock_busy_retry_max_retries": 5,
+        "rabbitmq_teyca_rate_limit_retry_base_delay_ms": 60_000,
+        "rabbitmq_teyca_rate_limit_retry_max_delay_ms": 15 * 60_000,
+        "rabbitmq_teyca_rate_limit_retry_max_retries": 10,
+    }
+    defaults.update(overrides)
+    return cast(Settings, SimpleNamespace(**defaults))
+
+
 @pytest.mark.asyncio
 async def test_lifespan_testing_branch_sets_mock_publisher() -> None:
     app = cast(FastAPI, SimpleNamespace(state=SimpleNamespace()))
@@ -185,7 +199,7 @@ def test_get_mq_publisher_and_main_guards() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_core_paths() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -223,7 +237,7 @@ async def test_consumers_runner_core_paths() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_callback_ack_and_reject() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -283,7 +297,7 @@ async def test_consumers_runner_callback_ack_and_reject() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -330,7 +344,7 @@ async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -
 @pytest.mark.asyncio
 async def test_consumers_runner_callback_requeues_teyca_rate_limit_with_delay() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -384,7 +398,7 @@ async def test_consumers_runner_callback_requeues_teyca_rate_limit_with_delay() 
 @pytest.mark.asyncio
 async def test_consumers_runner_callback_dead_letters_teyca_rate_limit_after_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -434,9 +448,77 @@ async def test_consumers_runner_callback_dead_letters_teyca_rate_limit_after_lim
 
 
 @pytest.mark.asyncio
+async def test_consumers_runner_callback_uses_configured_retry_limits() -> None:
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=_runner_settings(
+            rabbitmq_lock_busy_retry_base_delay_ms=2_000,
+            rabbitmq_lock_busy_retry_max_delay_ms=5_000,
+            rabbitmq_lock_busy_retry_max_retries=2,
+            rabbitmq_teyca_rate_limit_retry_base_delay_ms=5_000,
+            rabbitmq_teyca_rate_limit_retry_max_delay_ms=12_000,
+            rabbitmq_teyca_rate_limit_retry_max_retries=1,
+        ),
+        listmonk_client=AsyncMock(),
+        teyca_client=AsyncMock(),
+        old_db_repo=AsyncMock(),
+    )
+
+    lock_message = AsyncMock()
+    lock_message.headers = {}
+    lock_message.body = b'{"type":"UPDATE","pass":{"user_id":55}}'
+    lock_message.content_type = "application/json"
+    lock_message.content_encoding = None
+    lock_message.timestamp = None
+    lock_message.type = None
+    lock_message.app_id = None
+    rate_limit_message = AsyncMock()
+    rate_limit_message.headers = {"x-teyca-rate-limit-retry-count": 1}
+    rate_limit_message.body = b'{"type":"CREATE","pass":{"user_id":56}}'
+    rate_limit_message.content_type = "application/json"
+    rate_limit_message.content_encoding = None
+    rate_limit_message.timestamp = None
+    rate_limit_message.type = None
+    rate_limit_message.app_id = None
+    channel = AsyncMock()
+    channel.default_exchange = AsyncMock()
+    runner._channel = channel
+
+    with patch.object(
+        run_queue_consumers.ConsumersRunner,
+        "_process",
+        new=AsyncMock(side_effect=UserLockNotAcquiredError(user_id=55)),
+    ):
+        await runner._callback(lock_message, run_queue_consumers.QUEUE_UPDATE)
+
+    lock_published_message = channel.default_exchange.publish.await_args_list[0].args[0]
+    assert lock_published_message.expiration == timedelta(seconds=2)
+    assert channel.default_exchange.publish.await_args_list[0].kwargs["routing_key"] == (
+        "queue-update-retry"
+    )
+
+    with patch.object(
+        run_queue_consumers.ConsumersRunner,
+        "_process",
+        new=AsyncMock(
+            side_effect=TeycaAPIError(
+                "Teyca pass update failed: status=429, body=Retry later",
+                status_code=429,
+            )
+        ),
+    ):
+        await runner._callback(rate_limit_message, run_queue_consumers.QUEUE_CREATE)
+
+    rate_limit_published_message = channel.default_exchange.publish.await_args_list[1].args[0]
+    assert rate_limit_published_message.expiration is None
+    assert channel.default_exchange.publish.await_args_list[1].kwargs["routing_key"] == (
+        "queue-create-dead"
+    )
+
+
+@pytest.mark.asyncio
 async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -469,7 +551,7 @@ async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> N
 @pytest.mark.asyncio
 async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -515,7 +597,7 @@ async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_consume_commit_and_rollback_paths() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -608,7 +690,7 @@ async def test_consumers_runner_consume_commit_and_rollback_paths() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_run_and_entrypoints() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(Settings, SimpleNamespace(rabbitmq_url="amqp://x")),
+        settings=_runner_settings(),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
@@ -645,12 +727,9 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
     with (
         patch(
             "app.workers.run_queue_consumers.get_settings",
-            return_value=cast(
-                Settings,
-                SimpleNamespace(
-                    export_db_url="db",
-                    export_db_request_timeout_seconds=12.5,
-                ),
+            return_value=_runner_settings(
+                export_db_url="db",
+                export_db_request_timeout_seconds=12.5,
             ),
         ),
         patch("app.workers.run_queue_consumers.ListmonkSDKClient"),
@@ -673,15 +752,11 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
 @pytest.mark.asyncio
 async def test_consumers_runner_run_clamps_concurrency_to_db_capacity() -> None:
     runner = run_queue_consumers.ConsumersRunner(
-        settings=cast(
-            Settings,
-            SimpleNamespace(
-                rabbitmq_url="amqp://x",
-                rabbitmq_consumer_prefetch_count=10,
-                rabbitmq_consumer_max_concurrency=9,
-                database_pool_size=2,
-                database_pool_max_overflow=0,
-            ),
+        settings=_runner_settings(
+            rabbitmq_consumer_prefetch_count=10,
+            rabbitmq_consumer_max_concurrency=9,
+            database_pool_size=2,
+            database_pool_max_overflow=0,
         ),
         listmonk_client=AsyncMock(),
         teyca_client=AsyncMock(),

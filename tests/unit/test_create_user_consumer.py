@@ -7,7 +7,12 @@ import pytest
 
 from app.config import Settings
 from app.consumers.create_user import CreateConsumerDeps, handle
-from app.repositories.listmonk_users import DuplicateListmonkSubscriberIdError
+from app.mq.queues import QUEUE_CREATE
+from app.repositories.external_call_outbox import (
+    OUTBOX_OP_LISTMONK_UPSERT,
+    OUTBOX_OP_MERGE_FINALIZE,
+    OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+)
 from app.repositories.old_db import OldUserData
 
 
@@ -30,11 +35,9 @@ class _Mocks:
     users_repo: AsyncMock
     listmonk_repo: AsyncMock
     email_repair_repo: AsyncMock
+    outbox_repo: AsyncMock
     merge_repo: AsyncMock
     old_db_repo: AsyncMock
-    listmonk_client: AsyncMock
-    teyca_client: AsyncMock
-    commit_checkpoint: AsyncMock
 
 
 def _deps() -> tuple[CreateConsumerDeps, _Mocks]:
@@ -42,58 +45,46 @@ def _deps() -> tuple[CreateConsumerDeps, _Mocks]:
         users_repo=AsyncMock(),
         listmonk_repo=AsyncMock(),
         email_repair_repo=AsyncMock(),
+        outbox_repo=AsyncMock(),
         merge_repo=AsyncMock(),
         old_db_repo=AsyncMock(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
-        commit_checkpoint=AsyncMock(),
     )
     deps = CreateConsumerDeps(
-        settings=cast(
-            Settings,
-            SimpleNamespace(
-                listmonk_list_ids="1,2",
-            ),
-        ),
+        settings=cast(Settings, SimpleNamespace(listmonk_list_ids="1,2")),
         users_repo=mocks.users_repo,
         listmonk_repo=mocks.listmonk_repo,
         email_repair_repo=mocks.email_repair_repo,
+        outbox_repo=mocks.outbox_repo,
         merge_repo=mocks.merge_repo,
         old_db_repo=mocks.old_db_repo,
-        listmonk_client=mocks.listmonk_client,
-        teyca_client=mocks.teyca_client,
-        commit_checkpoint=mocks.commit_checkpoint,
     )
     return deps, mocks
 
 
 @pytest.mark.asyncio
-async def test_create_without_old_data_no_merge() -> None:
+async def test_create_without_old_data_enqueues_only_listmonk_sync() -> None:
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = False
     mocks.old_db_repo.get_user_data.return_value = None
     mocks.listmonk_repo.get_by_user_id.return_value = None
     mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
-    mocks.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
-        subscriber_id=500,
-        status="enabled",
-        list_ids=[1, 2],
-    )
 
     await handle(_payload(), deps=deps)
 
     mocks.users_repo.lock_user.assert_awaited_once_with(user_id=10, wait=False)
     mocks.old_db_repo.get_user_data.assert_awaited_once_with(phone="79039859055")
     mocks.users_repo.upsert.assert_awaited_once()
-    mocks.listmonk_client.upsert_subscriber.assert_awaited_once()
-    mocks.merge_repo.create.assert_not_awaited()
-    mocks.teyca_client.accrue_bonuses.assert_not_awaited()
-    mocks.teyca_client.update_pass_fields.assert_not_awaited()
-    mocks.listmonk_repo.set_consent_pending.assert_awaited_once_with(user_id=10)
+    mocks.outbox_repo.enqueue_latest.assert_awaited_once()
+    latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
+    assert latest_kwargs["operation"] == OUTBOX_OP_LISTMONK_UPSERT
+    assert latest_kwargs["queue_name"] == QUEUE_CREATE
+    assert latest_kwargs["payload"]["subscriber_id"] is None
+    assert latest_kwargs["payload"]["list_ids"] == [1, 2]
+    mocks.outbox_repo.enqueue_once.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_create_with_old_data_and_existing_subscriber() -> None:
+async def test_create_with_old_data_and_existing_subscriber_enqueues_merge_finalize() -> None:
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = False
     mocks.old_db_repo.get_user_data.return_value = OldUserData(
@@ -103,50 +94,33 @@ async def test_create_with_old_data_and_existing_subscriber() -> None:
     )
     mocks.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=777)
     mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
-    mocks.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
-        subscriber_id=777,
-        status="enabled",
-        list_ids=[1, 2],
-    )
+    mocks.outbox_repo.enqueue_once.return_value = True
 
     await handle(_payload(), deps=deps)
 
-    mocks.old_db_repo.get_user_data.assert_awaited_once_with(phone="79039859055")
-    mocks.listmonk_client.upsert_subscriber.assert_awaited_once()
-    call_kwargs = mocks.listmonk_client.upsert_subscriber.await_args.kwargs
-    assert call_kwargs["subscriber_id"] == 777
-    mocks.teyca_client.accrue_bonuses.assert_awaited_once()
-    mocks.teyca_client.update_pass_fields.assert_awaited_once()
-    mocks.merge_repo.create.assert_awaited_once_with(
-        user_id=10,
-        source_event_type="CREATE",
-        source_event_id=None,
-        trace_id=None,
-    )
+    latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
+    assert latest_kwargs["payload"]["subscriber_id"] == 777
+    once_kwargs = mocks.outbox_repo.enqueue_once.await_args.kwargs
+    assert once_kwargs["operation"] == OUTBOX_OP_MERGE_FINALIZE
+    assert once_kwargs["queue_name"] == QUEUE_CREATE
+    assert once_kwargs["payload"]["old_bonus_value"] == 55.0
+    assert once_kwargs["payload"]["bonus_done"] is False
+    assert once_kwargs["payload"]["key2_done"] is False
 
 
 @pytest.mark.asyncio
 async def test_create_skips_merge_if_merge_log_appears_after_old_db_prefetch() -> None:
     deps, mocks = _deps()
     mocks.merge_repo.exists.side_effect = [False, True]
-    mocks.old_db_repo.get_user_data.return_value = OldUserData(
-        bonus=55.0,
-        summ=10,
-    )
+    mocks.old_db_repo.get_user_data.return_value = OldUserData(bonus=55.0, summ=10)
     mocks.listmonk_repo.get_by_user_id.return_value = None
     mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
-    mocks.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
-        subscriber_id=500,
-        status="enabled",
-        list_ids=[1, 2],
-    )
 
     await handle(_payload(), deps=deps)
 
     mocks.old_db_repo.get_user_data.assert_awaited_once_with(phone="79039859055")
-    mocks.merge_repo.create.assert_not_awaited()
-    mocks.teyca_client.accrue_bonuses.assert_not_awaited()
-    mocks.teyca_client.update_pass_fields.assert_not_awaited()
+    mocks.outbox_repo.enqueue_latest.assert_awaited_once()
+    mocks.outbox_repo.enqueue_once.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -155,22 +129,16 @@ async def test_create_skips_merge_when_merge_already_exists() -> None:
     mocks.merge_repo.exists.return_value = True
     mocks.listmonk_repo.get_by_user_id.return_value = None
     mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
-    mocks.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
-        subscriber_id=888,
-        status="enabled",
-        list_ids=[1, 2],
-    )
 
     await handle(_payload(), deps=deps)
 
     mocks.old_db_repo.get_user_data.assert_not_awaited()
-    mocks.merge_repo.create.assert_not_awaited()
-    mocks.teyca_client.accrue_bonuses.assert_not_awaited()
-    mocks.teyca_client.update_pass_fields.assert_not_awaited()
+    mocks.outbox_repo.enqueue_latest.assert_awaited_once()
+    mocks.outbox_repo.enqueue_once.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_create_invalid_email_blocks_and_skips_listmonk() -> None:
+async def test_create_invalid_email_enqueues_block_and_skips_listmonk_sync() -> None:
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = False
     mocks.old_db_repo.get_user_data.return_value = None
@@ -178,15 +146,11 @@ async def test_create_invalid_email_blocks_and_skips_listmonk() -> None:
 
     await handle(_payload(email="bad.mail@"), deps=deps)
 
-    mocks.listmonk_client.upsert_subscriber.assert_not_awaited()
-    mocks.listmonk_repo.upsert.assert_not_awaited()
     mocks.listmonk_repo.get_other_user_ids_by_email.assert_not_awaited()
-    mocks.listmonk_repo.set_consent_pending.assert_not_awaited()
-    mocks.listmonk_repo.mark_checked.assert_not_awaited()
-    mocks.teyca_client.update_pass_fields.assert_awaited_once_with(
-        user_id=10,
-        fields={"key1": "blocked"},
-    )
+    mocks.outbox_repo.enqueue_once.assert_not_awaited()
+    latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
+    assert latest_kwargs["operation"] == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL
+    assert latest_kwargs["payload"] == {"status": "blocked"}
 
 
 @pytest.mark.asyncio
@@ -195,11 +159,6 @@ async def test_create_retry_waits_for_user_lock() -> None:
     mocks.merge_repo.exists.return_value = True
     mocks.listmonk_repo.get_by_user_id.return_value = None
     mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
-    mocks.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
-        subscriber_id=500,
-        status="enabled",
-        list_ids=[1, 2],
-    )
 
     await handle(_payload(), deps=deps, wait_for_lock=True)
 
@@ -207,55 +166,7 @@ async def test_create_retry_waits_for_user_lock() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_commits_before_external_calls() -> None:
-    deps, mocks = _deps()
-    events: list[str] = []
-    mocks.commit_checkpoint.side_effect = lambda: events.append("commit")
-    mocks.merge_repo.exists.return_value = False
-    mocks.old_db_repo.get_user_data.return_value = OldUserData(bonus=55.0, summ=10)
-    mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
-    mocks.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
-        subscriber_id=500,
-        status="enabled",
-        list_ids=[1, 2],
-    )
-    mocks.listmonk_client.upsert_subscriber.side_effect = lambda **_: (
-        events.append("listmonk")
-        or SimpleNamespace(
-            subscriber_id=500,
-            status="enabled",
-            list_ids=[1, 2],
-        )
-    )
-    mocks.teyca_client.accrue_bonuses.side_effect = lambda **_: events.append("teyca_bonus")
-
-    await handle(_payload(), deps=deps)
-
-    assert mocks.commit_checkpoint.await_count == 2
-    assert events[:4] == ["commit", "listmonk", "commit", "teyca_bonus"]
-
-
-@pytest.mark.asyncio
-async def test_create_invalid_email_blocks_and_marks_existing_subscriber() -> None:
-    deps, mocks = _deps()
-    mocks.merge_repo.exists.return_value = True
-    mocks.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=500)
-
-    await handle(_payload(email="bad"), deps=deps)
-
-    mocks.listmonk_client.upsert_subscriber.assert_not_awaited()
-    mocks.listmonk_repo.get_other_user_ids_by_email.assert_not_awaited()
-    mocks.listmonk_repo.mark_checked.assert_awaited_once_with(
-        user_id=10,
-        pending=False,
-        confirmed=False,
-        status="blocked",
-    )
-
-
-@pytest.mark.asyncio
-async def test_create_duplicate_email_schedules_repair_and_stops_retry_path() -> None:
+async def test_create_duplicate_email_schedules_repair_and_stops() -> None:
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = True
     mocks.listmonk_repo.get_by_user_id.return_value = None
@@ -264,45 +175,18 @@ async def test_create_duplicate_email_schedules_repair_and_stops_retry_path() ->
     await handle(_payload(email="duplicate@example.com"), deps=deps)
 
     assert mocks.email_repair_repo.create_pending.await_count == 2
-    mocks.email_repair_repo.create_pending.assert_any_await(
-        normalized_email="duplicate@example.com",
-        incoming_user_id=10,
-        existing_user_id=77,
-        source_event_type="CREATE",
-        source_event_id=None,
-        trace_id=None,
-    )
-    mocks.email_repair_repo.create_pending.assert_any_await(
-        normalized_email="duplicate@example.com",
-        incoming_user_id=10,
-        existing_user_id=88,
-        source_event_type="CREATE",
-        source_event_id=None,
-        trace_id=None,
-    )
-    mocks.listmonk_client.upsert_subscriber.assert_not_awaited()
-    mocks.listmonk_repo.upsert.assert_not_awaited()
-    mocks.listmonk_repo.set_consent_pending.assert_not_awaited()
-    mocks.merge_repo.create.assert_not_awaited()
+    mocks.outbox_repo.enqueue_latest.assert_not_awaited()
+    mocks.outbox_repo.enqueue_once.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_create_duplicate_subscriber_id_stops_retry_path() -> None:
+async def test_create_invalid_email_keeps_existing_mapping_for_worker_follow_up() -> None:
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = True
-    mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
-    mocks.listmonk_client.upsert_subscriber.return_value = SimpleNamespace(
-        subscriber_id=500,
-        status="enabled",
-        list_ids=[1, 2],
-    )
-    mocks.listmonk_repo.upsert.side_effect = DuplicateListmonkSubscriberIdError(
-        subscriber_id=500,
-        rows=[],
-    )
+    mocks.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=500)
 
-    await handle(_payload(), deps=deps)
+    await handle(_payload(email="bad"), deps=deps)
 
-    mocks.email_repair_repo.create_pending.assert_not_awaited()
-    mocks.listmonk_repo.set_consent_pending.assert_not_awaited()
+    latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
+    assert latest_kwargs["operation"] == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL
+    assert latest_kwargs["queue_name"] == QUEUE_CREATE

@@ -14,9 +14,12 @@ make up
 # - migrate (alembic upgrade head)
 # - app (FastAPI)
 # - consumers
+# - external-dispatcher
 # - consent-sync (периодический worker)
 # - reconcile (периодический worker)
 ```
+
+- Для безопасного локального smoke-run можно переопределить env-файл: `COMPOSE_ENV_FILE=.env.safe docker compose up -d --build`.
 
 ## Migrations
 
@@ -63,16 +66,22 @@ make test
 - `DATABASE_URL` — внешняя Postgres БД (в compose локальная postgres больше не поднимается).
 - `LOKI_URL` — URL Loki (обязателен, логирование только в Loki).
 - `LOKI_USERNAME` / `LOKI_PASSWORD` — Basic Auth для Loki.
-- `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `reconcile`, `consent-sync`).
+- `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `external-dispatcher`, `reconcile`, `consent-sync`).
+- `EXTERNAL_DISPATCHER_BATCH_SIZE` / `EXTERNAL_DISPATCHER_*` — размер пачки и backoff durable-dispatcher для внешних вызовов Listmonk/Teyca.
 - Все operational logs для диагностики нужно смотреть в Loki; `docker compose logs` не считать источником истины.
 
 ## Process Flow
 
 - Teyca шлёт `CREATE` / `UPDATE` / `DELETE` webhook в FastAPI.
 - FastAPI валидирует `Authorization`, добавляет `trace_id` / `source_event_id` и публикует сообщение в RabbitMQ.
-- `queue-consumers` читают сообщение, обновляют `users`, `listmonk_users`, `merge_log` и синхронизируют Listmonk через Python SDK.
+- `queue-consumers` читают сообщение, обновляют локальную БД и пишут durable outbox для внешних side effect'ов.
+- `external-dispatcher` читает outbox, выполняет вызовы Listmonk/Teyca и фиксирует локальный прогресс после успешного внешнего шага.
 - `consent-sync` периодически читает изменившихся подписчиков из Listmonk, подтверждает consent в Teyca и начисляет бонусы.
 - `listmonk-reconcile` восстанавливает потерянные связи `subscriber_id -> user_id`.
+
+## Rollout
+
+- Пошаговый rollout/checklist для включения `external-dispatcher` и перехода на outbox-flow: `docs/external-dispatcher-rollout.md`.
 - `email-repair` разбирает duplicate email кейсы через `email_repair_log`, определяет winner по Listmonk и очищает loser'ов локально и в Teyca.
 - `listmonk-duplicate-subscriber` запускается вручную как repair-flow для duplicate `subscriber_id` в `listmonk_users`: выбирает winner по `Listmonk attributes.user_id`, loser'ов архивирует и удаляет.
 

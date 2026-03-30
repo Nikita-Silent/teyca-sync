@@ -10,6 +10,10 @@ from sqlalchemy.exc import IntegrityError
 from app.db.models import MergeLog
 from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.email_repair_log import EmailRepairLogRepository
+from app.repositories.external_call_outbox import (
+    OUTBOX_OP_LISTMONK_UPSERT,
+    ExternalCallOutboxRepository,
+)
 from app.repositories.listmonk_user_archive import ListmonkUserArchiveRepository
 from app.repositories.listmonk_users import (
     LISTMONK_SUBSCRIBER_LOCK_NAMESPACE,
@@ -300,6 +304,94 @@ async def test_email_repair_log_repository_paths() -> None:
         scalars=lambda: SimpleNamespace(all=lambda: ["row"])
     )
     assert await repo.get_db_applied_batch(limit=10) == ["row"]
+
+
+@pytest.mark.asyncio
+async def test_external_call_outbox_repository_paths() -> None:
+    session = AsyncMock()
+    repo = ExternalCallOutboxRepository(session)
+
+    await repo.enqueue_latest(
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key="listmonk-sync:10",
+        user_id=10,
+        payload={"email": "user@example.com"},
+        trace_id="trace-1",
+        source_event_id="event-1",
+        queue_name="queue-update",
+    )
+    stmt = session.execute.await_args.args[0]
+    params = stmt.compile().params
+    assert params["operation"] == OUTBOX_OP_LISTMONK_UPSERT
+    assert params["dedupe_key"] == "listmonk-sync:10"
+    assert params["user_id"] == 10
+    assert params["trace_id"] == "trace-1"
+
+    session.execute.reset_mock()
+    session.execute.return_value = SimpleNamespace(rowcount=1)
+    assert (
+        await repo.enqueue_once(
+            operation=OUTBOX_OP_LISTMONK_UPSERT,
+            dedupe_key="listmonk-sync:11",
+            user_id=11,
+            payload={"email": "two@example.com"},
+            trace_id=None,
+            source_event_id=None,
+            queue_name="queue-update",
+        )
+        is True
+    )
+
+    session.execute.reset_mock()
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(
+                    id=1,
+                    operation=OUTBOX_OP_LISTMONK_UPSERT,
+                    dedupe_key="listmonk-sync:10",
+                    user_id=10,
+                    payload={"email": "user@example.com"},
+                    attempts=2,
+                    trace_id="trace-1",
+                    source_event_id="event-1",
+                    queue_name="queue-update",
+                    status="pending",
+                    locked_at=None,
+                    locked_by=None,
+                )
+            ]
+        )
+    )
+    claims = await repo.claim_batch(
+        operations=[OUTBOX_OP_LISTMONK_UPSERT],
+        limit=10,
+        worker_id="worker-1",
+    )
+    assert claims[0].id == 1
+    assert claims[0].attempts == 2
+
+    session.execute.reset_mock()
+    session.execute.return_value = SimpleNamespace(scalar_one_or_none=lambda: "row")
+    assert await repo.get_by_dedupe_key(dedupe_key="listmonk-sync:10") == "row"
+
+    await repo.save_progress(outbox_id=1, payload={"bonus_done": True})
+    await repo.mark_done(outbox_id=1, payload={"done": True})
+    assert (
+        await repo.mark_retry(
+            outbox_id=1,
+            attempts=25,
+            error_text="boom",
+            max_attempts=25,
+            base_delay_ms=1_000,
+            max_delay_ms=60_000,
+        )
+        == "dead"
+    )
+    await repo.release_claim(outbox_id=1, error_text="release")
+
+    session.execute.return_value = SimpleNamespace(all=lambda: [("pending", 2), ("dead", 1)])
+    assert await repo.count_by_status() == {"pending": 2, "dead": 1}
 
 
 @pytest.mark.asyncio

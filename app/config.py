@@ -18,6 +18,16 @@ class Settings(BaseSettings):
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     rabbitmq_consumer_prefetch_count: int = 4
     rabbitmq_consumer_max_concurrency: int = 4
+    rabbitmq_lock_busy_retry_base_delay_ms: int = 1_000
+    rabbitmq_lock_busy_retry_max_delay_ms: int = 30_000
+    rabbitmq_lock_busy_retry_max_retries: int = 5
+    rabbitmq_teyca_rate_limit_retry_base_delay_ms: int = 60_000
+    rabbitmq_teyca_rate_limit_retry_max_delay_ms: int = 15 * 60_000
+    rabbitmq_teyca_rate_limit_retry_max_retries: int = 10
+    external_dispatcher_batch_size: int = 100
+    external_dispatcher_retry_base_delay_ms: int = 1_000
+    external_dispatcher_retry_max_delay_ms: int = 15 * 60_000
+    external_dispatcher_max_retries: int = 25
 
     # Webhook auth
     webhook_auth_enabled: bool = True

@@ -1,4 +1,4 @@
-.PHONY: up down migrate test test-unit test-integration typecheck typecheck-tests consent-sync-once reconcile-once consumers legacy-import legacy-import-dry-run
+.PHONY: up down migrate test test-unit test-integration typecheck typecheck-tests consent-sync-once reconcile-once external-dispatcher-once consumers legacy-import legacy-import-dry-run
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
@@ -33,6 +33,9 @@ consent-sync-once:
 
 reconcile-once:
 	docker compose run --rm app python -m app.workers.run_listmonk_reconcile
+
+external-dispatcher-once:
+	docker compose run --rm app python -m app.workers.run_external_dispatcher
 
 consumers:
 	docker compose run --rm app python -m app.workers.run_queue_consumers
