@@ -122,6 +122,10 @@ async def handle(
         wait_for_lock=wait_for_lock,
     )
 
+    current_user = await deps.users_repo.get_by_user_id(user_id=user_id)
+    if "tags" not in event.pass_data.model_fields_set and current_user is not None:
+        profile["tags"] = None if current_user.tags is None else list(current_user.tags)
+
     merged_already = await deps.merge_repo.exists(user_id=user_id)
     if merged_already:
         logger.info(
