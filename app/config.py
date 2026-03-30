@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     loki_url: str | None = None
     loki_username: str | None = None
     loki_password: str | None = None
+    loki_request_timeout_seconds: float = 5.0
     log_component: str = "app"
 
 

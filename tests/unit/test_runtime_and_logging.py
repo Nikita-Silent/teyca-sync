@@ -7,12 +7,14 @@ import os
 import runpy
 from datetime import timedelta
 from pathlib import Path
+from queue import Queue
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import requests
 from aio_pika.abc import AbstractIncomingMessage
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
@@ -138,21 +140,35 @@ def test_loki_handler_and_logging_config() -> None:
     with pytest.raises(RuntimeError):
         configure_logging(loki_url=None)
 
+    session = requests.Session()
+    original_request = MagicMock(return_value=object())
+    session.request = original_request  # type: ignore[method-assign]
     loki_queue_handler = MagicMock()
     loki_queue_handler.listener = MagicMock()
     loki_queue_handler.level = logging.INFO
+    loki_queue_handler.queue = Queue()
+    loki_queue_handler.queue.put("pending-log")
+    loki_queue_handler.handler = SimpleNamespace(emitter=SimpleNamespace(session=session))
     with patch(
         "app.logging_config.logging_loki.LokiQueueHandler", return_value=loki_queue_handler
     ) as cls_mock:
-        configure_logging(loki_url="http://loki", loki_username="user", loki_password="pass")
+        configure_logging(
+            loki_url="http://loki",
+            loki_username="user",
+            loki_password="pass",
+            loki_request_timeout_seconds=7.5,
+        )
         cls_mock.assert_called_once()
         kwargs = cls_mock.call_args.kwargs
         assert kwargs["url"] == "http://loki/loki/api/v1/push"
         assert kwargs["version"] == "2"
         assert kwargs["auth"] == ("user", "pass")
         assert kwargs["tags"] == {"service": "teyca-sync", "component": "app"}
+        session.request("POST", "http://loki")
+        original_request.assert_called_once_with("POST", "http://loki", timeout=7.5)
     shutdown_logging()
     loki_queue_handler.listener.stop.assert_called()
+    assert loki_queue_handler.queue.empty() is True
 
 
 def test_add_static_fields_processor() -> None:

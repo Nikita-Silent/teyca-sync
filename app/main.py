@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         loki_url=settings.loki_url,
         loki_username=getattr(settings, "loki_username", None),
         loki_password=getattr(settings, "loki_password", None),
+        loki_request_timeout_seconds=getattr(settings, "loki_request_timeout_seconds", 5.0),
         component=getattr(settings, "log_component", "app"),
     )
     try:

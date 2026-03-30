@@ -66,6 +66,7 @@ make test
 - `DATABASE_URL` — внешняя Postgres БД (в compose локальная postgres больше не поднимается).
 - `LOKI_URL` — URL Loki (обязателен, логирование только в Loki).
 - `LOKI_USERNAME` / `LOKI_PASSWORD` — Basic Auth для Loki.
+- `LOKI_REQUEST_TIMEOUT_SECONDS` — timeout на отправку одного batched log push в Loki, чтобы worker не зависал на shutdown.
 - `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `external-dispatcher`, `reconcile`, `consent-sync`).
 - `EXTERNAL_DISPATCHER_BATCH_SIZE` / `EXTERNAL_DISPATCHER_*` — размер пачки и backoff durable-dispatcher для внешних вызовов Listmonk/Teyca.
 - `EXTERNAL_DISPATCHER_TEYCA_RATE_LIMIT_MAX_WAIT_SECONDS` — сколько dispatcher готов ждать слот Teyca limiter перед deferred retry (по умолчанию `0`, то есть без inline wait).

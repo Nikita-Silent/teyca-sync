@@ -34,6 +34,7 @@ async def _run() -> None:
         loki_url=getattr(settings, "loki_url", None),
         loki_username=getattr(settings, "loki_username", None),
         loki_password=getattr(settings, "loki_password", None),
+        loki_request_timeout_seconds=getattr(settings, "loki_request_timeout_seconds", 5.0),
         component=getattr(settings, "log_component", "listmonk-duplicate-subscriber"),
     )
     worker = build_listmonk_duplicate_subscriber_worker()

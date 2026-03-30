@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Callable
-from queue import Queue
+from queue import Empty, Queue
+from typing import Any, cast
 
 import logging_loki
+import requests
 import structlog
 from structlog.typing import EventDict, WrappedLogger
 
@@ -32,11 +34,13 @@ def configure_logging(
     loki_password: str | None = None,
     component: str = "app",
     console: bool = False,
+    loki_request_timeout_seconds: float = 5.0,
 ) -> None:
     """Configure structlog + stdlib logging with Loki as the only sink."""
     global _loki_queue_handler
     if _loki_queue_handler is not None:
         if _loki_queue_handler.listener is not None:
+            _drain_logging_queue(_loki_queue_handler.queue)
             _loki_queue_handler.listener.stop()
         _loki_queue_handler.close()
         _loki_queue_handler = None
@@ -69,6 +73,10 @@ def configure_logging(
         auth=auth,
         version="2",
     )
+    _install_loki_request_timeout(
+        loki_handler,
+        timeout_seconds=max(0.1, float(loki_request_timeout_seconds)),
+    )
     loki_handler.setFormatter(logging.Formatter("%(message)s"))
     loki_handler.setLevel(logging.INFO)
 
@@ -89,9 +97,39 @@ def shutdown_logging() -> None:
     global _loki_queue_handler
     if _loki_queue_handler is not None:
         if _loki_queue_handler.listener is not None:
+            _drain_logging_queue(_loki_queue_handler.queue)
             _loki_queue_handler.listener.stop()
         _loki_queue_handler.close()
         _loki_queue_handler = None
+
+
+def _install_loki_request_timeout(
+    loki_queue_handler: logging_loki.LokiQueueHandler,
+    *,
+    timeout_seconds: float,
+) -> None:
+    emitter = getattr(getattr(loki_queue_handler, "handler", None), "emitter", None)
+    if emitter is None:
+        return
+    session = getattr(emitter, "session", None)
+    if not isinstance(session, requests.Session):
+        return
+    original_request = cast(Callable[..., object], session.request)
+
+    def _request(method: str, url: str, **kwargs: Any) -> object:
+        kwargs.setdefault("timeout", timeout_seconds)
+        return original_request(method, url, **kwargs)
+
+    session.request = _request  # type: ignore[method-assign]
+
+
+def _drain_logging_queue(queue: object) -> None:
+    typed_queue = cast(Queue[object], queue)
+    while True:
+        try:
+            typed_queue.get_nowait()
+        except Empty:
+            return
 
 
 def _normalize_loki_url(raw_url: str) -> str:
