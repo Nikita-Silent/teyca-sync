@@ -14,7 +14,7 @@ from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
 from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkSDKClient
-from app.clients.teyca import TeycaAPIError, TeycaClient, build_teyca_client
+from app.clients.teyca import TeycaAPIError, build_teyca_client
 from app.config import Settings, get_settings
 from app.consumers.create_user import CreateConsumerDeps
 from app.consumers.create_user import handle as handle_create
@@ -37,6 +37,7 @@ from app.mq.queues import (
 )
 from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.email_repair_log import EmailRepairLogRepository
+from app.repositories.external_call_outbox import ExternalCallOutboxRepository
 from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
@@ -65,9 +66,9 @@ class ConsumersRunner:
     """Queue consumers lifecycle manager."""
 
     settings: Settings
-    listmonk_client: ListmonkSDKClient
-    teyca_client: TeycaClient
     old_db_repo: OldDBRepository
+    listmonk_client: object | None = None
+    teyca_client: object | None = None
     _process_semaphore: asyncio.Semaphore | None = None
     _channel: AbstractChannel | None = None
 
@@ -86,11 +87,9 @@ class ConsumersRunner:
                 users_repo=UsersRepository(session),
                 listmonk_repo=ListmonkUsersRepository(session),
                 email_repair_repo=EmailRepairLogRepository(session),
+                outbox_repo=ExternalCallOutboxRepository(session),
                 merge_repo=MergeLogRepository(session),
                 old_db_repo=self.old_db_repo,
-                listmonk_client=self.listmonk_client,
-                teyca_client=self.teyca_client,
-                commit_checkpoint=session.commit,
             )
             try:
                 await handle_create(payload, deps=deps, wait_for_lock=wait_for_lock)
@@ -108,11 +107,9 @@ class ConsumersRunner:
                 users_repo=UsersRepository(session),
                 listmonk_repo=ListmonkUsersRepository(session),
                 email_repair_repo=EmailRepairLogRepository(session),
+                outbox_repo=ExternalCallOutboxRepository(session),
                 merge_repo=MergeLogRepository(session),
                 old_db_repo=self.old_db_repo,
-                listmonk_client=self.listmonk_client,
-                teyca_client=self.teyca_client,
-                commit_checkpoint=session.commit,
             )
             try:
                 await handle_update(payload, deps=deps, wait_for_lock=wait_for_lock)
@@ -130,11 +127,11 @@ class ConsumersRunner:
                 listmonk_repo=ListmonkUsersRepository(session),
                 merge_repo=MergeLogRepository(session),
                 bonus_accrual_repo=BonusAccrualRepository(session),
-                listmonk_client=self.listmonk_client,
-                session=session,
+                outbox_repo=ExternalCallOutboxRepository(session),
             )
             try:
                 await handle_delete(payload, deps=deps, wait_for_lock=wait_for_lock)
+                await session.commit()
             except Exception:
                 await session.rollback()
                 raise

@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 
-from app.clients.listmonk import ListmonkSDKClient
-from app.clients.teyca import BonusOperation, TeycaClient
 from app.config import Settings
 from app.consumers.common import (
     build_listmonk_attributes,
@@ -18,12 +15,18 @@ from app.consumers.common import (
     is_valid_email,
     merge_profile_with_old_data,
 )
+from app.mq.queues import QUEUE_CREATE
 from app.repositories.email_repair_log import EmailRepairLogRepository
-from app.repositories.listmonk_users import (
-    DuplicateListmonkSubscriberIdError,
-    DuplicateListmonkUserEmailError,
-    ListmonkUsersRepository,
+from app.repositories.external_call_outbox import (
+    OUTBOX_OP_LISTMONK_UPSERT,
+    OUTBOX_OP_MERGE_FINALIZE,
+    OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+    ExternalCallOutboxRepository,
+    dedupe_key_for_invalid_email_block,
+    dedupe_key_for_listmonk_sync,
+    dedupe_key_for_merge_finalize,
 )
+from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
 from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UsersRepository
@@ -45,11 +48,9 @@ class CreateConsumerDeps:
     users_repo: UsersRepository
     listmonk_repo: ListmonkUsersRepository
     email_repair_repo: EmailRepairLogRepository
+    outbox_repo: ExternalCallOutboxRepository
     merge_repo: MergeLogRepository
     old_db_repo: OldDBRepository
-    listmonk_client: ListmonkSDKClient
-    teyca_client: TeycaClient
-    commit_checkpoint: Callable[[], Awaitable[None]] | None = None
 
 
 async def handle(
@@ -90,24 +91,22 @@ async def handle(
     target_list_ids = parse_list_ids(deps.settings.listmonk_list_ids)
     existing = await deps.listmonk_repo.get_by_user_id(user_id=user_id)
     if not is_valid_email(event.pass_data.email):
-        await _commit_checkpoint(deps)
-        await deps.teyca_client.update_pass_fields(
+        await deps.outbox_repo.enqueue_latest(
+            operation=OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+            dedupe_key=dedupe_key_for_invalid_email_block(user_id=user_id),
             user_id=user_id,
-            fields={"key1": TEYCA_KEY1_BLOCKED},
+            payload={"status": TEYCA_KEY1_BLOCKED},
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            queue_name=QUEUE_CREATE,
         )
-        if existing is not None:
-            await deps.listmonk_repo.mark_checked(
-                user_id=user_id,
-                pending=False,
-                confirmed=False,
-                status=TEYCA_KEY1_BLOCKED,
-            )
         logger.info(
-            "create_consumer_email_invalid_blocked",
+            "create_consumer_email_invalid_block_enqueued",
             user_id=user_id,
             trace_id=trace_id,
             source_event_id=source_event_id,
             email=event.pass_data.email,
+            had_existing_mapping=existing is not None,
         )
         return
 
@@ -138,93 +137,64 @@ async def handle(
         )
         return
 
-    await _commit_checkpoint(deps)
-
     logger.info(
-        "create_consumer_listmonk_upsert_start",
+        "create_consumer_listmonk_enqueue_start",
         user_id=user_id,
         trace_id=trace_id,
         source_event_id=source_event_id,
         subscriber_id=existing.subscriber_id if existing is not None else None,
     )
-    subscriber_state = await deps.listmonk_client.upsert_subscriber(
-        email=event.pass_data.email,
+    attributes = build_listmonk_attributes(event.pass_data)
+    await deps.outbox_repo.enqueue_latest(
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key=dedupe_key_for_listmonk_sync(user_id=user_id),
+        user_id=user_id,
+        payload={
+            "email": event.pass_data.email,
+            "list_ids": target_list_ids,
+            "attributes": attributes,
+            "subscriber_id": None if existing is None else int(existing.subscriber_id),
+            "event_type": event.type,
+        },
+        trace_id=trace_id,
+        source_event_id=source_event_id,
+        queue_name=QUEUE_CREATE,
+    )
+    logger.info(
+        "create_consumer_listmonk_enqueue_done",
+        user_id=user_id,
+        trace_id=trace_id,
+        source_event_id=source_event_id,
         list_ids=target_list_ids,
-        attributes=build_listmonk_attributes(event.pass_data),
-        subscriber_id=existing.subscriber_id if existing is not None else None,
     )
-    logger.info(
-        "create_consumer_listmonk_upsert_done",
-        user_id=user_id,
-        trace_id=trace_id,
-        source_event_id=source_event_id,
-        subscriber_id=subscriber_state.subscriber_id,
-        subscriber_status=subscriber_state.status,
-        list_ids=subscriber_state.list_ids,
-    )
-    try:
-        await deps.listmonk_repo.upsert(
-            user_id=user_id,
-            subscriber_id=subscriber_state.subscriber_id,
-            email=event.pass_data.email,
-            status=subscriber_state.status,
-            list_ids=subscriber_state.list_ids,
-            attributes=build_listmonk_attributes(event.pass_data),
-        )
-    except DuplicateListmonkSubscriberIdError as exc:
-        logger.error(
-            "create_consumer_duplicate_subscriber_id",
-            user_id=user_id,
-            trace_id=trace_id,
-            source_event_id=source_event_id,
-            subscriber_id=exc.subscriber_id,
-            existing_user_ids=exc.user_ids,
-        )
-        return
-    except DuplicateListmonkUserEmailError as exc:
-        for existing_user_id in exc.existing_user_ids:
-            await deps.email_repair_repo.create_pending(
-                normalized_email=exc.normalized_email,
-                incoming_user_id=user_id,
-                existing_user_id=existing_user_id,
-                source_event_type=event.type,
-                source_event_id=source_event_id,
-                trace_id=trace_id,
-            )
-        logger.error(
-            "create_consumer_duplicate_email_scheduled",
-            user_id=user_id,
-            trace_id=trace_id,
-            source_event_id=source_event_id,
-            email=exc.normalized_email,
-            existing_user_ids=exc.existing_user_ids,
-        )
-        return
 
     merge_needs_write = merge_result.merged and (old_data is not None) and old_data.has_merge_data()
-    if merge_needs_write and not merged_already:
-        await _commit_checkpoint(deps)
+    merge_enqueued = False
     if merge_needs_write and not merged_already:
         old_bonus_value = old_data.bonus if old_data is not None else None
-        if old_bonus_value is not None and old_bonus_value > 0:
-            bonus = BonusOperation.one_shot(value=str(old_bonus_value))
-            await deps.teyca_client.accrue_bonuses(user_id=user_id, bonuses=[bonus])
-        await deps.teyca_client.update_pass_fields(
+        merge_enqueued = await deps.outbox_repo.enqueue_once(
+            operation=OUTBOX_OP_MERGE_FINALIZE,
+            dedupe_key=dedupe_key_for_merge_finalize(user_id=user_id),
             user_id=user_id,
-            fields={"key2": build_merge_key2_value()},
-        )
-        await deps.merge_repo.create(
-            user_id=user_id,
-            source_event_type=event.type,
-            source_event_id=source_event_id,
+            payload={
+                "bonus_done": False,
+                "key2_done": False,
+                "merge_logged": False,
+                "old_bonus_value": old_bonus_value,
+                "merge_key2_value": build_merge_key2_value(),
+                "source_event_type": event.type,
+            },
             trace_id=trace_id,
+            source_event_id=source_event_id,
+            queue_name=QUEUE_CREATE,
         )
         logger.info(
-            "create_merge_applied",
+            "create_merge_enqueued",
             user_id=user_id,
             trace_id=trace_id,
             source_event_id=source_event_id,
             old_bonus_value=old_bonus_value,
+            enqueue_created=merge_enqueued,
         )
     else:
         logger.info(
@@ -236,20 +206,14 @@ async def handle(
             old_data_found=old_data is not None,
         )
 
-    await deps.listmonk_repo.set_consent_pending(user_id=user_id)
     logger.info(
         "create_consumer_processed",
         user_id=user_id,
         trace_id=trace_id,
         source_event_id=source_event_id,
-        merge_applied_this_event=merge_needs_write and not merged_already,
+        merge_applied_this_event=False,
         merge_log_exists_before=merged_already,
-        merge_reason=(
-            BONUS_REASON_MERGE_OLD_DB if merge_needs_write and not merged_already else "none"
-        ),
+        listmonk_sync_enqueued=True,
+        merge_enqueued=merge_enqueued,
+        merge_reason=(BONUS_REASON_MERGE_OLD_DB if merge_enqueued else "none"),
     )
-
-
-async def _commit_checkpoint(deps: CreateConsumerDeps) -> None:
-    if deps.commit_checkpoint is not None:
-        await deps.commit_checkpoint()

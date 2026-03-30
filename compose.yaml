@@ -5,7 +5,7 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       LOG_COMPONENT: migrate
     env_file:
-      - .env
+      - ${COMPOSE_ENV_FILE:-.env}
     command: alembic upgrade head
     restart: "no"
 
@@ -18,7 +18,7 @@ services:
       TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: app
     env_file:
-      - .env
+      - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -46,7 +46,7 @@ services:
       TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: consumers
     env_file:
-      - .env
+      - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -67,6 +67,31 @@ services:
       retries: 3
       start_period: 30s
 
+  external-dispatcher:
+    build: .
+    environment:
+      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
+      LOG_COMPONENT: external-dispatcher
+    env_file:
+      - ${COMPOSE_ENV_FILE:-.env}
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: /bin/sh -c 'while true; do python -m app.workers.run_external_dispatcher; sleep 5; done'
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - 'import asyncio; from app.service_health import is_heartbeat_fresh; raise SystemExit(0 if asyncio.run(is_heartbeat_fresh("external-dispatcher", max_age_seconds=90)) else 1)'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   consent-sync:
     build: .
     environment:
@@ -74,7 +99,7 @@ services:
       TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: consent-sync
     env_file:
-      - .env
+      - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -102,7 +127,7 @@ services:
       TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: reconcile
     env_file:
-      - .env
+      - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
       rabbitmq:
         condition: service_healthy
