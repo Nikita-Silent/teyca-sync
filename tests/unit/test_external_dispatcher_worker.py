@@ -5,8 +5,10 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.clients.teyca import TeycaAPIError
+from app.clients.listmonk import ListmonkSDKClient
+from app.clients.teyca import TeycaAPIError, TeycaClient, TeycaRateLimitBusyError
 from app.config import Settings
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_UPSERT,
@@ -27,6 +29,7 @@ def _settings(**overrides: object) -> Settings:
         "external_dispatcher_retry_base_delay_ms": 1_000,
         "external_dispatcher_retry_max_delay_ms": 60_000,
         "external_dispatcher_max_retries": 5,
+        "external_dispatcher_teyca_rate_limit_max_wait_seconds": 0.0,
     }
     defaults.update(overrides)
     return cast(Settings, SimpleNamespace(**defaults))
@@ -35,9 +38,9 @@ def _settings(**overrides: object) -> Settings:
 def _worker() -> ExternalDispatcherWorker:
     return ExternalDispatcherWorker(
         settings=_settings(),
-        session_factory=cast(object, AsyncMock()),
-        listmonk_client=cast(object, AsyncMock()),
-        teyca_client=cast(object, AsyncMock()),
+        session_factory=cast(async_sessionmaker[AsyncSession], AsyncMock()),
+        listmonk_client=cast(ListmonkSDKClient, AsyncMock()),
+        teyca_client=cast(TeycaClient, AsyncMock()),
         worker_id="worker-1",
     )
 
@@ -112,6 +115,7 @@ async def test_external_dispatcher_invalid_email_block_success() -> None:
     cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_awaited_once_with(
         user_id=20,
         fields={"key1": "blocked"},
+        rate_limit_max_wait_seconds=0.0,
     )
     apply_ok.assert_awaited_once_with(user_id=20, status="blocked")
     mark_done.assert_awaited_once_with(outbox_id=2)
@@ -160,7 +164,12 @@ async def test_external_dispatcher_merge_finalize_tracks_step_progress() -> None
     cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_awaited_once_with(
         user_id=30,
         fields={"key2": "merge 30.03.2026 12:00"},
+        rate_limit_max_wait_seconds=0.0,
     )
+    accrue_await_args = cast(AsyncMock, worker.teyca_client.accrue_bonuses).await_args
+    assert accrue_await_args is not None
+    accrue_kwargs = accrue_await_args.kwargs
+    assert accrue_kwargs["rate_limit_max_wait_seconds"] == 0.0
     assert save_progress.await_count == 2
     write_merge_log.assert_awaited_once_with(
         user_id=30,
@@ -168,7 +177,9 @@ async def test_external_dispatcher_merge_finalize_tracks_step_progress() -> None
         source_event_id="event-3",
         trace_id="trace-3",
     )
-    done_payload = mark_done.await_args.kwargs["payload"]
+    mark_done_await_args = mark_done.await_args
+    assert mark_done_await_args is not None
+    done_payload = mark_done_await_args.kwargs["payload"]
     assert done_payload["bonus_done"] is True
     assert done_payload["key2_done"] is True
     assert done_payload["merge_logged"] is True
@@ -204,6 +215,54 @@ async def test_external_dispatcher_process_claim_schedules_retry_on_error() -> N
         await worker._process_claim(claim=claim, metrics=metrics)
 
     mark_retry.assert_awaited_once_with(outbox_id=4, attempts=3, error_text="boom")
+    assert metrics.retried == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_process_claim_defers_when_teyca_limiter_is_busy() -> None:
+    worker = _worker()
+    claim = OutboxClaim(
+        id=5,
+        operation=OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+        dedupe_key="invalid-email-block:50",
+        user_id=50,
+        payload={"status": "blocked"},
+        attempts=0,
+        trace_id="trace-5",
+        source_event_id="event-5",
+        queue_name="queue-update",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with (
+        patch.object(
+            ExternalDispatcherWorker,
+            "_process_invalid_email_block",
+            new=AsyncMock(
+                side_effect=TeycaRateLimitBusyError(
+                    wait_seconds=12.0,
+                    max_wait_seconds=0.0,
+                    backend="redis",
+                )
+            ),
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_defer_rate_limit_busy",
+            new=AsyncMock(),
+        ) as defer_mock,
+        patch.object(ExternalDispatcherWorker, "_mark_retry", new=AsyncMock()) as mark_retry,
+    ):
+        await worker._process_claim(claim=claim, metrics=metrics)
+
+    defer_mock.assert_awaited_once_with(
+        outbox_id=5,
+        wait_seconds=12.0,
+        error_text=(
+            "Teyca rate limiter is busy: backend=redis, wait_seconds=12.000, max_wait_seconds=0.000"
+        ),
+    )
+    mark_retry.assert_not_awaited()
     assert metrics.retried == 1
 
 

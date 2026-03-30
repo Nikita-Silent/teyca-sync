@@ -33,6 +33,28 @@ class TeycaAPIError(Exception):
         return self.status_code == 429
 
 
+class TeycaRateLimitBusyError(TeycaAPIError):
+    """Raised when a caller refuses to wait for the shared Teyca limiter."""
+
+    def __init__(
+        self,
+        *,
+        wait_seconds: float,
+        max_wait_seconds: float,
+        backend: str,
+    ) -> None:
+        super().__init__(
+            
+                "Teyca rate limiter is busy: "
+                f"backend={backend}, wait_seconds={wait_seconds:.3f}, "
+                f"max_wait_seconds={max_wait_seconds:.3f}"
+            
+        )
+        self.wait_seconds = wait_seconds
+        self.max_wait_seconds = max_wait_seconds
+        self.backend = backend
+
+
 @dataclass(slots=True)
 class BonusOperation:
     """Single bonus operation payload for Teyca bonuses API."""
@@ -51,7 +73,7 @@ class BonusOperation:
 class RateLimiter(Protocol):
     """Minimal async contract shared by local and Redis limiters."""
 
-    async def acquire(self) -> None:
+    async def acquire(self, *, max_wait_seconds: float | None = None) -> None:
         """Wait until a request slot becomes available."""
 
 
@@ -78,8 +100,12 @@ class SlidingWindowRateLimiter:
             window_seconds: deque() for window_seconds, _ in limits
         }
 
-    async def acquire(self) -> None:
+    async def acquire(self, *, max_wait_seconds: float | None = None) -> None:
         """Wait until request can be executed for all configured windows."""
+        deadline: float | None = None
+        if max_wait_seconds is not None:
+            deadline = self._clock() + max(0.0, max_wait_seconds)
+
         while True:
             wait_seconds: float = 0.0
             async with self._lock:
@@ -97,6 +123,21 @@ class SlidingWindowRateLimiter:
                     for requests in self._requests_by_window.values():
                         requests.append(now)
                     return
+
+                if deadline is not None:
+                    remaining_seconds = max(0.0, deadline - now)
+                    if wait_seconds > remaining_seconds:
+                        logger.info(
+                            "teyca_rate_limiter_busy",
+                            backend="local",
+                            wait_seconds=round(wait_seconds, 3),
+                            max_wait_seconds=round(max_wait_seconds or 0.0, 3),
+                        )
+                        raise TeycaRateLimitBusyError(
+                            wait_seconds=wait_seconds,
+                            max_wait_seconds=max_wait_seconds or 0.0,
+                            backend="local",
+                        )
 
             logger.info("teyca_rate_limited", wait_seconds=round(wait_seconds, 3))
             await asyncio.sleep(wait_seconds)
@@ -164,7 +205,7 @@ return {1, 0}
         self._min_sleep_seconds = min_sleep_seconds
         self._request_id_factory = request_id_factory or (lambda: uuid4().hex)
 
-    async def acquire(self) -> None:
+    async def acquire(self, *, max_wait_seconds: float | None = None) -> None:
         """Wait until a shared request slot becomes available in Redis."""
         keys = [
             f"{self._key_prefix}:window:{int(window_seconds * 1000)}"
@@ -173,6 +214,10 @@ return {1, 0}
         args: list[str] = [self._request_id_factory(), str(len(self._limits))]
         for window_seconds, max_requests in self._limits:
             args.extend((str(int(window_seconds * 1000)), str(max_requests)))
+
+        deadline: float | None = None
+        if max_wait_seconds is not None:
+            deadline = monotonic() + max(0.0, max_wait_seconds)
 
         while True:
             try:
@@ -190,6 +235,20 @@ return {1, 0}
                 return
 
             wait_seconds = max(wait_ms / 1000.0, self._min_sleep_seconds)
+            if deadline is not None:
+                remaining_seconds = max(0.0, deadline - monotonic())
+                if wait_seconds > remaining_seconds:
+                    logger.info(
+                        "teyca_rate_limiter_busy",
+                        backend="redis",
+                        wait_seconds=round(wait_seconds, 3),
+                        max_wait_seconds=round(max_wait_seconds or 0.0, 3),
+                    )
+                    raise TeycaRateLimitBusyError(
+                        wait_seconds=wait_seconds,
+                        max_wait_seconds=max_wait_seconds or 0.0,
+                        backend="redis",
+                    )
             logger.info(
                 "teyca_rate_limited",
                 backend="redis",
@@ -218,7 +277,13 @@ class TeycaClient:
         self._client = http_client
         self._rate_limiter = rate_limiter
 
-    async def accrue_bonuses(self, *, user_id: int, bonuses: list[BonusOperation]) -> None:
+    async def accrue_bonuses(
+        self,
+        *,
+        user_id: int,
+        bonuses: list[BonusOperation],
+        rate_limit_max_wait_seconds: float | None = None,
+    ) -> None:
         """Call POST /v1/{token}/passes/{user_id}/bonuses."""
         headers = self._get_headers()
         url = f"{self._get_pass_url(user_id=user_id)}/bonuses"
@@ -232,7 +297,7 @@ class TeycaClient:
             operation_count=len(bonuses),
             payload=payload,
         )
-        await self._rate_limiter.acquire()
+        await self._rate_limiter.acquire(max_wait_seconds=rate_limit_max_wait_seconds)
 
         if self._client is None:
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -266,7 +331,13 @@ class TeycaClient:
             status_code=response.status_code,
         )
 
-    async def update_pass_fields(self, *, user_id: int, fields: dict[str, object]) -> None:
+    async def update_pass_fields(
+        self,
+        *,
+        user_id: int,
+        fields: dict[str, object],
+        rate_limit_max_wait_seconds: float | None = None,
+    ) -> None:
         """Call PUT /v1/{token}/passes/{user_id} with partial fields."""
         headers = self._get_headers()
         url = self._get_pass_url(user_id=user_id)
@@ -280,7 +351,7 @@ class TeycaClient:
             field_names=sorted(str(key) for key in fields.keys()),
             fields=fields,
         )
-        await self._rate_limiter.acquire()
+        await self._rate_limiter.acquire(max_wait_seconds=rate_limit_max_wait_seconds)
 
         if self._client is None:
             async with httpx.AsyncClient(timeout=15.0) as client:

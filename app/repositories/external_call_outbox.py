@@ -270,6 +270,28 @@ class ExternalCallOutboxRepository:
         await self._session.execute(stmt)
         return status
 
+    async def defer(
+        self,
+        *,
+        outbox_id: int,
+        delay_seconds: float,
+        error_text: str,
+    ) -> None:
+        """Release claim and make the job due again after a bounded delay."""
+        next_retry_at = datetime.now(UTC) + timedelta(seconds=max(0.0, delay_seconds))
+        stmt = (
+            update(ExternalCallOutbox)
+            .where(ExternalCallOutbox.id == outbox_id)
+            .values(
+                status=OUTBOX_STATUS_PENDING,
+                next_retry_at=next_retry_at,
+                last_error=error_text,
+                locked_at=None,
+                locked_by=None,
+            )
+        )
+        await self._session.execute(stmt)
+
     async def release_claim(self, *, outbox_id: int, error_text: str) -> None:
         """Release processing lock without consuming an attempt."""
         stmt = (

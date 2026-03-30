@@ -16,6 +16,7 @@ from app.clients.teyca import (
     SlidingWindowRateLimiter,
     TeycaAPIError,
     TeycaClient,
+    TeycaRateLimitBusyError,
     build_teyca_client,
     build_teyca_rate_limiter,
 )
@@ -341,6 +342,19 @@ async def test_teyca_sliding_window_rate_limiter_waits_when_limit_is_reached() -
 
 
 @pytest.mark.asyncio
+async def test_teyca_sliding_window_rate_limiter_can_fail_fast() -> None:
+    limiter = SlidingWindowRateLimiter(limits=((1.0, 1),), clock=lambda: 0.0)
+
+    await limiter.acquire()
+
+    with pytest.raises(TeycaRateLimitBusyError) as exc_info:
+        await limiter.acquire(max_wait_seconds=0.0)
+
+    assert exc_info.value.backend == "local"
+    assert exc_info.value.wait_seconds == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
 async def test_teyca_redis_sliding_window_rate_limiter_waits_when_limit_is_reached() -> None:
     redis_client = FakeRedisEvalClient()
     sleep_calls: list[float] = []
@@ -363,6 +377,26 @@ async def test_teyca_redis_sliding_window_rate_limiter_waits_when_limit_is_reach
 
     assert len(sleep_calls) == 1
     assert sleep_calls[0] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_teyca_redis_sliding_window_rate_limiter_can_fail_fast() -> None:
+    redis_client = FakeRedisEvalClient()
+    limiter = RedisSlidingWindowRateLimiter(
+        redis_client=cast(object, redis_client),
+        limits=((1.0, 1),),
+        key_prefix="teyca:test",
+        sleep=AsyncMock(),
+        request_id_factory=lambda: uuid4().hex,
+    )
+
+    await limiter.acquire()
+
+    with pytest.raises(TeycaRateLimitBusyError) as exc_info:
+        await limiter.acquire(max_wait_seconds=0.0)
+
+    assert exc_info.value.backend == "redis"
+    assert exc_info.value.wait_seconds == pytest.approx(1.0)
 
 
 def test_build_teyca_rate_limiter_uses_redis_when_configured() -> None:

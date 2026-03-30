@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkClientError, ListmonkSDKClient, SubscriberState
-from app.clients.teyca import BonusOperation, TeycaAPIError, TeycaClient, build_teyca_client
+from app.clients.teyca import (
+    BonusOperation,
+    TeycaAPIError,
+    TeycaClient,
+    TeycaRateLimitBusyError,
+    build_teyca_client,
+)
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.repositories.email_repair_log import EmailRepairLogRepository
@@ -121,6 +127,29 @@ class ExternalDispatcherWorker:
 
         return str(await self._run_in_session(operation))
 
+    async def _defer_rate_limit_busy(
+        self,
+        *,
+        outbox_id: int,
+        wait_seconds: float,
+        error_text: str,
+    ) -> None:
+        async def operation(session: AsyncSession) -> None:
+            repo = ExternalCallOutboxRepository(session)
+            await repo.defer(
+                outbox_id=outbox_id,
+                delay_seconds=max(wait_seconds, 0.0),
+                error_text=error_text,
+            )
+
+        await self._run_in_session(operation)
+
+    def _teyca_rate_limit_max_wait_seconds(self) -> float:
+        configured = float(
+            getattr(self.settings, "external_dispatcher_teyca_rate_limit_max_wait_seconds", 0.0)
+        )
+        return max(0.0, configured)
+
     async def run_once(self) -> int:
         batch_size = max(1, self.settings.external_dispatcher_batch_size)
         metrics = ExternalDispatcherMetrics(batch_size=batch_size)
@@ -182,6 +211,21 @@ class ExternalDispatcherWorker:
                 await self._process_merge_finalize(claim=claim, metrics=metrics)
                 return
             raise RuntimeError(f"Unsupported outbox operation: {claim.operation}")
+        except TeycaRateLimitBusyError as exc:
+            await self._defer_rate_limit_busy(
+                outbox_id=claim.id,
+                wait_seconds=exc.wait_seconds,
+                error_text=str(exc),
+            )
+            metrics.retried += 1
+            logger.warning(
+                "external_dispatcher_job_rate_limit_deferred",
+                outbox_id=claim.id,
+                operation=claim.operation,
+                wait_seconds=round(exc.wait_seconds, 3),
+                max_wait_seconds=round(exc.max_wait_seconds, 3),
+                backend=exc.backend,
+            )
         except (ListmonkClientError, TeycaAPIError, httpx.HTTPError, RuntimeError) as exc:
             status = await self._mark_retry(
                 outbox_id=claim.id,
@@ -328,7 +372,11 @@ class ExternalDispatcherWorker:
             logger.info("external_dispatcher_invalid_email_block_user_missing", outbox_id=claim.id)
             return
         status = _payload_text(claim.payload, key="status") or "blocked"
-        await self.teyca_client.update_pass_fields(user_id=claim.user_id, fields={"key1": status})
+        await self.teyca_client.update_pass_fields(
+            user_id=claim.user_id,
+            fields={"key1": status},
+            rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+        )
         await self._apply_invalid_email_block_success(user_id=claim.user_id, status=status)
         await self._mark_done(outbox_id=claim.id)
         metrics.done += 1
@@ -377,6 +425,7 @@ class ExternalDispatcherWorker:
             await self.teyca_client.accrue_bonuses(
                 user_id=claim.user_id,
                 bonuses=[BonusOperation.one_shot(value=str(old_bonus_value))],
+                rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
             )
             payload["bonus_done"] = True
             await self._save_progress(outbox_id=claim.id, payload=payload)
@@ -385,6 +434,7 @@ class ExternalDispatcherWorker:
             await self.teyca_client.update_pass_fields(
                 user_id=claim.user_id,
                 fields={"key2": _payload_text(payload, key="merge_key2_value")},
+                rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
             )
             payload["key2_done"] = True
             await self._save_progress(outbox_id=claim.id, payload=payload)

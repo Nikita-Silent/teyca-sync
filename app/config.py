@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     external_dispatcher_retry_base_delay_ms: int = 1_000
     external_dispatcher_retry_max_delay_ms: int = 15 * 60_000
     external_dispatcher_max_retries: int = 25
+    external_dispatcher_teyca_rate_limit_max_wait_seconds: float = 0.0
 
     # Webhook auth
     webhook_auth_enabled: bool = True

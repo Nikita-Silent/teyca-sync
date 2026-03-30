@@ -68,6 +68,7 @@ make test
 - `LOKI_USERNAME` / `LOKI_PASSWORD` — Basic Auth для Loki.
 - `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `external-dispatcher`, `reconcile`, `consent-sync`).
 - `EXTERNAL_DISPATCHER_BATCH_SIZE` / `EXTERNAL_DISPATCHER_*` — размер пачки и backoff durable-dispatcher для внешних вызовов Listmonk/Teyca.
+- `EXTERNAL_DISPATCHER_TEYCA_RATE_LIMIT_MAX_WAIT_SECONDS` — сколько dispatcher готов ждать слот Teyca limiter перед deferred retry (по умолчанию `0`, то есть без inline wait).
 - Все operational logs для диагностики нужно смотреть в Loki; `docker compose logs` не считать источником истины.
 
 ## Process Flow

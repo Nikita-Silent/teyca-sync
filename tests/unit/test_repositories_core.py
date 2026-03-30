@@ -388,6 +388,7 @@ async def test_external_call_outbox_repository_paths() -> None:
         )
         == "dead"
     )
+    await repo.defer(outbox_id=1, delay_seconds=12.5, error_text="rate limited")
     await repo.release_claim(outbox_id=1, error_text="release")
 
     session.execute.return_value = SimpleNamespace(all=lambda: [("pending", 2), ("dead", 1)])
