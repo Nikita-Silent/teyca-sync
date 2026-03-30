@@ -83,6 +83,7 @@ make test
 ## Rollout
 
 - Пошаговый rollout/checklist для включения `external-dispatcher` и перехода на outbox-flow: `docs/external-dispatcher-rollout.md`.
+- Нормализация production RabbitMQ volume и pre-deploy checks: `docs/rabbitmq-volume-normalization.md`.
 - `email-repair` разбирает duplicate email кейсы через `email_repair_log`, определяет winner по Listmonk и очищает loser'ов локально и в Teyca.
 - `listmonk-duplicate-subscriber` запускается вручную как repair-flow для duplicate `subscriber_id` в `listmonk_users`: выбирает winner по `Listmonk attributes.user_id`, loser'ов архивирует и удаляет.
 
