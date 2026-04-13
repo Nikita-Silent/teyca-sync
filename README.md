@@ -14,7 +14,9 @@ make up
 # - migrate (alembic upgrade head)
 # - app (FastAPI)
 # - consumers
-# - external-dispatcher
+# - external-dispatcher-listmonk
+# - external-dispatcher-merge
+# - external-dispatcher-invalid-email
 # - consent-sync (периодический worker)
 # - reconcile (периодический worker)
 ```
@@ -67,7 +69,7 @@ make test
 - `LOKI_URL` — URL Loki (обязателен, логирование только в Loki).
 - `LOKI_USERNAME` / `LOKI_PASSWORD` — Basic Auth для Loki.
 - `LOKI_REQUEST_TIMEOUT_SECONDS` — timeout на отправку одного batched log push в Loki, чтобы worker не зависал на shutdown.
-- `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `external-dispatcher`, `reconcile`, `consent-sync`).
+- `LOG_COMPONENT` — label `component` для Loki (`app`, `consumers`, `external-dispatcher-listmonk`, `external-dispatcher-merge`, `external-dispatcher-invalid-email`, `reconcile`, `consent-sync`).
 - `EXTERNAL_DISPATCHER_BATCH_SIZE` / `EXTERNAL_DISPATCHER_*` — размер пачки и backoff durable-dispatcher для внешних вызовов Listmonk/Teyca.
 - `EXTERNAL_DISPATCHER_TEYCA_RATE_LIMIT_MAX_WAIT_SECONDS` — сколько dispatcher готов ждать слот Teyca limiter перед deferred retry (по умолчанию `0`, то есть без inline wait).
 - Все operational logs для диагностики нужно смотреть в Loki; `docker compose logs` не считать источником истины.
@@ -77,13 +79,15 @@ make test
 - Teyca шлёт `CREATE` / `UPDATE` / `DELETE` webhook в FastAPI.
 - FastAPI валидирует `Authorization`, добавляет `trace_id` / `source_event_id` и публикует сообщение в RabbitMQ.
 - `queue-consumers` читают сообщение, обновляют локальную БД и пишут durable outbox для внешних side effect'ов.
-- `external-dispatcher` читает outbox, выполняет вызовы Listmonk/Teyca и фиксирует локальный прогресс после успешного внешнего шага.
+- `external-dispatcher-listmonk` читает Listmonk-операции outbox и фиксирует локальный прогресс после успешного внешнего шага.
+- `external-dispatcher-merge` читает `merge_finalize` из outbox и больше не делит FIFO c Listmonk-операциями.
+- `external-dispatcher-invalid-email` читает `teyca_block_invalid_email` из outbox отдельно от Listmonk-операций.
 - `consent-sync` периодически читает изменившихся подписчиков из Listmonk, подтверждает consent в Teyca и начисляет бонусы.
 - `listmonk-reconcile` восстанавливает потерянные связи `subscriber_id -> user_id`.
 
 ## Rollout
 
-- Пошаговый rollout/checklist для включения `external-dispatcher` и перехода на outbox-flow: `docs/external-dispatcher-rollout.md`.
+- Пошаговый rollout/checklist для включения dispatcher worker'ов и перехода на outbox-flow: `docs/external-dispatcher-rollout.md`.
 - Нормализация production RabbitMQ volume и pre-deploy checks: `docs/rabbitmq-volume-normalization.md`.
 - `email-repair` разбирает duplicate email кейсы через `email_repair_log`, определяет winner по Listmonk и очищает loser'ов локально и в Teyca.
 - `listmonk-duplicate-subscriber` запускается вручную как repair-flow для duplicate `subscriber_id` в `listmonk_users`: выбирает winner по `Listmonk attributes.user_id`, loser'ов архивирует и удаляет.

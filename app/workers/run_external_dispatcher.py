@@ -1,6 +1,9 @@
 """Run one iteration of external side effects dispatcher."""
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Sequence
 
 import httpx
 import structlog
@@ -15,45 +18,61 @@ from app.workers.external_dispatcher_worker import build_external_dispatcher_wor
 logger = structlog.get_logger()
 
 
-async def _safe_write_heartbeat(extra: dict[str, object]) -> None:
+async def _safe_write_heartbeat(service_name: str, extra: dict[str, object]) -> None:
     try:
-        await write_heartbeat("external-dispatcher", extra=extra)
+        await write_heartbeat(service_name, extra=extra)
     except Exception as exc:
         logger.warning(
             "external_dispatcher_heartbeat_write_failed",
             error=str(exc),
             error_type=type(exc).__name__,
+            service_name=service_name,
             stage=extra.get("stage"),
         )
 
 
-async def _run() -> None:
+async def _run(
+    *,
+    service_name: str = "external-dispatcher",
+    operations: Sequence[str] | None = None,
+) -> None:
     settings = get_settings()
     configure_logging(
         loki_url=getattr(settings, "loki_url", None),
         loki_username=getattr(settings, "loki_username", None),
         loki_password=getattr(settings, "loki_password", None),
         loki_request_timeout_seconds=getattr(settings, "loki_request_timeout_seconds", 5.0),
-        component="external-dispatcher",
+        component=getattr(settings, "log_component", service_name),
     )
-    worker = build_external_dispatcher_worker()
+    worker = build_external_dispatcher_worker(
+        operations=operations,
+        worker_id_prefix=service_name,
+    )
     try:
-        await _safe_write_heartbeat({"stage": "started"})
+        await _safe_write_heartbeat(service_name, {"stage": "started"})
         task = asyncio.create_task(worker.run_once())
         try:
             while not task.done():
-                await _safe_write_heartbeat({"stage": "in_progress"})
+                await _safe_write_heartbeat(service_name, {"stage": "in_progress"})
                 try:
                     await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
                 except TimeoutError:
                     continue
             processed = await task
-            await _safe_write_heartbeat({"stage": "completed", "processed": processed})
-            logger.info("external_dispatcher_run_completed", processed=processed)
+            await _safe_write_heartbeat(
+                service_name,
+                {"stage": "completed", "processed": processed},
+            )
+            logger.info(
+                "external_dispatcher_run_completed",
+                processed=processed,
+                service_name=service_name,
+            )
         except (ListmonkClientError, TeycaAPIError, httpx.HTTPError) as exc:
-            await _safe_write_heartbeat({"stage": "failed"})
+            await _safe_write_heartbeat(service_name, {"stage": "failed"})
             logger.error(
                 "external_dispatcher_run_failed",
+                service_name=service_name,
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
@@ -68,8 +87,12 @@ async def _run() -> None:
         shutdown_logging()
 
 
+def run_main(*, service_name: str, operations: Sequence[str] | None = None) -> None:
+    asyncio.run(_run(service_name=service_name, operations=operations))
+
+
 def main() -> None:
-    asyncio.run(_run())
+    run_main(service_name="external-dispatcher")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -41,12 +41,17 @@ from app.repositories.users import UsersRepository
 
 logger = structlog.get_logger()
 
-DEFAULT_OUTBOX_OPERATIONS = [
+LISTMONK_OUTBOX_OPERATIONS = (
     OUTBOX_OP_LISTMONK_UPSERT,
     OUTBOX_OP_LISTMONK_DELETE,
-    OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
-    OUTBOX_OP_MERGE_FINALIZE,
-]
+)
+INVALID_EMAIL_OUTBOX_OPERATIONS = (OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,)
+MERGE_OUTBOX_OPERATIONS = (OUTBOX_OP_MERGE_FINALIZE,)
+DEFAULT_OUTBOX_OPERATIONS = (
+    *LISTMONK_OUTBOX_OPERATIONS,
+    *INVALID_EMAIL_OUTBOX_OPERATIONS,
+    *MERGE_OUTBOX_OPERATIONS,
+)
 
 
 @dataclass(slots=True)
@@ -68,6 +73,7 @@ class ExternalDispatcherWorker:
     listmonk_client: ListmonkSDKClient
     teyca_client: TeycaClient
     worker_id: str
+    operations: tuple[str, ...]
 
     async def _run_in_session(
         self,
@@ -86,7 +92,7 @@ class ExternalDispatcherWorker:
         async def operation(session: AsyncSession) -> list[OutboxClaim]:
             repo = ExternalCallOutboxRepository(session)
             return await repo.claim_batch(
-                operations=DEFAULT_OUTBOX_OPERATIONS,
+                operations=list(self.operations),
                 limit=limit,
                 worker_id=self.worker_id,
             )
@@ -556,12 +562,18 @@ def _normalize_merge_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_external_dispatcher_worker() -> ExternalDispatcherWorker:
+def build_external_dispatcher_worker(
+    *,
+    operations: Sequence[str] | None = None,
+    worker_id_prefix: str = "external-dispatcher",
+) -> ExternalDispatcherWorker:
     settings = get_settings()
+    configured_operations = tuple(dict.fromkeys(operations or DEFAULT_OUTBOX_OPERATIONS))
     return ExternalDispatcherWorker(
         settings=settings,
         session_factory=SessionLocal,
         listmonk_client=ListmonkSDKClient(settings),
         teyca_client=build_teyca_client(settings),
-        worker_id=f"external-dispatcher:{uuid4().hex}",
+        worker_id=f"{worker_id_prefix}:{uuid4().hex}",
+        operations=configured_operations,
     )

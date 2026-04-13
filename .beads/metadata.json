@@ -1,7 +1,7 @@
 {
   "database": "dolt",
-  "jsonl_export": "issues.jsonl",
   "backend": "dolt",
   "dolt_mode": "server",
-  "dolt_database": "beads_teyca-sync"
+  "dolt_database": "beads_teyca-sync",
+  "project_id": "79d09bbb-339a-4f61-8892-4b6c5692a238"
 }

@@ -18,6 +18,8 @@ from app.repositories.external_call_outbox import (
 )
 from app.workers import run_external_dispatcher
 from app.workers.external_dispatcher_worker import (
+    DEFAULT_OUTBOX_OPERATIONS,
+    MERGE_OUTBOX_OPERATIONS,
     ExternalDispatcherMetrics,
     ExternalDispatcherWorker,
 )
@@ -35,13 +37,14 @@ def _settings(**overrides: object) -> Settings:
     return cast(Settings, SimpleNamespace(**defaults))
 
 
-def _worker() -> ExternalDispatcherWorker:
+def _worker(*, operations: tuple[str, ...] = DEFAULT_OUTBOX_OPERATIONS) -> ExternalDispatcherWorker:
     return ExternalDispatcherWorker(
         settings=_settings(),
         session_factory=cast(async_sessionmaker[AsyncSession], AsyncMock()),
         listmonk_client=cast(ListmonkSDKClient, AsyncMock()),
         teyca_client=cast(TeycaClient, AsyncMock()),
         worker_id="worker-1",
+        operations=operations,
     )
 
 
@@ -56,6 +59,36 @@ async def test_external_dispatcher_run_once_no_pending_jobs() -> None:
 
     assert processed == 0
     logger.info.assert_called_once_with("external_dispatcher_no_pending_jobs", batch_size=10)
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_claim_batch_uses_worker_operations() -> None:
+    worker = _worker(operations=MERGE_OUTBOX_OPERATIONS)
+    repo = AsyncMock()
+    repo.claim_batch.return_value = []
+
+    async def run_in_session(operation: object) -> list[OutboxClaim]:
+        session = AsyncMock()
+        claims = await cast(object, operation)(session)
+        repo.claim_batch.assert_awaited_once_with(
+            operations=list(MERGE_OUTBOX_OPERATIONS),
+            limit=3,
+            worker_id="worker-1",
+        )
+        return cast(list[OutboxClaim], claims)
+
+    with patch(
+        "app.workers.external_dispatcher_worker.ExternalCallOutboxRepository",
+        return_value=repo,
+    ):
+        with patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=run_in_session),
+        ):
+            claims = await worker._claim_batch(limit=3)
+
+    assert claims == []
 
 
 @pytest.mark.asyncio
@@ -271,7 +304,7 @@ async def test_run_external_dispatcher_single_iteration_logs_completion() -> Non
     with (
         patch(
             "app.workers.run_external_dispatcher.get_settings",
-            return_value=SimpleNamespace(loki_url=None, log_component="external-dispatcher"),
+            return_value=SimpleNamespace(loki_url=None, log_component="external-dispatcher-merge"),
         ),
         patch("app.workers.run_external_dispatcher.configure_logging"),
         patch("app.workers.run_external_dispatcher.shutdown_logging"),
@@ -282,7 +315,22 @@ async def test_run_external_dispatcher_single_iteration_logs_completion() -> Non
         worker = AsyncMock()
         worker.run_once.return_value = 3
         builder.return_value = worker
-        await run_external_dispatcher._run()
+        await run_external_dispatcher._run(
+            service_name="external-dispatcher-merge",
+            operations=MERGE_OUTBOX_OPERATIONS,
+        )
 
-    logger.info.assert_called_once_with("external_dispatcher_run_completed", processed=3)
+    builder.assert_called_once_with(
+        operations=MERGE_OUTBOX_OPERATIONS,
+        worker_id_prefix="external-dispatcher-merge",
+    )
+    logger.info.assert_called_once_with(
+        "external_dispatcher_run_completed",
+        processed=3,
+        service_name="external-dispatcher-merge",
+    )
     assert heartbeat.await_count == 3
+    heartbeat.assert_any_await(
+        "external-dispatcher-merge",
+        extra={"stage": "started"},
+    )
