@@ -335,6 +335,61 @@ class ListmonkSDKClient:
         )
         return state
 
+    async def get_subscriber_profile_by_email(self, *, email: str) -> SubscriberProfile | None:
+        """Fetch full subscriber snapshot from Listmonk by normalized email."""
+        try:
+            import listmonk  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise ListmonkClientError("listmonk package is not installed") from exc
+
+        await self._ensure_login()
+        normalized_email = _normalize_email(email)
+        if not normalized_email:
+            raise ListmonkClientError("Subscriber email is required")
+        _safe_info(
+            "listmonk_get_subscriber_profile_by_email_request",
+            email=normalized_email,
+        )
+        payload = await self._sdk_call(
+            listmonk.subscriber_by_email,
+            normalized_email,
+            action="subscriber_by_email",
+        )
+        subscriber_id = _extract_subscriber_id(payload)
+        if payload is None or subscriber_id is None:
+            _safe_info(
+                "listmonk_get_subscriber_profile_by_email_done",
+                email=normalized_email,
+                found=False,
+            )
+            return None
+        state = await self.get_subscriber_state(subscriber_id=subscriber_id)
+        if state is None:
+            _safe_info(
+                "listmonk_get_subscriber_profile_by_email_done",
+                email=normalized_email,
+                found=False,
+                subscriber_id=subscriber_id,
+            )
+            return None
+        profile = SubscriberProfile(
+            subscriber_id=state.subscriber_id,
+            email=_extract_email(payload),
+            status=state.status,
+            list_ids=state.list_ids,
+            attributes=_extract_attributes(payload),
+            list_statuses=state.list_statuses,
+        )
+        _safe_info(
+            "listmonk_get_subscriber_profile_by_email_done",
+            email=normalized_email,
+            found=True,
+            subscriber_id=profile.subscriber_id,
+            status=profile.status,
+            list_ids=profile.list_ids,
+        )
+        return profile
+
     async def upsert_subscriber(
         self,
         *,

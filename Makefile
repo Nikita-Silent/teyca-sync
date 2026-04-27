@@ -1,4 +1,4 @@
-.PHONY: up down migrate test test-unit test-integration typecheck typecheck-tests consent-sync-once reconcile-once external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once consumers legacy-import legacy-import-dry-run
+.PHONY: up down migrate test test-unit test-integration typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once consumers legacy-import legacy-import-dry-run
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
@@ -33,6 +33,12 @@ consent-sync-once:
 
 reconcile-once:
 	docker compose run --rm app python -m app.workers.run_listmonk_reconcile
+
+listmonk-refresh-subscriber-ids:
+	docker compose run --rm --build app python -m app.workers.run_listmonk_refresh_subscriber_ids --batch-size "$${BATCH_SIZE:-100}" --concurrency "$${CONCURRENCY:-10}"
+
+listmonk-refresh-subscriber-ids-apply:
+	docker compose run --rm --build app python -m app.workers.run_listmonk_refresh_subscriber_ids --apply --batch-size "$${BATCH_SIZE:-100}" --concurrency "$${CONCURRENCY:-10}"
 
 external-dispatcher-once:
 	docker compose run --rm app python -m app.workers.run_external_dispatcher
