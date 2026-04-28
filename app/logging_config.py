@@ -77,6 +77,7 @@ def configure_logging(
         loki_handler,
         timeout_seconds=max(0.1, float(loki_request_timeout_seconds)),
     )
+    _install_loki_error_suppression(loki_handler)
     loki_handler.setFormatter(logging.Formatter("%(message)s"))
     loki_handler.setLevel(logging.INFO)
 
@@ -121,6 +122,22 @@ def _install_loki_request_timeout(
         return original_request(method, url, **kwargs)
 
     session.request = _request  # type: ignore[method-assign]
+
+
+def _install_loki_error_suppression(
+    loki_queue_handler: logging_loki.LokiQueueHandler,
+) -> None:
+    loki_handler = getattr(loki_queue_handler, "handler", None)
+    if loki_handler is None:
+        return
+
+    def _handle_error(_: logging.LogRecord) -> None:
+        emitter = getattr(loki_handler, "emitter", None)
+        close = getattr(emitter, "close", None)
+        if callable(close):
+            close()
+
+    loki_handler.handleError = _handle_error  # type: ignore[method-assign]
 
 
 def _drain_logging_queue(queue: object) -> None:

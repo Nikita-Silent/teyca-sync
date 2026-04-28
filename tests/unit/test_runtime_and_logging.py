@@ -148,7 +148,10 @@ def test_loki_handler_and_logging_config() -> None:
     loki_queue_handler.level = logging.INFO
     loki_queue_handler.queue = Queue()
     loki_queue_handler.queue.put("pending-log")
-    loki_queue_handler.handler = SimpleNamespace(emitter=SimpleNamespace(session=session))
+    emitter_close = MagicMock()
+    loki_queue_handler.handler = SimpleNamespace(
+        emitter=SimpleNamespace(session=session, close=emitter_close)
+    )
     with patch(
         "app.logging_config.logging_loki.LokiQueueHandler", return_value=loki_queue_handler
     ) as cls_mock:
@@ -166,6 +169,12 @@ def test_loki_handler_and_logging_config() -> None:
         assert kwargs["tags"] == {"service": "teyca-sync", "component": "app"}
         session.request("POST", "http://loki")
         original_request.assert_called_once_with("POST", "http://loki", timeout=7.5)
+        with patch("logging.Handler.handleError") as base_handle_error:
+            loki_queue_handler.handler.handleError(
+                logging.LogRecord("x", logging.INFO, "", 1, "x", (), None)
+            )
+            emitter_close.assert_called_once()
+            base_handle_error.assert_not_called()
     shutdown_logging()
     loki_queue_handler.listener.stop.assert_called()
     assert loki_queue_handler.queue.empty() is True
