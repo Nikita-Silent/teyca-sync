@@ -7,6 +7,7 @@ import structlog
 
 from app.clients.listmonk import ListmonkClientError
 from app.config import get_settings
+from app.db.session import wait_for_database
 from app.logging_config import configure_logging, shutdown_logging
 from app.service_health import write_heartbeat
 from app.workers.listmonk_reconcile_worker import build_listmonk_reconcile_worker
@@ -35,6 +36,7 @@ async def _run() -> None:
         loki_request_timeout_seconds=getattr(settings, "loki_request_timeout_seconds", 5.0),
         component=getattr(settings, "log_component", "reconcile"),
     )
+    await wait_for_database()
     worker = build_listmonk_reconcile_worker()
     try:
         await _safe_write_heartbeat({"stage": "started"})

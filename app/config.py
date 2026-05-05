@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +23,8 @@ class Settings(BaseSettings):
     rabbitmq_lock_busy_retry_base_delay_ms: int = 1_000
     rabbitmq_lock_busy_retry_max_delay_ms: int = 30_000
     rabbitmq_lock_busy_retry_max_retries: int = 5
+    # Set > 0 to enable DLX on main queues (requires manual queue deletion first).
+    rabbitmq_main_queue_max_delivery_count: int = 0
     rabbitmq_teyca_rate_limit_retry_base_delay_ms: int = 60_000
     rabbitmq_teyca_rate_limit_retry_max_delay_ms: int = 15 * 60_000
     rabbitmq_teyca_rate_limit_retry_max_retries: int = 10
@@ -29,6 +33,7 @@ class Settings(BaseSettings):
     external_dispatcher_retry_max_delay_ms: int = 15 * 60_000
     external_dispatcher_max_retries: int = 25
     external_dispatcher_teyca_rate_limit_max_wait_seconds: float = 0.0
+    external_dispatcher_stale_claim_seconds: float = 300.0
 
     # Webhook auth
     webhook_auth_enabled: bool = True
@@ -43,6 +48,8 @@ class Settings(BaseSettings):
     teyca_rate_limit_redis_url: str = ""
     teyca_rate_limit_redis_prefix: str = "teyca-rate-limit"
     teyca_allow_local_rate_limiter: bool = False
+    teyca_request_max_retries: int = 2
+    teyca_request_retry_backoff_seconds: float = 1.0
 
     # Old DB (read-only, merge)
     export_db_url: str = ""
@@ -56,7 +63,7 @@ class Settings(BaseSettings):
     listmonk_request_timeout_seconds: float = 15.0
     listmonk_request_max_retries: int = 2
     listmonk_request_retry_backoff_seconds: float = 0.5
-    consent_bonus_amount: str = "100.0"
+    consent_bonus_amount: Decimal = Decimal("100.0")
     consent_bonus_ttl_days: int = 30
     consent_sync_batch_size: int = 500
 

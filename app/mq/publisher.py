@@ -38,16 +38,21 @@ class MQPublisher:
         source_event_id = to_optional_str(payload.get("source_event_id"))
         user_id = _extract_user_id(payload)
         body = json.dumps(payload).encode()
-        await channel.default_exchange.publish(
-            Message(
-                body=body,
-                content_type="application/json",
-                correlation_id=trace_id,
-                message_id=source_event_id,
-                timestamp=datetime.now(UTC),
-            ),
-            routing_key=queue_name,
-        )
+        try:
+            await channel.default_exchange.publish(
+                Message(
+                    body=body,
+                    content_type="application/json",
+                    correlation_id=trace_id,
+                    message_id=source_event_id,
+                    timestamp=datetime.now(UTC),
+                ),
+                routing_key=queue_name,
+            )
+        except Exception:
+            self._channel = None
+            self._declared_queues.clear()
+            raise
         logger.info(
             "mq_published",
             queue_name=queue_name,

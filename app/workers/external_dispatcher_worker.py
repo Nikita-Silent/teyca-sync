@@ -156,7 +156,21 @@ class ExternalDispatcherWorker:
         )
         return max(0.0, configured)
 
+    async def _release_stale_claims(self) -> int:
+        stale_seconds = float(
+            getattr(self.settings, "external_dispatcher_stale_claim_seconds", 300.0)
+        )
+
+        async def operation(session: AsyncSession) -> int:
+            repo = ExternalCallOutboxRepository(session)
+            return await repo.release_stale_processing_claims(stale_after_seconds=stale_seconds)
+
+        return int(await self._run_in_session(operation))
+
     async def run_once(self) -> int:
+        stale_count = await self._release_stale_claims()
+        if stale_count:
+            logger.warning("external_dispatcher_stale_claims_released", count=stale_count)
         batch_size = max(1, self.settings.external_dispatcher_batch_size)
         metrics = ExternalDispatcherMetrics(batch_size=batch_size)
         claims = await self._claim_batch(limit=batch_size)

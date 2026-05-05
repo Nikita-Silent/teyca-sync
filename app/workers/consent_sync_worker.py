@@ -261,7 +261,8 @@ class ConsentSyncWorker:
         accrual_repo: BonusAccrualRepository | None = None,
         subscriber_override: SubscriberState | None = None,
         metrics: ConsentSyncMetrics | None = None,
-    ) -> None:
+    ) -> bool:
+        """Process one pending user. Returns True when it is safe to advance the watermark."""
         user_id = int(pending.user_id)
         subscriber_id = int(pending.subscriber_id)
         idempotency_key = f"{BONUS_REASON_EMAIL_CONSENT}:{user_id}"
@@ -291,11 +292,12 @@ class ConsentSyncWorker:
                     user_id=user_id,
                     subscriber_id=subscriber_id,
                 )
-                return
+                return True
 
             normalized_status = subscriber.status.strip().lower()
             blocked_in_targets = subscriber.has_blocked_for_any(target_list_ids=target_list_ids)
             if normalized_status in {"blocked", "blocklisted", "blacklisted"} or blocked_in_targets:
+                teyca_success = True
                 try:
                     await self.teyca_client.update_pass_fields(
                         user_id=user_id,
@@ -317,6 +319,7 @@ class ConsentSyncWorker:
                         status=subscriber.status,
                     )
                 except TeycaAPIError as exc:
+                    teyca_success = False
                     await self._mark_checked(
                         user_id=user_id,
                         subscriber_id=subscriber_id,
@@ -332,7 +335,7 @@ class ConsentSyncWorker:
                         subscriber_id=subscriber_id,
                         error=str(exc),
                     )
-                return
+                return teyca_success
 
             confirmed = subscriber.is_confirmed_for_all(target_list_ids=target_list_ids)
             if not confirmed:
@@ -351,7 +354,7 @@ class ConsentSyncWorker:
                     subscriber_id=subscriber_id,
                     status="unconfirmed",
                 )
-                return
+                return True
 
             reserved = await self._reserve_operation(
                 user_id=user_id,
@@ -385,10 +388,10 @@ class ConsentSyncWorker:
                     status=subscriber.status,
                     listmonk_repo=listmonk_repo,
                 )
-                return
+                return False
 
             bonus_operation = BonusOperation.one_shot(
-                value=self.settings.consent_bonus_amount,
+                value=str(self.settings.consent_bonus_amount),
             )
             payload = _normalize_progress_payload(
                 raw_payload=saved_payload,
@@ -447,6 +450,7 @@ class ConsentSyncWorker:
                     bonus_done=payload["bonus_done"],
                     key1_done=payload["key1_done"],
                 )
+                return True
             except TeycaAPIError as exc:
                 await self._save_progress(
                     idempotency_key=idempotency_key,
@@ -472,6 +476,7 @@ class ConsentSyncWorker:
                     bonus_done=payload["bonus_done"],
                     key1_done=payload["key1_done"],
                 )
+                return False
         finally:
             log_contextvars.unbind_contextvars("trace_id", "source_event_id", "user_id")
 
@@ -500,11 +505,10 @@ class ConsentSyncWorker:
             if not deltas:
                 continue
 
-            last_updated_at: datetime | None = None
-            last_subscriber_id: int | None = None
+            last_success_updated_at: datetime | None = watermark_updated_at
+            last_success_subscriber_id: int | None = watermark_subscriber_id
+            stopped_early = False
             for delta in deltas:
-                last_updated_at = delta.updated_at
-                last_subscriber_id = delta.subscriber_id
                 try:
                     mapped = await self._get_mapped_pending_user(subscriber_id=delta.subscriber_id)
                 except DuplicateListmonkSubscriberIdError as exc:
@@ -515,11 +519,8 @@ class ConsentSyncWorker:
                         list_id=list_id,
                         user_ids=exc.user_ids,
                     )
-                    await self._update_watermark(
-                        list_id=list_id,
-                        updated_at=last_updated_at,
-                        subscriber_id=last_subscriber_id,
-                    )
+                    last_success_updated_at = delta.updated_at
+                    last_success_subscriber_id = delta.subscriber_id
                     continue
                 if mapped is None:
                     metrics.unmapped_subscribers += 1
@@ -528,32 +529,45 @@ class ConsentSyncWorker:
                         subscriber_id=delta.subscriber_id,
                         list_id=list_id,
                     )
-                    await self._update_watermark(
-                        list_id=list_id,
-                        updated_at=last_updated_at,
-                        subscriber_id=last_subscriber_id,
-                    )
+                    last_success_updated_at = delta.updated_at
+                    last_success_subscriber_id = delta.subscriber_id
                     continue
 
                 processed += 1
-                await self._process_pending_user(
+                success = await self._process_pending_user(
                     pending=mapped,
                     target_list_ids=target_list_ids,
                     subscriber_override=_delta_to_state(delta),
                     metrics=metrics,
                 )
+                if success:
+                    last_success_updated_at = delta.updated_at
+                    last_success_subscriber_id = delta.subscriber_id
+                else:
+                    stopped_early = True
+                    logger.warning(
+                        "consent_sync_stopping_on_failure",
+                        list_id=list_id,
+                        subscriber_id=delta.subscriber_id,
+                    )
+                    break
+
+            if last_success_subscriber_id != watermark_subscriber_id:
                 await self._update_watermark(
                     list_id=list_id,
-                    updated_at=last_updated_at,
-                    subscriber_id=last_subscriber_id,
+                    updated_at=last_success_updated_at,
+                    subscriber_id=last_success_subscriber_id,
                 )
 
             logger.info(
                 "consent_sync_list_processed",
                 list_id=list_id,
                 deltas=len(deltas),
-                watermark_updated_at=last_updated_at.isoformat() if last_updated_at else None,
-                watermark_subscriber_id=last_subscriber_id,
+                stopped_early=stopped_early,
+                watermark_updated_at=last_success_updated_at.isoformat()
+                if last_success_updated_at
+                else None,
+                watermark_subscriber_id=last_success_subscriber_id,
             )
         logger.info(
             "consent_sync_metrics",

@@ -306,6 +306,29 @@ class ExternalCallOutboxRepository:
         )
         await self._session.execute(stmt)
 
+    async def release_stale_processing_claims(
+        self,
+        *,
+        stale_after_seconds: float = 300.0,
+    ) -> int:
+        """Reset PROCESSING claims stuck longer than stale_after_seconds back to PENDING."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=max(1.0, stale_after_seconds))
+        stmt = (
+            update(ExternalCallOutbox)
+            .where(
+                ExternalCallOutbox.status == OUTBOX_STATUS_PROCESSING,
+                ExternalCallOutbox.locked_at.is_not(None),
+                ExternalCallOutbox.locked_at < cutoff,
+            )
+            .values(
+                status=OUTBOX_STATUS_PENDING,
+                locked_at=None,
+                locked_by=None,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return int(getattr(result, "rowcount", 0) or 0)
+
     async def count_by_status(self) -> dict[str, int]:
         """Return aggregated counts grouped by status."""
         stmt = select(ExternalCallOutbox.status, func.count(ExternalCallOutbox.id)).group_by(

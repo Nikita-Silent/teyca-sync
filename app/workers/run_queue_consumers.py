@@ -228,7 +228,16 @@ class ConsumersRunner:
             correlation_id=getattr(message, "correlation_id", None),
             delivery_tag=getattr(message, "delivery_tag", None),
         )
-        await message.ack()
+        try:
+            await message.ack()
+        except Exception as ack_exc:
+            logger.warning(
+                "consumer_message_ack_failed_after_lock_retry_publish",
+                queue_name=queue_name,
+                user_id=user_id,
+                error=str(ack_exc),
+                message_id=getattr(message, "message_id", None),
+            )
 
     async def _schedule_rate_limit_retry(
         self,
@@ -297,7 +306,15 @@ class ConsumersRunner:
             correlation_id=getattr(message, "correlation_id", None),
             delivery_tag=getattr(message, "delivery_tag", None),
         )
-        await message.ack()
+        try:
+            await message.ack()
+        except Exception as ack_exc:
+            logger.warning(
+                "consumer_message_ack_failed_after_rate_limit_retry_publish",
+                queue_name=queue_name,
+                error=str(ack_exc),
+                message_id=getattr(message, "message_id", None),
+            )
 
     async def _callback(self, message: AbstractIncomingMessage, queue_name: str) -> None:
         try:
@@ -396,9 +413,29 @@ class ConsumersRunner:
         self._process_semaphore = asyncio.Semaphore(max_concurrency)
         heartbeat_task = _start_heartbeat_task("consumers", interval_seconds=15)
 
-        queue_create = await channel.declare_queue(QUEUE_CREATE, durable=True)
-        queue_update = await channel.declare_queue(QUEUE_UPDATE, durable=True)
-        queue_delete = await channel.declare_queue(QUEUE_DELETE, durable=True)
+        max_delivery_count = max(
+            0,
+            int(getattr(self.settings, "rabbitmq_main_queue_max_delivery_count", 0)),
+        )
+
+        def _main_queue_args(dead_queue: str) -> dict[str, Any] | None:
+            if max_delivery_count <= 0:
+                return None
+            return {
+                "x-dead-letter-exchange": "",
+                "x-dead-letter-routing-key": dead_queue,
+                "x-max-delivery-count": max_delivery_count,
+            }
+
+        queue_create = await channel.declare_queue(
+            QUEUE_CREATE, durable=True, arguments=_main_queue_args(QUEUE_CREATE_DEAD)
+        )
+        queue_update = await channel.declare_queue(
+            QUEUE_UPDATE, durable=True, arguments=_main_queue_args(QUEUE_UPDATE_DEAD)
+        )
+        queue_delete = await channel.declare_queue(
+            QUEUE_DELETE, durable=True, arguments=_main_queue_args(QUEUE_DELETE_DEAD)
+        )
         await channel.declare_queue(
             QUEUE_CREATE_RETRY,
             durable=True,

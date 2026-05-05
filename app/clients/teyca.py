@@ -277,6 +277,59 @@ class TeycaClient:
         self._client = http_client
         self._rate_limiter = rate_limiter
 
+    async def _execute(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        action: str,
+    ) -> httpx.Response:
+        """Execute an HTTP request with retry for transient errors and 5xx responses."""
+        max_retries = max(0, int(getattr(self._settings, "teyca_request_max_retries", 2)))
+        backoff = max(0.0, float(getattr(self._settings, "teyca_request_retry_backoff_seconds", 1.0)))
+        attempt = 0
+        while True:
+            try:
+                if self._client is None:
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        response = await getattr(client, method)(url, json=json, headers=headers)
+                else:
+                    response = await getattr(self._client, method)(url, json=json, headers=headers)
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+                if attempt >= max_retries:
+                    raise
+                logger.warning(
+                    "teyca_request_retry",
+                    action=action,
+                    url=url,
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                attempt += 1
+                if backoff > 0:
+                    await asyncio.sleep(backoff * attempt)
+                continue
+
+            if response.status_code >= 500 and attempt < max_retries:
+                logger.warning(
+                    "teyca_request_retry",
+                    action=action,
+                    url=url,
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    status_code=response.status_code,
+                )
+                attempt += 1
+                if backoff > 0:
+                    await asyncio.sleep(backoff * attempt)
+                continue
+
+            return response
+
     async def accrue_bonuses(
         self,
         *,
@@ -298,12 +351,7 @@ class TeycaClient:
             payload=payload,
         )
         await self._rate_limiter.acquire(max_wait_seconds=rate_limit_max_wait_seconds)
-
-        if self._client is None:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(url, json=payload, headers=headers)
-        else:
-            response = await self._client.post(url, json=payload, headers=headers)
+        response = await self._execute("post", url, json=payload, headers=headers, action="accrue_bonuses")
 
         if response.status_code >= 400:
             logger.error(
@@ -352,12 +400,7 @@ class TeycaClient:
             fields=fields,
         )
         await self._rate_limiter.acquire(max_wait_seconds=rate_limit_max_wait_seconds)
-
-        if self._client is None:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.put(url, json=fields, headers=headers)
-        else:
-            response = await self._client.put(url, json=fields, headers=headers)
+        response = await self._execute("put", url, json=fields, headers=headers, action="update_pass_fields")
 
         if response.status_code >= 400:
             logger.error(
