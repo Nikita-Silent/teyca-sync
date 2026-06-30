@@ -11,9 +11,9 @@ import structlog
 from aio_pika.exceptions import CONNECTION_EXCEPTIONS
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from starlette.requests import ClientDisconnect
 from pydantic import ValidationError
 from sqlalchemy import text
+from starlette.requests import ClientDisconnect
 
 from app.api.auth import verify_webhook_token
 from app.config import get_settings
@@ -106,7 +106,11 @@ async def webhook(
     try:
         body = await request.json()
     except ClientDisconnect:
-        logger.debug("webhook_client_disconnected", trace_id=trace_id, source_event_id=source_event_id)
+        logger.debug(
+            "webhook_client_disconnected",
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+        )
         return {"ok": True}
     except JSONDecodeError as exc:
         logger.warning(

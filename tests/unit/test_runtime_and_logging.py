@@ -847,6 +847,7 @@ async def test_run_single_iteration_workers_log() -> None:
     with (
         patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder,
         patch("app.workers.run_consent_sync.logger") as logger,
+        patch("app.workers.run_consent_sync.wait_for_database", new=AsyncMock()),
         patch("app.workers.run_consent_sync.write_heartbeat", new=AsyncMock()) as heartbeat_mock,
     ):
         worker = AsyncMock()
@@ -859,6 +860,7 @@ async def test_run_single_iteration_workers_log() -> None:
     with (
         patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder,
         patch("app.workers.run_listmonk_reconcile.logger") as logger,
+        patch("app.workers.run_listmonk_reconcile.wait_for_database", new=AsyncMock()),
         patch(
             "app.workers.run_listmonk_reconcile.write_heartbeat", new=AsyncMock()
         ) as heartbeat_mock,
@@ -877,6 +879,7 @@ async def test_worker_heartbeat_failures_are_best_effort() -> None:
     with (
         patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder,
         patch("app.workers.run_consent_sync.logger") as logger,
+        patch("app.workers.run_consent_sync.wait_for_database", new=AsyncMock()),
         patch("app.workers.run_consent_sync.write_heartbeat", new=heartbeat_mock),
     ):
         worker = AsyncMock()
@@ -890,6 +893,7 @@ async def test_worker_heartbeat_failures_are_best_effort() -> None:
     with (
         patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder,
         patch("app.workers.run_listmonk_reconcile.logger") as logger,
+        patch("app.workers.run_listmonk_reconcile.wait_for_database", new=AsyncMock()),
         patch("app.workers.run_listmonk_reconcile.write_heartbeat", new=heartbeat_mock),
     ):
         worker = AsyncMock()
@@ -905,6 +909,7 @@ async def test_single_iteration_workers_handle_listmonk_transient_errors() -> No
     with (
         patch("app.workers.run_consent_sync.build_consent_sync_worker") as builder,
         patch("app.workers.run_consent_sync.logger") as logger,
+        patch("app.workers.run_consent_sync.wait_for_database", new=AsyncMock()),
         patch("app.workers.run_consent_sync.write_heartbeat", new=AsyncMock()) as heartbeat_mock,
     ):
         worker = AsyncMock()
@@ -917,6 +922,7 @@ async def test_single_iteration_workers_handle_listmonk_transient_errors() -> No
     with (
         patch("app.workers.run_listmonk_reconcile.build_listmonk_reconcile_worker") as builder,
         patch("app.workers.run_listmonk_reconcile.logger") as logger,
+        patch("app.workers.run_listmonk_reconcile.wait_for_database", new=AsyncMock()),
         patch(
             "app.workers.run_listmonk_reconcile.write_heartbeat", new=AsyncMock()
         ) as heartbeat_mock,

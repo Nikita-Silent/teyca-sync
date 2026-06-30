@@ -80,7 +80,7 @@ class RateLimiter(Protocol):
 class AsyncRedisEvalClient(Protocol):
     """Minimal Redis contract required by the distributed limiter."""
 
-    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Any:
+    async def eval(self, script: str, numkeys: int, *_keys_and_args: str) -> Any:
         """Execute the limiter Lua script."""
 
 
@@ -288,7 +288,10 @@ class TeycaClient:
     ) -> httpx.Response:
         """Execute an HTTP request with retry for transient errors and 5xx responses."""
         max_retries = max(0, int(getattr(self._settings, "teyca_request_max_retries", 2)))
-        backoff = max(0.0, float(getattr(self._settings, "teyca_request_retry_backoff_seconds", 1.0)))
+        backoff = max(
+            0.0,
+            float(getattr(self._settings, "teyca_request_retry_backoff_seconds", 1.0)),
+        )
         attempt = 0
         while True:
             try:
@@ -351,7 +354,13 @@ class TeycaClient:
             payload=payload,
         )
         await self._rate_limiter.acquire(max_wait_seconds=rate_limit_max_wait_seconds)
-        response = await self._execute("post", url, json=payload, headers=headers, action="accrue_bonuses")
+        response = await self._execute(
+            "post",
+            url,
+            json=payload,
+            headers=headers,
+            action="accrue_bonuses",
+        )
 
         if response.status_code >= 400:
             logger.error(
@@ -400,7 +409,13 @@ class TeycaClient:
             fields=fields,
         )
         await self._rate_limiter.acquire(max_wait_seconds=rate_limit_max_wait_seconds)
-        response = await self._execute("put", url, json=fields, headers=headers, action="update_pass_fields")
+        response = await self._execute(
+            "put",
+            url,
+            json=fields,
+            headers=headers,
+            action="update_pass_fields",
+        )
 
         if response.status_code >= 400:
             logger.error(
@@ -481,5 +496,5 @@ def _build_redis_key_prefix(settings: Settings) -> str:
         f"{str(getattr(settings, 'teyca_base_url', '')).rstrip('/')}"
         f"|{str(getattr(settings, 'teyca_token', ''))}"
     )
-    namespace_hash = sha1(raw_namespace.encode("utf-8")).hexdigest()[:12]
+    namespace_hash = sha1(raw_namespace.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
     return f"{configured_prefix}:{namespace_hash}"

@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from app.api.auth import verify_webhook_token
 from app.clients.teyca import (
+    AsyncRedisEvalClient,
     BonusOperation,
     RedisSlidingWindowRateLimiter,
     SlidingWindowRateLimiter,
@@ -364,7 +365,7 @@ async def test_teyca_redis_sliding_window_rate_limiter_waits_when_limit_is_reach
         redis_client.now_ms += int(seconds * 1000)
 
     limiter = RedisSlidingWindowRateLimiter(
-        redis_client=cast(object, redis_client),
+        redis_client=cast(AsyncRedisEvalClient, redis_client),
         limits=((1.0, 2),),
         key_prefix="teyca:test",
         sleep=fake_sleep,
@@ -383,7 +384,7 @@ async def test_teyca_redis_sliding_window_rate_limiter_waits_when_limit_is_reach
 async def test_teyca_redis_sliding_window_rate_limiter_can_fail_fast() -> None:
     redis_client = FakeRedisEvalClient()
     limiter = RedisSlidingWindowRateLimiter(
-        redis_client=cast(object, redis_client),
+        redis_client=cast(AsyncRedisEvalClient, redis_client),
         limits=((1.0, 1),),
         key_prefix="teyca:test",
         sleep=AsyncMock(),

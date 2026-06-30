@@ -189,7 +189,8 @@ async def handle(
         return
 
     valid_email = event.pass_data.email
-    assert valid_email is not None
+    if valid_email is None:
+        raise ValueError("valid email expected after validation")
     _log_step(
         "update_consumer_email_conflict_check_start",
         user_id=user_id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
@@ -52,6 +53,11 @@ def _worker(*, operations: tuple[str, ...] = DEFAULT_OUTBOX_OPERATIONS) -> Exter
 async def test_external_dispatcher_run_once_no_pending_jobs() -> None:
     worker = _worker()
     with (
+        patch.object(
+            ExternalDispatcherWorker,
+            "_release_stale_claims",
+            new=AsyncMock(return_value=0),
+        ),
         patch.object(ExternalDispatcherWorker, "_claim_batch", new=AsyncMock(return_value=[])),
         patch("app.workers.external_dispatcher_worker.logger") as logger,
     ):
@@ -67,9 +73,11 @@ async def test_external_dispatcher_claim_batch_uses_worker_operations() -> None:
     repo = AsyncMock()
     repo.claim_batch.return_value = []
 
-    async def run_in_session(operation: object) -> list[OutboxClaim]:
+    async def run_in_session(
+        operation: Callable[[AsyncSession], Awaitable[list[OutboxClaim]]],
+    ) -> list[OutboxClaim]:
         session = AsyncMock()
-        claims = await cast(object, operation)(session)
+        claims = await operation(cast(AsyncSession, session))
         repo.claim_batch.assert_awaited_once_with(
             operations=list(MERGE_OUTBOX_OPERATIONS),
             limit=3,
@@ -308,6 +316,7 @@ async def test_run_external_dispatcher_single_iteration_logs_completion() -> Non
         ),
         patch("app.workers.run_external_dispatcher.configure_logging"),
         patch("app.workers.run_external_dispatcher.shutdown_logging"),
+        patch("app.workers.run_external_dispatcher.wait_for_database", new=AsyncMock()),
         patch("app.workers.run_external_dispatcher.build_external_dispatcher_worker") as builder,
         patch("app.workers.run_external_dispatcher.logger") as logger,
         patch("app.workers.run_external_dispatcher.write_heartbeat", new=AsyncMock()) as heartbeat,

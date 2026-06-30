@@ -111,7 +111,8 @@ async def handle(
         return
 
     valid_email = event.pass_data.email
-    assert valid_email is not None
+    if valid_email is None:
+        raise ValueError("valid email expected after validation")
     conflicting_user_ids = await deps.listmonk_repo.get_other_user_ids_by_email(
         user_id=user_id,
         email=valid_email,

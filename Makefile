@@ -1,8 +1,19 @@
-.PHONY: up down migrate test test-unit test-integration typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once consumers legacy-import legacy-import-dry-run
+.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once consumers legacy-import legacy-import-dry-run
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
 BASEDPYRIGHT ?= ./.venv/bin/basedpyright
+RUFF ?= ./.venv/bin/ruff
+VULTURE ?= ./.venv/bin/vulture
+DEPTRY ?= ./.venv/bin/deptry
+BANDIT ?= ./.venv/bin/bandit
+INTERROGATE ?= ./.venv/bin/interrogate
+RADON ?= ./.venv/bin/radon
+XENON ?= ./.venv/bin/xenon
+REFURB ?= ./.venv/bin/refurb
+HEARTBEAT_DIR ?= /tmp/teyca-sync-heartbeat
+COVERAGE_FAIL_UNDER ?= 80
+QUALITY_TIMEOUT_SECONDS ?= 300
 
 up:
 	docker compose up -d --build
@@ -14,13 +25,70 @@ migrate:
 	docker compose run --rm --build app alembic upgrade head
 
 test:
-	$(PYTHON) -m pytest tests/ -v
+	HEARTBEAT_DIR=$(HEARTBEAT_DIR) $(PYTHON) -m pytest tests/ -v
 
 test-unit:
-	$(PYTEST) tests/unit/ -v
+	HEARTBEAT_DIR=$(HEARTBEAT_DIR) $(PYTEST) tests/unit/ -v
 
 test-integration:
-	$(PYTEST) tests/integration/ -v
+	HEARTBEAT_DIR=$(HEARTBEAT_DIR) $(PYTEST) tests/integration/ -v
+
+coverage:
+	HEARTBEAT_DIR=$(HEARTBEAT_DIR) $(PYTEST) tests/ -v --cov=app --cov-report=term-missing --cov-report=html --cov-fail-under=$(COVERAGE_FAIL_UNDER)
+
+lint:
+	$(RUFF) check .
+
+complexity:
+	$(RUFF) check app tests --select C901,PLR0911,PLR0912,PLR0915
+	$(RADON) cc app tests -s -a
+	$(XENON) --max-absolute B --max-modules A --max-average A app tests
+
+deadcode:
+	$(VULTURE) app tests --min-confidence 80
+
+deps-audit:
+	$(DEPTRY) app --config pyproject.toml
+
+security:
+	$(BANDIT) -r app -c pyproject.toml
+
+docs-coverage:
+	$(INTERROGATE) app
+
+refurb-check:
+	$(REFURB) app tests
+
+quality:
+	$(MAKE) lint
+	$(MAKE) typecheck
+	$(MAKE) typecheck-tests
+	$(MAKE) complexity
+	$(MAKE) deadcode
+	$(MAKE) deps-audit
+	$(MAKE) security
+	$(MAKE) docs-coverage
+	$(MAKE) refurb-check
+	$(MAKE) coverage
+
+quality-report:
+	@status=0; \
+	for check in \
+		"$(MAKE) lint" \
+		"$(MAKE) typecheck" \
+		"$(MAKE) typecheck-tests" \
+		"$(MAKE) complexity" \
+		"$(MAKE) deadcode" \
+		"$(MAKE) deps-audit" \
+		"$(MAKE) security" \
+		"$(MAKE) docs-coverage" \
+		"$(MAKE) refurb-check" \
+		"$(MAKE) coverage"; \
+	do \
+		printf '\n===== %s =====\n' "$$check"; \
+		if ! timeout $(QUALITY_TIMEOUT_SECONDS) $$check; then status=1; fi; \
+	done; \
+	exit $$status
 
 typecheck:
 	$(BASEDPYRIGHT)

@@ -97,14 +97,16 @@ class OldDBRepository:
             return None
         query_params: dict[str, object] = {"phone_last10": phone_last10}
 
-        query = text(
-            f"""
-            SELECT {", ".join(selected_columns)}
-            FROM users
-            WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = :phone_last10
-            LIMIT 1
-            """
-        )
+        # selected_columns is limited to the fixed field_aliases whitelist above.
+        columns_sql = ", ".join(selected_columns)
+        query_sql = (  # nosec B608
+            "SELECT __selected_columns__ "
+            "FROM users "
+            "WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) "
+            "= :phone_last10 "
+            "LIMIT 1"
+        ).replace("__selected_columns__", columns_sql)
+        query = text(query_sql)
         try:
             async with self._engine.connect() as conn:
                 result = await asyncio.wait_for(

@@ -45,6 +45,14 @@ make test
 ./.venv/bin/basedpyright
 ./.venv/bin/basedpyright --project pyrightconfig.tests.json
 make test
+make coverage
+make complexity
+make deadcode
+make deps-audit
+make security
+make docs-coverage
+make refurb-check
+make quality-report
 ```
 
 Перед любым коммитом обязательны как минимум:
@@ -59,6 +67,15 @@ make test
 - `basedpyright` — основной type check в режиме `basic` по `app/` и `migrations/`.
 - `basedpyright --project pyrightconfig.tests.json` — отдельный rollout для типизации `tests/`; это не основной gate runtime-кода.
 - `make test` — полный unit/integration набор, доступный в текущем репозитории.
+- `make coverage` — pytest с `pytest-cov` и порогом `COVERAGE_FAIL_UNDER` (по умолчанию `80`).
+- `make complexity` — CCN/branch/statement checks через `ruff`, `radon`, `xenon`.
+- `make deadcode` — поиск потенциально мёртвого кода через `vulture`.
+- `make deps-audit` — проверка зависимостей через `deptry`.
+- `make security` — статический security scan через `bandit`.
+- `make docs-coverage` — покрытие docstring'ами через `interrogate`.
+- `make refurb-check` — дополнительные modernization/refactor замечания через `refurb`.
+- `make quality-report` — запускает все quality checks подряд и собирает общий список падений.
+- `lefthook` — pre-commit запускает `ruff`, pre-push запускает `make quality-report`.
 
 ## Env
 

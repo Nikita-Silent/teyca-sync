@@ -1,0 +1,14 @@
+pre-commit:
+  parallel: true
+  commands:
+    ruff:
+      glob: "*.py"
+      run: ./.venv/bin/ruff check {staged_files}
+    ruff-format:
+      glob: "*.py"
+      run: ./.venv/bin/ruff format --check {staged_files}
+
+pre-push:
+  commands:
+    quality-report:
+      run: make quality-report
