@@ -45,10 +45,8 @@ class Settings(BaseSettings):
     teyca_base_url: str = "https://api.teyca.ru"
     teyca_api_key: str = ""
     teyca_token: str = ""
-    teyca_rate_limit_redis_url: str = ""
-    teyca_rate_limit_redis_prefix: str = "teyca-rate-limit"
-    teyca_allow_local_rate_limiter: bool = False
-    # Real Teyca limits, outgoing requests only (webhooks don't count).
+    # Real Teyca limits, outgoing requests only (webhooks don't count). Enforced
+    # by a Postgres budget table (teyca_call_budget), not Redis.
     teyca_rate_limit_per_second: int = 5
     teyca_rate_limit_per_minute: int = 50
     teyca_rate_limit_per_hour: int = 500

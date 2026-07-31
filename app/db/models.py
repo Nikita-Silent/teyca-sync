@@ -230,3 +230,22 @@ class ExternalCallOutbox(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class TeycaCallBudget(Base):
+    """Counter row per rate-limit window for outgoing Teyca calls (teyca-sync-3al).
+
+    Replaces the Redis/local sliding-window limiter: the limit becomes a
+    reservation against a fixed-size budget instead of a blocking wait, so an
+    exhausted window fails fast (defer, don't sleep) and survives restarts /
+    multiple worker processes. `window_kind` is one of second/minute/hour/day.
+    """
+
+    __tablename__ = "teyca_call_budget"
+
+    window_kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True
+    )

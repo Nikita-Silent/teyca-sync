@@ -68,6 +68,9 @@ async def test_external_dispatcher_run_once_no_pending_jobs() -> None:
             "_release_stale_claims",
             new=AsyncMock(return_value=0),
         ),
+        patch.object(
+            ExternalDispatcherWorker, "_teyca_budget_remaining", new=AsyncMock(return_value=100)
+        ),
         patch.object(ExternalDispatcherWorker, "_claim_batch", new=AsyncMock(return_value=[])),
         patch("app.workers.external_dispatcher_worker.logger") as logger,
     ):
@@ -75,6 +78,31 @@ async def test_external_dispatcher_run_once_no_pending_jobs() -> None:
 
     assert processed == 0
     logger.info.assert_called_once_with("external_dispatcher_no_pending_jobs", batch_size=10)
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_run_once_skips_claim_when_budget_exhausted() -> None:
+    """teyca-sync-3al: an exhausted budget must not even attempt to claim rows."""
+    worker = _worker()
+    with (
+        patch.object(
+            ExternalDispatcherWorker,
+            "_release_stale_claims",
+            new=AsyncMock(return_value=0),
+        ),
+        patch.object(
+            ExternalDispatcherWorker, "_teyca_budget_remaining", new=AsyncMock(return_value=0)
+        ),
+        patch.object(ExternalDispatcherWorker, "_claim_batch", new=AsyncMock()) as claim_batch,
+        patch("app.workers.external_dispatcher_worker.logger") as logger,
+    ):
+        processed = await worker.run_once()
+
+    assert processed == 0
+    claim_batch.assert_not_awaited()
+    logger.info.assert_called_once_with(
+        "external_dispatcher_budget_exhausted", batch_size=10, remaining_budget=0
+    )
 
 
 @pytest.mark.asyncio
@@ -898,6 +926,9 @@ async def test_run_once_combines_new_client_merge_and_consent_into_two_teyca_cal
             ExternalDispatcherWorker, "_release_stale_claims", new=AsyncMock(return_value=0)
         ),
         patch.object(
+            ExternalDispatcherWorker, "_teyca_budget_remaining", new=AsyncMock(return_value=100)
+        ),
+        patch.object(
             ExternalDispatcherWorker,
             "_apply_listmonk_upsert_success",
             new=AsyncMock(return_value=ListmonkUpsertOutcome(mapped=True)),
@@ -1004,7 +1035,7 @@ async def test_external_dispatcher_process_claim_defers_when_teyca_limiter_is_bu
         patch.object(
             ExternalDispatcherWorker,
             "_defer_rate_limit_busy",
-            new=AsyncMock(),
+            new=AsyncMock(return_value="pending"),
         ) as defer_mock,
         patch.object(ExternalDispatcherWorker, "_mark_retry", new=AsyncMock()) as mark_retry,
     ):
@@ -1012,6 +1043,7 @@ async def test_external_dispatcher_process_claim_defers_when_teyca_limiter_is_bu
 
     defer_mock.assert_awaited_once_with(
         outbox_id=5,
+        attempts=1,
         wait_seconds=12.0,
         error_text=(
             "Teyca rate limiter is busy: backend=redis, wait_seconds=12.000, max_wait_seconds=0.000"
@@ -1019,6 +1051,57 @@ async def test_external_dispatcher_process_claim_defers_when_teyca_limiter_is_bu
     )
     mark_retry.assert_not_awaited()
     assert metrics.retried == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_process_claim_dead_letters_after_defer_cap() -> None:
+    """teyca-sync-3al: rate-limit defers must consume attempts and cap out,
+    otherwise a persistently-busy budget window defers a job forever."""
+    worker = _worker()
+    claim = OutboxClaim(
+        id=6,
+        operation=OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+        dedupe_key="invalid-email-block:60",
+        user_id=60,
+        payload={"status": "blocked"},
+        attempts=4,
+        trace_id="trace-6",
+        source_event_id="event-6",
+        queue_name="queue-update",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with (
+        patch.object(
+            ExternalDispatcherWorker,
+            "_process_invalid_email_block",
+            new=AsyncMock(
+                side_effect=TeycaRateLimitBusyError(
+                    wait_seconds=12.0,
+                    max_wait_seconds=0.0,
+                    backend="postgres",
+                )
+            ),
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_defer_rate_limit_busy",
+            new=AsyncMock(return_value="dead"),
+        ) as defer_mock,
+    ):
+        await worker._process_claim(claim=claim, metrics=metrics)
+
+    defer_mock.assert_awaited_once_with(
+        outbox_id=6,
+        attempts=5,
+        wait_seconds=12.0,
+        error_text=(
+            "Teyca rate limiter is busy: "
+            "backend=postgres, wait_seconds=12.000, max_wait_seconds=0.000"
+        ),
+    )
+    assert metrics.dead == 1
+    assert metrics.retried == 0
 
 
 @pytest.mark.asyncio

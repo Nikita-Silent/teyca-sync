@@ -110,27 +110,27 @@ flowchart LR
 
 ### 1.4 Зависимости процессов
 
-| Процесс | Расписание | Postgres | RabbitMQ | Redis | Listmonk | Teyca | Старая БД |
-|---|---|---|---|---|---|---|---|
-| `migrate` | one-shot при старте | запись схемы | — | — | — | — | — |
-| `app` | постоянно | только `/ready` | publish | — | — | — | — |
-| `consumers` | постоянно | чтение+запись | consume+retry | да¹ | — | — | чтение |
-| `external-dispatcher-listmonk` | цикл 5 c | чтение+запись | — | — | да | — | — |
-| `external-dispatcher-merge` | цикл 5 c | чтение+запись | — | да | — | да | — |
-| `external-dispatcher-invalid-email` | цикл 5 c | чтение+запись | — | да | — | да | — |
-| `consent-sync` | цикл 60 c | чтение+запись | — | да | да | да | — |
-| `reconcile` | цикл 300 c | чтение+запись | — | — | да | — | — |
+| Процесс | Расписание | Postgres | RabbitMQ | Listmonk | Teyca | Старая БД |
+|---|---|---|---|---|---|---|
+| `migrate` | one-shot при старте | запись схемы | — | — | — | — |
+| `app` | постоянно | только `/ready` | publish | — | — | — |
+| `consumers` | постоянно | чтение+запись | consume+retry | — | — | чтение |
+| `external-dispatcher-listmonk` | цикл 5 c | чтение+запись | — | да | — | — |
+| `external-dispatcher-merge` | цикл 5 c | чтение+запись | — | — | да | — |
+| `external-dispatcher-invalid-email` | цикл 5 c | чтение+запись | — | — | да | — |
+| `consent-sync` | цикл 60 c | чтение+запись | — | да | да | — |
+| `reconcile` | цикл 300 c | чтение+запись | — | да | — | — |
 
 ¹ `consumers` создаёт клиентов Listmonk и Teyca (`run_queue_consumers.py:573-574`) и передаёт их
 в `ConsumersRunner`, но поля `listmonk_client` / `teyca_client` нигде не читаются (`:70-71`) —
-мёртвая зависимость от прежней архитектуры. Redis нужен только этим клиентам, то есть
-`consumers` может обходиться без Redis вообще.
+мёртвая зависимость от прежней архитектуры.
 
 Прочее:
 
 - Периодичность задана не планировщиком, а shell-циклом в команде контейнера:
   `while true; do python -m ...; sleep N; done` (`compose.yaml:79`, `:101`, `:123`, `:145`, `:170`).
-- Redis — только под sliding-window rate limiter Teyca (`app/clients/teyca.py:146`).
+- Redis больше не используется (teyca-sync-3al): лимит исходящих вызовов Teyca — бюджетная
+  таблица `teyca_call_budget` в Postgres (`app/clients/teyca.py` — `PostgresCallBudgetLimiter`).
 - Healthcheck: у `app` — HTTP `/live`, у остальных — свежесть файлового heartbeat
   (`app/service_health.py:14`). Heartbeat лежит в ФС контейнера, снаружи не виден.
 - Postgres и старая БД внешние, в `compose.yaml` их нет.
@@ -472,8 +472,9 @@ email остаются не синхронизированными до ручн
   жёстко зашит 15 с (`app/clients/teyca.py:299`).
 - 429 поднимается как `TeycaAPIError.is_rate_limited`; в dispatcher'е это `defer`, в
   consumer'е — retry-очередь.
-- Свой rate limiter: sliding window в Redis, при недоступности Redis — лог
-  `teyca_rate_limiter_redis_failed`.
+- Свой rate limiter: бюджетная таблица `teyca_call_budget` в Postgres (второй/минута/час/сутки),
+  реальные лимиты 5/50/500/5000 (`teyca-sync-3al`). Исчерпание не блокирует воркер — вызов
+  сразу падает `TeycaRateLimitBusyError`, claim откладывается (`defer`, с потолком попыток).
 
 **Listmonk (только через Python SDK, прямые HTTP-вызовы запрещены):**
 

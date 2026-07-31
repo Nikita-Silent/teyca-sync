@@ -330,5 +330,5 @@ def build_duplicate_email_backfill() -> DuplicateEmailBackfill:
         settings=settings,
         session_factory=SessionLocal,
         listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=build_teyca_client(settings),
+        teyca_client=build_teyca_client(settings, session_factory=SessionLocal),
     )

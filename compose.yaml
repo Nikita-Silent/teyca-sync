@@ -15,14 +15,11 @@ services:
       - "8000:8000"
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: app
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
       rabbitmq:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -43,14 +40,11 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: consumers
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
       rabbitmq:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -70,13 +64,10 @@ services:
   external-dispatcher-listmonk:
     build: .
     environment:
-      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: external-dispatcher-listmonk
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
-      redis:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: /bin/sh -c 'while true; do python -m app.workers.run_external_dispatcher_listmonk; sleep 5; done'
@@ -95,13 +86,10 @@ services:
   external-dispatcher-merge:
     build: .
     environment:
-      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: external-dispatcher-merge
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
-      redis:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: /bin/sh -c 'while true; do python -m app.workers.run_external_dispatcher_merge; sleep 5; done'
@@ -120,13 +108,10 @@ services:
   external-dispatcher-invalid-email:
     build: .
     environment:
-      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: external-dispatcher-invalid-email
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
-      redis:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: /bin/sh -c 'while true; do python -m app.workers.run_external_dispatcher_invalid_email; sleep 5; done'
@@ -146,14 +131,11 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: consent-sync
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
       rabbitmq:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -174,14 +156,11 @@ services:
     build: .
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-      TEYCA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       LOG_COMPONENT: reconcile
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
       rabbitmq:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -208,19 +187,6 @@ services:
       - "127.0.0.1:15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_running"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
-    sysctls:
-      - vm.overcommit_memory=1
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5

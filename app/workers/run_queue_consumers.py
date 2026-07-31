@@ -571,7 +571,7 @@ async def _run() -> None:
     runner = ConsumersRunner(
         settings=settings,
         listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=build_teyca_client(settings),
+        teyca_client=build_teyca_client(settings, session_factory=SessionLocal),
         old_db_repo=OldDBRepository(
             settings.export_db_url,
             request_timeout_seconds=settings.export_db_request_timeout_seconds,

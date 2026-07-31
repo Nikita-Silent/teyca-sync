@@ -18,6 +18,7 @@ from app.clients.teyca import (
     TeycaAPIError,
     TeycaClient,
     TeycaRateLimitBusyError,
+    _build_budget_limits,
     build_teyca_client,
 )
 from app.config import Settings, get_settings
@@ -38,6 +39,7 @@ from app.repositories.listmonk_users import (
     ListmonkUsersRepository,
 )
 from app.repositories.merge_log import MergeLogRepository
+from app.repositories.teyca_call_budget import TeycaCallBudgetRepository
 from app.repositories.users import UsersRepository
 
 logger = structlog.get_logger()
@@ -160,18 +162,21 @@ class ExternalDispatcherWorker:
         self,
         *,
         outbox_id: int,
+        attempts: int,
         wait_seconds: float,
         error_text: str,
-    ) -> None:
-        async def operation(session: AsyncSession) -> None:
+    ) -> str:
+        async def operation(session: AsyncSession) -> str:
             repo = ExternalCallOutboxRepository(session)
-            await repo.defer(
+            return await repo.defer(
                 outbox_id=outbox_id,
+                attempts=attempts,
                 delay_seconds=max(wait_seconds, 0.0),
                 error_text=error_text,
+                max_attempts=max(1, self.settings.external_dispatcher_max_retries),
             )
 
-        await self._run_in_session(operation)
+        return str(await self._run_in_session(operation))
 
     def _teyca_rate_limit_max_wait_seconds(self) -> float:
         configured = float(
@@ -190,13 +195,34 @@ class ExternalDispatcherWorker:
 
         return int(await self._run_in_session(operation))
 
+    async def _teyca_budget_remaining(self) -> int:
+        async def operation(session: AsyncSession) -> int:
+            repo = TeycaCallBudgetRepository(session)
+            return await repo.get_remaining(limits=_build_budget_limits(self.settings))
+
+        return int(await self._run_in_session(operation))
+
     async def run_once(self) -> int:
         stale_count = await self._release_stale_claims()
         if stale_count:
             logger.warning("external_dispatcher_stale_claims_released", count=stale_count)
         batch_size = max(1, self.settings.external_dispatcher_batch_size)
         metrics = ExternalDispatcherMetrics(batch_size=batch_size)
-        claims = await self._claim_batch(limit=batch_size)
+
+        # Cap the claim itself by the remaining Teyca budget (teyca-sync-3al):
+        # an exhausted budget means rows are never even taken from the outbox,
+        # rather than claimed and then blocked waiting for a slot to free up.
+        remaining_budget = await self._teyca_budget_remaining()
+        effective_limit = min(batch_size, remaining_budget)
+        if effective_limit <= 0:
+            logger.info(
+                "external_dispatcher_budget_exhausted",
+                batch_size=batch_size,
+                remaining_budget=remaining_budget,
+            )
+            return 0
+
+        claims = await self._claim_batch(limit=effective_limit)
         if not claims:
             logger.info("external_dispatcher_no_pending_jobs", batch_size=batch_size)
             return 0
@@ -268,16 +294,22 @@ class ExternalDispatcherWorker:
                 return
             raise RuntimeError(f"Unsupported outbox operation: {claim.operation}")
         except TeycaRateLimitBusyError as exc:
-            await self._defer_rate_limit_busy(
+            status = await self._defer_rate_limit_busy(
                 outbox_id=claim.id,
+                attempts=claim.attempts + 1,
                 wait_seconds=exc.wait_seconds,
                 error_text=str(exc),
             )
-            metrics.retried += 1
+            if status == "dead":
+                metrics.dead += 1
+            else:
+                metrics.retried += 1
             logger.warning(
                 "external_dispatcher_job_rate_limit_deferred",
                 outbox_id=claim.id,
                 operation=claim.operation,
+                attempts=claim.attempts + 1,
+                status=status,
                 wait_seconds=round(exc.wait_seconds, 3),
                 max_wait_seconds=round(exc.max_wait_seconds, 3),
                 backend=exc.backend,
@@ -909,7 +941,7 @@ def build_external_dispatcher_worker(
         settings=settings,
         session_factory=SessionLocal,
         listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=build_teyca_client(settings),
+        teyca_client=build_teyca_client(settings, session_factory=SessionLocal),
         worker_id=f"{worker_id_prefix}:{uuid4().hex}",
         operations=configured_operations,
     )

@@ -12,6 +12,8 @@ from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_UPSERT,
+    OUTBOX_OP_MERGE_FINALIZE,
+    OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
     ExternalCallOutboxRepository,
 )
 from app.repositories.listmonk_user_archive import ListmonkUserArchiveRepository
@@ -388,11 +390,67 @@ async def test_external_call_outbox_repository_paths() -> None:
         )
         == "dead"
     )
-    await repo.defer(outbox_id=1, delay_seconds=12.5, error_text="rate limited")
+    assert (
+        await repo.defer(
+            outbox_id=1,
+            attempts=1,
+            delay_seconds=12.5,
+            error_text="rate limited",
+            max_attempts=25,
+        )
+        == "pending"
+    )
+    assert (
+        await repo.defer(
+            outbox_id=1,
+            attempts=25,
+            delay_seconds=12.5,
+            error_text="rate limited",
+            max_attempts=25,
+        )
+        == "dead"
+    )
     await repo.release_claim(outbox_id=1, error_text="release")
 
     session.execute.return_value = SimpleNamespace(all=lambda: [("pending", 2), ("dead", 1)])
     assert await repo.count_by_status() == {"pending": 2, "dead": 1}
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_orders_invalid_email_block_first() -> None:
+    """teyca-sync-3al: block-invalid-email must sort ahead of bonus/merge work
+    so a scarce Teyca budget is spent there first."""
+    session = AsyncMock()
+    repo = ExternalCallOutboxRepository(session)
+    session.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+    await repo.claim_batch(
+        operations=[OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL, OUTBOX_OP_MERGE_FINALIZE],
+        limit=10,
+        worker_id="worker-1",
+    )
+
+    stmt = session.execute.await_args.args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    order_by_clause = compiled[compiled.index("ORDER BY") :]
+    assert "CASE WHEN" in order_by_clause
+    assert order_by_clause.index("teyca_block_invalid_email") < order_by_clause.index(
+        "created_at"
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_returns_empty_without_querying_when_limit_not_positive() -> None:
+    """teyca-sync-3al: an exhausted budget claims nothing, not even limit=1."""
+    session = AsyncMock()
+    repo = ExternalCallOutboxRepository(session)
+
+    claims = await repo.claim_batch(
+        operations=[OUTBOX_OP_LISTMONK_UPSERT], limit=0, worker_id="worker-1"
+    )
+
+    assert claims == []
+    session.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

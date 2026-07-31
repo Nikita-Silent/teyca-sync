@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy import Select, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -149,10 +149,20 @@ class ExternalCallOutboxRepository:
         limit: int,
         worker_id: str,
     ) -> list[OutboxClaim]:
-        """Claim due jobs in a short transaction using SKIP LOCKED."""
-        if not operations:
+        """Claim due jobs in a short transaction using SKIP LOCKED.
+
+        Ordered by priority first (teyca-sync-3al): invalid-email blocks ahead
+        of everything else, so a scarce Teyca call budget spends itself on
+        blocking bad addresses before bonus/merge work. `limit<=0` (budget
+        exhausted) claims nothing at all rather than clamping to 1.
+        """
+        if not operations or limit <= 0:
             return []
         now = datetime.now(UTC)
+        priority = case(
+            (ExternalCallOutbox.operation == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL, 0),
+            else_=1,
+        )
         stmt: Select[tuple[ExternalCallOutbox]] = (
             select(ExternalCallOutbox)
             .where(
@@ -163,8 +173,8 @@ class ExternalCallOutboxRepository:
                     ExternalCallOutbox.next_retry_at <= now,
                 ),
             )
-            .order_by(ExternalCallOutbox.created_at.asc(), ExternalCallOutbox.id.asc())
-            .limit(max(1, limit))
+            .order_by(priority, ExternalCallOutbox.created_at.asc(), ExternalCallOutbox.id.asc())
+            .limit(limit)
             .with_for_update(skip_locked=True)
         )
         result = await self._session.execute(stmt)
@@ -274,16 +284,41 @@ class ExternalCallOutboxRepository:
         self,
         *,
         outbox_id: int,
+        attempts: int,
         delay_seconds: float,
         error_text: str,
-    ) -> None:
-        """Release claim and make the job due again after a bounded delay."""
+        max_attempts: int,
+    ) -> str:
+        """Release claim and make the job due again after a bounded delay.
+
+        Consumes an attempt and caps out at `max_attempts` (teyca-sync-3al):
+        previously a rate-limit defer never touched `attempts`, so a
+        persistently-busy budget window could defer the same job forever —
+        120 tasks sat with attempts=0 since March and would never reach dead.
+        """
+        if attempts >= max_attempts:
+            stmt = (
+                update(ExternalCallOutbox)
+                .where(ExternalCallOutbox.id == outbox_id)
+                .values(
+                    status=OUTBOX_STATUS_DEAD,
+                    attempts=attempts,
+                    next_retry_at=None,
+                    last_error=error_text,
+                    locked_at=None,
+                    locked_by=None,
+                )
+            )
+            await self._session.execute(stmt)
+            return OUTBOX_STATUS_DEAD
+
         next_retry_at = datetime.now(UTC) + timedelta(seconds=max(0.0, delay_seconds))
         stmt = (
             update(ExternalCallOutbox)
             .where(ExternalCallOutbox.id == outbox_id)
             .values(
                 status=OUTBOX_STATUS_PENDING,
+                attempts=attempts,
                 next_retry_at=next_retry_at,
                 last_error=error_text,
                 locked_at=None,
@@ -291,6 +326,7 @@ class ExternalCallOutboxRepository:
             )
         )
         await self._session.execute(stmt)
+        return OUTBOX_STATUS_PENDING
 
     async def release_claim(self, *, outbox_id: int, error_text: str) -> None:
         """Release processing lock without consuming an attempt."""
