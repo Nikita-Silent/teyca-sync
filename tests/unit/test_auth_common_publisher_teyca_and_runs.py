@@ -18,6 +18,7 @@ from app.clients.teyca import (
     TeycaAPIError,
     TeycaClient,
     TeycaRateLimitBusyError,
+    _build_rate_limits,
     build_teyca_client,
     build_teyca_rate_limiter,
 )
@@ -398,6 +399,58 @@ async def test_teyca_redis_sliding_window_rate_limiter_can_fail_fast() -> None:
 
     assert exc_info.value.backend == "redis"
     assert exc_info.value.wait_seconds == pytest.approx(1.0)
+
+
+def test_build_rate_limits_uses_real_teyca_defaults() -> None:
+    settings = SimpleNamespace()
+
+    limits = _build_rate_limits(cast(Settings, settings))
+
+    assert limits == (
+        (1.0, 5),
+        (60.0, 50),
+        (3600.0, 500),
+        (86400.0, 5000),
+    )
+
+
+def test_build_rate_limits_reads_configured_values() -> None:
+    settings = SimpleNamespace(
+        teyca_rate_limit_per_second=1,
+        teyca_rate_limit_per_minute=2,
+        teyca_rate_limit_per_hour=3,
+        teyca_rate_limit_per_day=4,
+    )
+
+    limits = _build_rate_limits(cast(Settings, settings))
+
+    assert limits == ((1.0, 1), (60.0, 2), (3600.0, 3), (86400.0, 4))
+
+
+@pytest.mark.asyncio
+async def test_teyca_sliding_window_rate_limiter_enforces_minute_window() -> None:
+    now = 0.0
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        sleep_calls.append(seconds)
+        now += seconds
+
+    limiter = SlidingWindowRateLimiter(
+        limits=((60.0, 50),),
+        clock=lambda: now,
+    )
+
+    with patch("app.clients.teyca.asyncio.sleep", side_effect=fake_sleep):
+        for _ in range(50):
+            await limiter.acquire()
+        assert not sleep_calls
+
+        await limiter.acquire()
+
+    assert sleep_calls
+    assert sleep_calls[0] == pytest.approx(60.0)
 
 
 def test_build_teyca_rate_limiter_uses_redis_when_configured() -> None:

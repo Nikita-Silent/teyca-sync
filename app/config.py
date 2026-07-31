@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     teyca_rate_limit_redis_url: str = ""
     teyca_rate_limit_redis_prefix: str = "teyca-rate-limit"
     teyca_allow_local_rate_limiter: bool = False
+    # Real Teyca limits, outgoing requests only (webhooks don't count).
+    teyca_rate_limit_per_second: int = 5
+    teyca_rate_limit_per_minute: int = 50
+    teyca_rate_limit_per_hour: int = 500
+    teyca_rate_limit_per_day: int = 5000
     teyca_request_max_retries: int = 2
     teyca_request_retry_backoff_seconds: float = 1.0
 

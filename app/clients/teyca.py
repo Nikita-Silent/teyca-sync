@@ -257,15 +257,18 @@ return {1, 0}
             await self._sleep(wait_seconds)
 
 
+def _build_rate_limits(settings: Settings) -> tuple[tuple[float, int], ...]:
+    """Read configured Teyca limits (defaults: 5/s, 50/min, 500/hour, 5000/day)."""
+    return (
+        (1.0, int(getattr(settings, "teyca_rate_limit_per_second", 5))),
+        (60.0, int(getattr(settings, "teyca_rate_limit_per_minute", 50))),
+        (3600.0, int(getattr(settings, "teyca_rate_limit_per_hour", 500))),
+        (86400.0, int(getattr(settings, "teyca_rate_limit_per_day", 5000))),
+    )
+
+
 class TeycaClient:
     """HTTP client for Teyca bonuses endpoints."""
-
-    _DEFAULT_LIMITS: tuple[tuple[float, int], ...] = (
-        (1.0, 5),
-        (60.0, 150),
-        (3600.0, 1000),
-        (86400.0, 5000),
-    )
 
     def __init__(
         self,
@@ -458,12 +461,13 @@ class TeycaClient:
 
 def build_teyca_rate_limiter(settings: Settings) -> RateLimiter:
     """Create a shared Redis-backed limiter or an explicitly allowed local one."""
+    limits = _build_rate_limits(settings)
     redis_url = str(getattr(settings, "teyca_rate_limit_redis_url", "") or "").strip()
     if redis_url:
         redis_client = cast(AsyncRedisEvalClient, Redis.from_url(redis_url))
         return RedisSlidingWindowRateLimiter(
             redis_client=redis_client,
-            limits=TeycaClient._DEFAULT_LIMITS,
+            limits=limits,
             key_prefix=_build_redis_key_prefix(settings),
         )
 
@@ -475,7 +479,7 @@ def build_teyca_rate_limiter(settings: Settings) -> RateLimiter:
         )
 
     logger.warning("teyca_rate_limiter_local_fallback_enabled")
-    return SlidingWindowRateLimiter(limits=TeycaClient._DEFAULT_LIMITS)
+    return SlidingWindowRateLimiter(limits=limits)
 
 
 def build_teyca_client(settings: Settings) -> TeycaClient:
