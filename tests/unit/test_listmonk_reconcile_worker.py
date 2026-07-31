@@ -212,7 +212,7 @@ async def test_reconcile_skips_when_email_is_ambiguous() -> None:
 async def test_reconcile_restores_deleted_subscriber_from_local_mapping() -> None:
     worker, mocks = _worker()
     mocks.listmonk_client.get_updated_subscribers.return_value = []
-    mocks.listmonk_client.get_subscriber_state.return_value = None
+    mocks.listmonk_client.get_subscriber_states_by_ids.return_value = {}
     mocks.listmonk_client.restore_subscriber.return_value = SimpleNamespace(
         subscriber_id=9999,
         status="enabled",
@@ -273,7 +273,7 @@ async def test_reconcile_restore_falls_back_to_configured_lists_when_row_list_id
     worker, mocks = _worker()
     worker.settings.listmonk_list_ids = "7,8"
     mocks.listmonk_client.get_updated_subscribers.side_effect = [[], []]
-    mocks.listmonk_client.get_subscriber_state.return_value = None
+    mocks.listmonk_client.get_subscriber_states_by_ids.return_value = {}
     mocks.listmonk_client.restore_subscriber.return_value = SimpleNamespace(
         subscriber_id=9998,
         status="enabled",
@@ -512,7 +512,7 @@ async def test_run_consistency_scan_handles_restore_error_and_live_subscriber() 
             attributes={},
         ),
     ]
-    mocks.listmonk_client.get_subscriber_state.side_effect = [SimpleNamespace(), None]
+    mocks.listmonk_client.get_subscriber_states_by_ids.return_value = {100: SimpleNamespace()}
     mocks.listmonk_client.restore_subscriber.side_effect = ListmonkClientError("boom")
 
     metrics = ReconcileMetrics(batch_size=10)
@@ -543,6 +543,67 @@ async def test_run_consistency_scan_handles_restore_error_and_live_subscriber() 
 
 
 @pytest.mark.asyncio
+async def test_run_consistency_scan_restore_error_does_not_abort_later_rows() -> None:
+    """teyca-sync-odg: a single row's restore failure must not abort the scan —
+    rows queued after it still get checked and restored in the same tick."""
+    worker, mocks = _worker()
+    rows = [
+        SimpleNamespace(
+            user_id=10,
+            subscriber_id=100,
+            email="x@y.z",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+        SimpleNamespace(
+            user_id=11,
+            subscriber_id=101,
+            email="y@z.x",
+            status="enabled",
+            list_ids="1",
+            attributes={},
+        ),
+    ]
+    mocks.listmonk_client.get_subscriber_states_by_ids.return_value = {}
+    mocks.listmonk_client.restore_subscriber.side_effect = [
+        ListmonkClientError("boom"),
+        SimpleNamespace(subscriber_id=9999, status="enabled", list_ids=[1]),
+    ]
+
+    metrics = ReconcileMetrics(batch_size=10)
+    with (
+        patch.object(
+            ListmonkReconcileWorker,
+            "_load_consistency_batch",
+            new=AsyncMock(return_value=(0, rows)),
+        ),
+        patch.object(
+            ListmonkReconcileWorker, "_apply_consistency_restore", new=AsyncMock()
+        ) as apply_restore,
+        patch.object(
+            ListmonkReconcileWorker, "_update_watermark", new=AsyncMock()
+        ) as update_watermark,
+    ):
+        await worker._run_consistency_scan(
+            metrics=metrics,
+            limit=100,
+        )
+
+    assert metrics.consistency_scanned == 2
+    assert metrics.consistency_missing == 2
+    assert metrics.consistency_errors == 1
+    assert metrics.consistency_restored == 1
+    apply_restore.assert_awaited_once()
+    update_watermark.assert_awaited_once_with(
+        source="listmonk_consistency",
+        list_id=0,
+        updated_at=None,
+        subscriber_id=11,
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_consistency_scan_reraises_unexpected_restore_error() -> None:
     worker, mocks = _worker()
     rows = [
@@ -555,7 +616,7 @@ async def test_run_consistency_scan_reraises_unexpected_restore_error() -> None:
             attributes={},
         ),
     ]
-    mocks.listmonk_client.get_subscriber_state.return_value = None
+    mocks.listmonk_client.get_subscriber_states_by_ids.return_value = {}
     mocks.listmonk_client.restore_subscriber.side_effect = RuntimeError("boom")
 
     metrics = ReconcileMetrics(batch_size=10)
@@ -582,7 +643,9 @@ async def test_run_consistency_scan_reraises_unexpected_restore_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_consistency_scan_keeps_failed_state_check_row_for_retry() -> None:
+async def test_run_consistency_scan_keeps_batch_for_retry_on_state_check_failure() -> None:
+    """teyca-sync-odg: one batched state lookup covers the whole row batch, so a
+    failure there blocks the batch (retried next tick) instead of one row."""
     worker, mocks = _worker()
     rows = [
         SimpleNamespace(
@@ -602,7 +665,7 @@ async def test_run_consistency_scan_keeps_failed_state_check_row_for_retry() -> 
             attributes={},
         ),
     ]
-    mocks.listmonk_client.get_subscriber_state.side_effect = ListmonkClientError("timeout")
+    mocks.listmonk_client.get_subscriber_states_by_ids.side_effect = ListmonkClientError("timeout")
 
     metrics = ReconcileMetrics(batch_size=10)
     with (
@@ -620,15 +683,12 @@ async def test_run_consistency_scan_keeps_failed_state_check_row_for_retry() -> 
             limit=100,
         )
 
-    assert metrics.consistency_scanned == 1
-    assert metrics.consistency_errors == 1
-    mocks.listmonk_client.get_subscriber_state.assert_awaited_once_with(subscriber_id=100)
-    update_watermark.assert_awaited_once_with(
-        source="listmonk_consistency",
-        list_id=0,
-        updated_at=None,
-        subscriber_id=7,
+    assert metrics.consistency_scanned == 2
+    assert metrics.consistency_errors == 2
+    mocks.listmonk_client.get_subscriber_states_by_ids.assert_awaited_once_with(
+        subscriber_ids=[100, 101]
     )
+    update_watermark.assert_not_awaited()
 
 
 def test_reconcile_build_and_helpers() -> None:

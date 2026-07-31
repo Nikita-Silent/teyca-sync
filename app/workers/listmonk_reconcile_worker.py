@@ -266,24 +266,30 @@ class ListmonkReconcileWorker:
             )
             return
 
+        # One batched query instead of one HTTP request per row (teyca-sync-odg):
+        # this scan used to issue up to `limit` (default 500) sequential
+        # subscriber_by_id calls to Listmonk every tick, the most expensive part
+        # of the system.
+        subscriber_ids = [int(row.subscriber_id) for row in rows]
+        try:
+            live_states = await self.listmonk_client.get_subscriber_states_by_ids(
+                subscriber_ids=subscriber_ids
+            )
+        except (ListmonkClientError, httpx.HTTPError) as exc:
+            metrics.consistency_scanned += len(rows)
+            metrics.consistency_errors += len(rows)
+            logger.error(
+                "listmonk_reconcile_state_check_batch_failed",
+                count=len(rows),
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return
+
         current_last_user_id = last_user_id
         for row in rows:
             metrics.consistency_scanned += 1
-            try:
-                state_live = await self.listmonk_client.get_subscriber_state(
-                    subscriber_id=int(row.subscriber_id)
-                )
-            except (ListmonkClientError, httpx.HTTPError) as exc:
-                metrics.consistency_errors += 1
-                logger.error(
-                    "listmonk_reconcile_state_check_failed",
-                    user_id=int(row.user_id),
-                    subscriber_id=int(row.subscriber_id),
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-                break
-            if state_live is not None:
+            if int(row.subscriber_id) in live_states:
                 current_last_user_id = int(row.user_id)
                 continue
 
@@ -300,6 +306,9 @@ class ListmonkReconcileWorker:
                     desired_status=row.status,
                 )
             except (ListmonkClientError, httpx.HTTPError, ValueError) as exc:
+                # A single row's failure must not abort the rest of the scan
+                # (teyca-sync-odg) — skip it and keep the watermark behind it so
+                # the next round-robin pass retries it.
                 metrics.consistency_errors += 1
                 logger.error(
                     "listmonk_reconcile_restore_failed",
@@ -308,7 +317,7 @@ class ListmonkReconcileWorker:
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
-                break
+                continue
 
             await self._apply_consistency_restore(row=row, restored=restored)
             metrics.consistency_restored += 1

@@ -290,6 +290,47 @@ async def test_get_subscriber_state_collects_object_list_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_subscriber_states_by_ids_batches_one_call() -> None:
+    """teyca-sync-odg: one `subscribers()` query covers the whole id batch."""
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.subscribers = MagicMock(
+        return_value=[
+            SimpleNamespace(id=1, status="enabled", lists=[{"id": 1}]),
+            SimpleNamespace(id=3, status="", lists=[]),
+        ]
+    )
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
+    ):
+        client = ListmonkSDKClient(_settings())
+        states = await client.get_subscriber_states_by_ids(subscriber_ids=[1, 2, 3])
+
+    fake.subscribers.assert_called_once_with("subscribers.id IN (1,2,3)", None)
+    assert set(states.keys()) == {1}
+    assert states[1].status == "enabled"
+    assert states[1].list_ids == [1]
+
+
+@pytest.mark.asyncio
+async def test_get_subscriber_states_by_ids_returns_empty_for_no_ids() -> None:
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.subscribers = MagicMock(return_value=[])
+
+    with patch.dict("sys.modules", {"listmonk": fake}):
+        client = ListmonkSDKClient(_settings())
+        states = await client.get_subscriber_states_by_ids(subscriber_ids=[])
+
+    fake.subscribers.assert_not_called()
+    assert states == {}
+
+
+@pytest.mark.asyncio
 async def test_ensure_login_failure() -> None:
     fake = SimpleNamespace()
     fake.set_url_base = MagicMock()

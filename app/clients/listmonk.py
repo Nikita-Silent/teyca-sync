@@ -219,47 +219,61 @@ class ListmonkSDKClient:
             )
             return None
 
-        status_raw = str(getattr(payload, "status", "") or "")
-        normalized_status = _normalize_user_status(status_raw)
-        lists_raw = getattr(payload, "lists", [])
-        list_ids: list[int] = []
-        if isinstance(lists_raw, (list, set, tuple)):
-            for item in lists_raw:
-                if isinstance(item, int):
-                    list_ids.append(item)
-                    continue
-                if isinstance(item, dict) and "id" in item:
-                    try:
-                        list_ids.append(int(item["id"]))
-                    except TypeError, ValueError:
-                        continue
-                    continue
-                value = getattr(item, "id", None)
-                if isinstance(value, int):
-                    list_ids.append(value)
-
-        if normalized_status is None:
-            _safe_info(
-                "listmonk_get_subscriber_state_done",
-                subscriber_id=subscriber_id,
-                found=False,
-                reason="empty_status",
-            )
-            return None
-        state = SubscriberState(
-            subscriber_id=subscriber_id,
-            status=normalized_status,
-            list_ids=list_ids,
-            list_statuses=_extract_list_statuses(payload),
-        )
+        state = _build_subscriber_state(subscriber_id=subscriber_id, payload=payload)
         _safe_info(
             "listmonk_get_subscriber_state_done",
             subscriber_id=subscriber_id,
-            found=True,
-            status=state.status,
-            list_ids=state.list_ids,
+            found=state is not None,
+            status=state.status if state else None,
+            list_ids=state.list_ids if state else None,
+            reason=None if state is not None else "empty_status",
         )
         return state
+
+    async def get_subscriber_states_by_ids(
+        self, *, subscriber_ids: list[int]
+    ) -> dict[int, SubscriberState]:
+        """Batch-fetch live states for many subscriber ids in one Listmonk query.
+
+        Used by the consistency scan (teyca-sync-odg) to check a whole batch of
+        rows with one HTTP round trip instead of one `subscriber_by_id` call per
+        row — the previous approach issued up to `consent_sync_batch_size`
+        sequential requests every scan tick.
+        """
+        if not subscriber_ids:
+            return {}
+        try:
+            import listmonk  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise ListmonkClientError("listmonk package is not installed") from exc
+
+        await self._ensure_login()
+        unique_ids = sorted({int(subscriber_id) for subscriber_id in subscriber_ids})
+        query_text = f"subscribers.id IN ({','.join(str(value) for value in unique_ids)})"
+        _safe_info(
+            "listmonk_get_subscriber_states_by_ids_request",
+            count=len(unique_ids),
+        )
+        payloads = await self._sdk_call(
+            listmonk.subscribers,
+            query_text,
+            None,
+            action="subscribers_by_ids",
+        )
+        states: dict[int, SubscriberState] = {}
+        for payload in payloads:
+            subscriber_id = _extract_subscriber_id(payload)
+            if subscriber_id is None:
+                continue
+            state = _build_subscriber_state(subscriber_id=subscriber_id, payload=payload)
+            if state is not None:
+                states[subscriber_id] = state
+        _safe_info(
+            "listmonk_get_subscriber_states_by_ids_done",
+            requested=len(unique_ids),
+            found=len(states),
+        )
+        return states
 
     async def get_subscriber_profile(self, *, subscriber_id: int) -> SubscriberProfile | None:
         """Fetch full subscriber snapshot from Listmonk SDK."""
@@ -840,6 +854,40 @@ def _extract_list_ids(payload: object) -> list[int]:
             if isinstance(value, int):
                 list_ids.append(value)
     return list_ids
+
+
+def _build_subscriber_state(*, subscriber_id: int, payload: object) -> SubscriberState | None:
+    """Parse one Listmonk subscriber payload into a `SubscriberState`, or None
+    when the status is empty (treated as "not found", matching the single-fetch
+    behavior of `get_subscriber_state`)."""
+    status_raw = str(getattr(payload, "status", "") or "")
+    normalized_status = _normalize_user_status(status_raw)
+    if normalized_status is None:
+        return None
+
+    lists_raw = getattr(payload, "lists", [])
+    list_ids: list[int] = []
+    if isinstance(lists_raw, (list, set, tuple)):
+        for item in lists_raw:
+            if isinstance(item, int):
+                list_ids.append(item)
+                continue
+            if isinstance(item, dict) and "id" in item:
+                try:
+                    list_ids.append(int(item["id"]))
+                except (TypeError, ValueError):
+                    continue
+                continue
+            value = getattr(item, "id", None)
+            if isinstance(value, int):
+                list_ids.append(value)
+
+    return SubscriberState(
+        subscriber_id=subscriber_id,
+        status=normalized_status,
+        list_ids=list_ids,
+        list_statuses=_extract_list_statuses(payload),
+    )
 
 
 def _extract_list_statuses(payload: object) -> dict[int, str]:
