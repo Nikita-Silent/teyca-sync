@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -92,6 +92,11 @@ class ExternalDispatcherWorker:
     teyca_client: TeycaClient
     worker_id: str
     operations: tuple[str, ...]
+    # Scratch state for the current run_once() batch only (teyca-sync-axq): lets a
+    # listmonk_upsert claim fold an already-claimed merge_finalize claim for the same
+    # user into one combined Teyca call pair instead of processing both separately.
+    _pending_merge_claims: dict[int, OutboxClaim] = field(default_factory=dict, repr=False)
+    _combined_merge_ids: set[int] = field(default_factory=set, repr=False)
 
     async def _run_in_session(
         self,
@@ -196,27 +201,40 @@ class ExternalDispatcherWorker:
             logger.info("external_dispatcher_no_pending_jobs", batch_size=batch_size)
             return 0
 
-        for claim in claims:
-            metrics.processed += 1
-            log_contextvars.bind_contextvars(
-                trace_id=claim.trace_id,
-                source_event_id=claim.source_event_id,
-                user_id=claim.user_id,
-                queue_name=claim.queue_name,
-                outbox_id=claim.id,
-                outbox_operation=claim.operation,
-            )
-            try:
-                await self._process_claim(claim=claim, metrics=metrics)
-            finally:
-                log_contextvars.unbind_contextvars(
-                    "trace_id",
-                    "source_event_id",
-                    "user_id",
-                    "queue_name",
-                    "outbox_id",
-                    "outbox_operation",
+        self._pending_merge_claims = {
+            claim.user_id: claim for claim in claims if claim.operation == OUTBOX_OP_MERGE_FINALIZE
+        }
+        self._combined_merge_ids = set()
+        try:
+            for claim in claims:
+                if claim.id in self._combined_merge_ids:
+                    # Already executed as part of a combined listmonk_upsert claim above.
+                    metrics.processed += 1
+                    metrics.done += 1
+                    continue
+                metrics.processed += 1
+                log_contextvars.bind_contextvars(
+                    trace_id=claim.trace_id,
+                    source_event_id=claim.source_event_id,
+                    user_id=claim.user_id,
+                    queue_name=claim.queue_name,
+                    outbox_id=claim.id,
+                    outbox_operation=claim.operation,
                 )
+                try:
+                    await self._process_claim(claim=claim, metrics=metrics)
+                finally:
+                    log_contextvars.unbind_contextvars(
+                        "trace_id",
+                        "source_event_id",
+                        "user_id",
+                        "queue_name",
+                        "outbox_id",
+                        "outbox_operation",
+                    )
+        finally:
+            self._pending_merge_claims = {}
+            self._combined_merge_ids = set()
 
         logger.info(
             "external_dispatcher_metrics",
@@ -467,6 +485,9 @@ class ExternalDispatcherWorker:
         claim: OutboxClaim,
         metrics: ExternalDispatcherMetrics,
     ) -> None:
+        # Guard against a same-batch listmonk_upsert claim combining into this
+        # claim after it has already been (or is being) processed on its own.
+        self._pending_merge_claims.pop(claim.user_id, None)
         payload = _normalize_merge_payload(claim.payload)
         if await self._merge_already_logged(user_id=claim.user_id):
             payload["merge_logged"] = True
@@ -518,6 +539,24 @@ class ExternalDispatcherWorker:
             merge_logged=payload["merge_logged"],
         )
 
+    async def _teyca_key_last_sent(
+        self, *, user_id: int, key: Literal["key1", "key2"]
+    ) -> str | None:
+        async def read_operation(session: AsyncSession) -> str | None:
+            users_repo = UsersRepository(session)
+            return await users_repo.get_teyca_key_value(user_id=user_id, key=key)
+
+        return await self._run_in_session(read_operation)
+
+    async def _set_teyca_key_value(
+        self, *, user_id: int, key: Literal["key1", "key2"], value: str
+    ) -> None:
+        async def write_operation(session: AsyncSession) -> None:
+            users_repo = UsersRepository(session)
+            await users_repo.set_teyca_key_value(user_id=user_id, key=key, value=value)
+
+        await self._run_in_session(write_operation)
+
     async def _send_teyca_key_if_changed(
         self, *, user_id: int, key: Literal["key1", "key2"], value: str
     ) -> None:
@@ -528,12 +567,7 @@ class ExternalDispatcherWorker:
         subscribers) — skip the call when the last value we actually sent
         matches.
         """
-
-        async def read_operation(session: AsyncSession) -> str | None:
-            users_repo = UsersRepository(session)
-            return await users_repo.get_teyca_key_value(user_id=user_id, key=key)
-
-        last_sent = await self._run_in_session(read_operation)
+        last_sent = await self._teyca_key_last_sent(user_id=user_id, key=key)
         if last_sent == value:
             logger.info(
                 "external_dispatcher_teyca_key_unchanged",
@@ -548,12 +582,7 @@ class ExternalDispatcherWorker:
             fields={key: value},
             rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
         )
-
-        async def write_operation(session: AsyncSession) -> None:
-            users_repo = UsersRepository(session)
-            await users_repo.set_teyca_key_value(user_id=user_id, key=key, value=value)
-
-        await self._run_in_session(write_operation)
+        await self._set_teyca_key_value(user_id=user_id, key=key, value=value)
 
     async def _user_exists(self, *, user_id: int) -> bool:
         async def operation(session: AsyncSession) -> bool:
@@ -615,6 +644,17 @@ class ExternalDispatcherWorker:
             return
         payload = _normalize_bonus_payload(saved_payload)
 
+        merge_claim = self._pending_merge_claims.get(user_id)
+        if merge_claim is not None and (not payload["bonus_done"] or not payload["key1_done"]):
+            self._combined_merge_ids.add(merge_claim.id)
+            await self._finalize_consent_and_merge(
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                merge_claim=merge_claim,
+            )
+            return
+
         if not payload["bonus_done"]:
             await self.teyca_client.accrue_bonuses(
                 user_id=user_id,
@@ -637,6 +677,101 @@ class ExternalDispatcherWorker:
             user_id=user_id,
             bonus_done=payload["bonus_done"],
             key1_done=payload["key1_done"],
+        )
+
+    async def _finalize_consent_and_merge(
+        self,
+        *,
+        user_id: int,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        merge_claim: OutboxClaim,
+    ) -> None:
+        """Combine consent-bonus and merge-finalize Teyca calls for a new client.
+
+        POST /v1/{token}/passes/{user_id}/bonuses accepts an array and
+        PUT /v1/{token}/passes/{user_id} accepts an arbitrary field set, so both
+        flows can share one bonus call and one field call — 2 Teyca requests for
+        a new client instead of 4 (teyca-sync-axq). There is no batch endpoint for
+        card changes; combining fields is the only way to cut call count.
+        """
+        merge_payload = _normalize_merge_payload(merge_claim.payload)
+
+        include_consent_bonus = not payload["bonus_done"]
+        old_bonus_value = _payload_optional_float(merge_claim.payload, key="old_bonus_value")
+        include_merge_bonus = not merge_payload["bonus_done"] and (
+            old_bonus_value is not None and old_bonus_value > 0
+        )
+        bonuses: list[BonusOperation] = []
+        if include_consent_bonus:
+            bonuses.append(BonusOperation.one_shot(value=str(self.settings.consent_bonus_amount)))
+        if include_merge_bonus:
+            bonuses.append(BonusOperation.one_shot(value=str(old_bonus_value)))
+
+        if bonuses:
+            await self.teyca_client.accrue_bonuses(
+                user_id=user_id,
+                bonuses=bonuses,
+                rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+            )
+        if include_consent_bonus:
+            payload["bonus_done"] = True
+            await self._bonus_save_progress(idempotency_key=idempotency_key, payload=payload)
+        if include_merge_bonus:
+            merge_payload["bonus_done"] = True
+            await self._save_progress(outbox_id=merge_claim.id, payload=merge_payload)
+
+        include_key1 = not payload["key1_done"]
+        include_key2 = not merge_payload["key2_done"]
+        fields: dict[str, object] = {}
+        if include_key1:
+            last_sent = await self._teyca_key_last_sent(user_id=user_id, key="key1")
+            if last_sent != TEYCA_KEY1_CONFIRMED:
+                fields["key1"] = TEYCA_KEY1_CONFIRMED
+        if include_key2:
+            key2_value = merge_payload["merge_key2_value"] or ""
+            last_sent = await self._teyca_key_last_sent(user_id=user_id, key="key2")
+            if last_sent != key2_value:
+                fields["key2"] = key2_value
+
+        if fields:
+            await self.teyca_client.update_pass_fields(
+                user_id=user_id,
+                fields=fields,
+                rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+            )
+            for key, value in fields.items():
+                await self._set_teyca_key_value(
+                    user_id=user_id, key=cast(Literal["key1", "key2"], key), value=str(value)
+                )
+        if include_key1:
+            payload["key1_done"] = True
+            await self._bonus_save_progress(idempotency_key=idempotency_key, payload=payload)
+        if include_key2:
+            merge_payload["key2_done"] = True
+            await self._save_progress(outbox_id=merge_claim.id, payload=merge_payload)
+
+        if not merge_payload["merge_logged"]:
+            await self._write_merge_log(
+                user_id=user_id,
+                source_event_type=merge_payload["source_event_type"],
+                source_event_id=merge_claim.source_event_id,
+                trace_id=merge_claim.trace_id,
+            )
+            merge_payload["merge_logged"] = True
+
+        await self._bonus_mark_done(idempotency_key=idempotency_key, payload=payload)
+        await self._mark_done(outbox_id=merge_claim.id, payload=merge_payload)
+        logger.info(
+            "external_dispatcher_consent_and_merge_combined_done",
+            user_id=user_id,
+            merge_outbox_id=merge_claim.id,
+            bonus_call_made=bool(bonuses),
+            field_call_made=bool(fields),
+            bonus_done=payload["bonus_done"],
+            key1_done=payload["key1_done"],
+            merge_key2_done=merge_payload["key2_done"],
+            merge_logged=merge_payload["merge_logged"],
         )
 
     async def _bonus_reserve(

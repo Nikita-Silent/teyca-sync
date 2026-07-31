@@ -27,6 +27,7 @@ from app.workers.external_dispatcher_worker import (
     MERGE_OUTBOX_OPERATIONS,
     ExternalDispatcherMetrics,
     ExternalDispatcherWorker,
+    ListmonkUpsertOutcome,
 )
 
 
@@ -834,6 +835,110 @@ async def test_external_dispatcher_merge_finalize_skips_teyca_call_when_key2_unc
     done_payload = mark_done.await_args.kwargs["payload"]
     assert done_payload["key2_done"] is True
     assert metrics.done == 1
+
+
+@pytest.mark.asyncio
+async def test_run_once_combines_new_client_merge_and_consent_into_two_teyca_calls() -> None:
+    """teyca-sync-axq: POST /bonuses takes an array, PUT takes arbitrary fields —
+    a new client (merge_finalize + consent bonus claimed together) should cost
+    exactly one accrue_bonuses call and one update_pass_fields call, not four."""
+    worker = _worker()
+    listmonk_claim = OutboxClaim(
+        id=1,
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key="listmonk-sync:40",
+        user_id=40,
+        payload={"email": "user@example.com", "list_ids": [1], "event_type": "CREATE"},
+        attempts=0,
+        trace_id="trace-1",
+        source_event_id="event-1",
+        queue_name="queue-create",
+    )
+    merge_claim = OutboxClaim(
+        id=2,
+        operation=OUTBOX_OP_MERGE_FINALIZE,
+        dedupe_key="merge-finalize:40",
+        user_id=40,
+        payload={
+            "bonus_done": False,
+            "key2_done": False,
+            "merge_logged": False,
+            "old_bonus_value": 40.0,
+            "merge_key2_value": "merge 30.03.2026 12:00",
+            "source_event_type": "CREATE",
+        },
+        attempts=0,
+        trace_id="trace-2",
+        source_event_id="event-2",
+        queue_name="queue-create",
+    )
+    accrual_repo = AsyncMock(
+        reserve=AsyncMock(return_value=True),
+        get_by_key=AsyncMock(
+            return_value=SimpleNamespace(payload={"bonus_done": False, "key1_done": False})
+        ),
+        save_progress=AsyncMock(),
+        mark_done_with_payload=AsyncMock(),
+    )
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value=None),
+        set_teyca_key_value=AsyncMock(),
+    )
+    outbox_repo = AsyncMock(mark_done=AsyncMock(), save_progress=AsyncMock())
+    state = SimpleNamespace(subscriber_id=99, status="enabled", list_ids=[1])
+    worker.listmonk_client.upsert_subscriber = AsyncMock(return_value=state)
+
+    with (
+        patch.object(
+            ExternalDispatcherWorker,
+            "_claim_batch",
+            new=AsyncMock(return_value=[listmonk_claim, merge_claim]),
+        ),
+        patch.object(
+            ExternalDispatcherWorker, "_release_stale_claims", new=AsyncMock(return_value=0)
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_apply_listmonk_upsert_success",
+            new=AsyncMock(return_value=ListmonkUpsertOutcome(mapped=True)),
+        ),
+        patch.object(ExternalDispatcherWorker, "_write_merge_log", new=AsyncMock()),
+        patch(
+            "app.workers.external_dispatcher_worker.BonusAccrualRepository",
+            return_value=accrual_repo,
+        ),
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
+        ),
+        patch(
+            "app.workers.external_dispatcher_worker.ExternalCallOutboxRepository",
+            return_value=outbox_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        processed = await worker.run_once()
+
+    assert processed == 2
+    cast(AsyncMock, worker.teyca_client.accrue_bonuses).assert_awaited_once()
+    accrue_kwargs = cast(AsyncMock, worker.teyca_client.accrue_bonuses).await_args.kwargs
+    assert len(accrue_kwargs["bonuses"]) == 2
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_awaited_once_with(
+        user_id=40,
+        fields={"key1": "confirmed", "key2": "merge 30.03.2026 12:00"},
+        rate_limit_max_wait_seconds=0.0,
+    )
+    outbox_repo.mark_done.assert_any_await(outbox_id=1, payload=None)
+    merge_done_call = next(
+        call for call in outbox_repo.mark_done.await_args_list if call.kwargs["outbox_id"] == 2
+    )
+    assert merge_done_call.kwargs["payload"]["key2_done"] is True
+    assert merge_done_call.kwargs["payload"]["bonus_done"] is True
+    accrual_repo.mark_done_with_payload.assert_awaited_once()
 
 
 @pytest.mark.asyncio
