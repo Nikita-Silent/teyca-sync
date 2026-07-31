@@ -17,6 +17,10 @@ from app.repositories.external_call_outbox import (
     OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
     OutboxClaim,
 )
+from app.repositories.listmonk_users import (
+    DuplicateListmonkSubscriberIdError,
+    DuplicateListmonkUserEmailError,
+)
 from app.workers import run_external_dispatcher
 from app.workers.external_dispatcher_worker import (
     DEFAULT_OUTBOX_OPERATIONS,
@@ -136,6 +140,7 @@ async def test_external_dispatcher_listmonk_upsert_success_accrues_consent_bonus
     """Р4а/teyca-sync-4ue: a successful CRM-driven listmonk_upsert is the only
     trigger for the consent bonus."""
     from app.clients.listmonk import SubscriberState
+    from app.workers.external_dispatcher_worker import ListmonkUpsertOutcome
 
     worker = _worker()
     claim = OutboxClaim(
@@ -158,7 +163,9 @@ async def test_external_dispatcher_listmonk_upsert_success_accrues_consent_bonus
         patch.object(
             ExternalDispatcherWorker,
             "_apply_listmonk_upsert_success",
-            new=AsyncMock(return_value=True),
+            new=AsyncMock(
+                return_value=ListmonkUpsertOutcome(mapped=True, duplicate_reason=None)
+            ),
         ) as apply_success,
         patch.object(
             ExternalDispatcherWorker,
@@ -179,6 +186,7 @@ async def test_external_dispatcher_listmonk_upsert_success_accrues_consent_bonus
 async def test_external_dispatcher_listmonk_upsert_conflict_skips_consent_bonus() -> None:
     """Duplicate-email/subscriber conflicts must never accrue a bonus (Р5)."""
     from app.clients.listmonk import SubscriberState
+    from app.workers.external_dispatcher_worker import ListmonkUpsertOutcome
 
     worker = _worker()
     claim = OutboxClaim(
@@ -202,24 +210,173 @@ async def test_external_dispatcher_listmonk_upsert_conflict_skips_consent_bonus(
         patch.object(
             ExternalDispatcherWorker,
             "_apply_listmonk_upsert_success",
-            new=AsyncMock(return_value=False),
+            new=AsyncMock(
+                return_value=ListmonkUpsertOutcome(mapped=False, duplicate_reason="dup")
+            ),
         ),
         patch.object(
             ExternalDispatcherWorker,
             "_accrue_consent_bonus_if_needed",
             new=AsyncMock(),
         ) as accrue_bonus,
-        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()),
+        patch.object(
+            ExternalDispatcherWorker, "_mark_retry", new=AsyncMock(return_value="retry")
+        ),
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
     ):
         await worker._process_listmonk_upsert(claim=claim, metrics=metrics)
 
     accrue_bonus.assert_not_awaited()
+    mark_done.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_apply_listmonk_upsert_success_returns_false_on_duplicate_email() -> None:
-    from app.repositories.listmonk_users import DuplicateListmonkUserEmailError
+async def test_external_dispatcher_listmonk_upsert_duplicate_subscriber_schedules_retry() -> None:
+    """A duplicate subscriber_id must retry/dead the claim, never mark_done (teyca-sync-kia)."""
+    from app.clients.listmonk import SubscriberState
 
+    worker = _worker()
+    claim = OutboxClaim(
+        id=7,
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key="listmonk-sync:70",
+        user_id=70,
+        payload={"email": "user@example.com", "list_ids": [1], "event_type": "CREATE"},
+        attempts=1,
+        trace_id="trace-7",
+        source_event_id="event-7",
+        queue_name="queue-create",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    cast(AsyncMock, worker.listmonk_client.upsert_subscriber).return_value = SubscriberState(
+        subscriber_id=999, status="unconfirmed", list_ids=[1]
+    )
+
+    async def run_in_session(operation: Callable[[AsyncSession], Awaitable[object]]) -> object:
+        session = AsyncMock()
+        with (
+            patch(
+                "app.workers.external_dispatcher_worker.UsersRepository",
+                return_value=AsyncMock(
+                    get_by_user_id=AsyncMock(return_value=SimpleNamespace(user_id=70))
+                ),
+            ),
+            patch(
+                "app.workers.external_dispatcher_worker.ListmonkUsersRepository",
+                return_value=AsyncMock(
+                    upsert=AsyncMock(
+                        side_effect=DuplicateListmonkSubscriberIdError(
+                            subscriber_id=999,
+                            rows=[],
+                        )
+                    )
+                ),
+            ),
+            patch(
+                "app.workers.external_dispatcher_worker.EmailRepairLogRepository",
+                return_value=AsyncMock(),
+            ),
+        ):
+            return await operation(cast(AsyncSession, session))
+
+    with (
+        patch.object(
+            ExternalDispatcherWorker, "_run_in_session", new=AsyncMock(side_effect=run_in_session)
+        ),
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(
+            ExternalDispatcherWorker, "_mark_retry", new=AsyncMock(return_value="retry")
+        ) as mark_retry,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+    ):
+        await worker._process_listmonk_upsert(claim=claim, metrics=metrics)
+
+    mark_done.assert_not_awaited()
+    mark_retry.assert_awaited_once()
+    mark_retry_await_args = mark_retry.await_args
+    assert mark_retry_await_args is not None
+    assert mark_retry_await_args.kwargs["outbox_id"] == 7
+    assert mark_retry_await_args.kwargs["attempts"] == 2
+    assert "999" in mark_retry_await_args.kwargs["error_text"]
+    assert metrics.retried == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_listmonk_upsert_duplicate_email_schedules_retry() -> None:
+    """A duplicate email must retry/dead the claim, never mark_done (teyca-sync-kia)."""
+    from app.clients.listmonk import SubscriberState
+
+    worker = _worker()
+    claim = OutboxClaim(
+        id=8,
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key="listmonk-sync:80",
+        user_id=80,
+        payload={"email": "dup@example.com", "list_ids": [1], "event_type": "CREATE"},
+        attempts=4,
+        trace_id="trace-8",
+        source_event_id="event-8",
+        queue_name="queue-create",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    cast(AsyncMock, worker.listmonk_client.upsert_subscriber).return_value = SubscriberState(
+        subscriber_id=888, status="unconfirmed", list_ids=[1]
+    )
+    email_repair_repo = AsyncMock()
+
+    async def run_in_session(operation: Callable[[AsyncSession], Awaitable[object]]) -> object:
+        session = AsyncMock()
+        with (
+            patch(
+                "app.workers.external_dispatcher_worker.UsersRepository",
+                return_value=AsyncMock(
+                    get_by_user_id=AsyncMock(return_value=SimpleNamespace(user_id=80))
+                ),
+            ),
+            patch(
+                "app.workers.external_dispatcher_worker.ListmonkUsersRepository",
+                return_value=AsyncMock(
+                    upsert=AsyncMock(
+                        side_effect=DuplicateListmonkUserEmailError(
+                            normalized_email="dup@example.com",
+                            user_id=80,
+                            existing_user_ids=[81],
+                        )
+                    )
+                ),
+            ),
+            patch(
+                "app.workers.external_dispatcher_worker.EmailRepairLogRepository",
+                return_value=email_repair_repo,
+            ),
+        ):
+            return await operation(cast(AsyncSession, session))
+
+    with (
+        patch.object(
+            ExternalDispatcherWorker, "_run_in_session", new=AsyncMock(side_effect=run_in_session)
+        ),
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(
+            ExternalDispatcherWorker, "_mark_retry", new=AsyncMock(return_value="dead")
+        ) as mark_retry,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+    ):
+        await worker._process_listmonk_upsert(claim=claim, metrics=metrics)
+
+    mark_done.assert_not_awaited()
+    mark_retry.assert_awaited_once()
+    mark_retry_await_args = mark_retry.await_args
+    assert mark_retry_await_args is not None
+    assert mark_retry_await_args.kwargs["outbox_id"] == 8
+    assert mark_retry_await_args.kwargs["attempts"] == 5
+    assert "dup@example.com" in mark_retry_await_args.kwargs["error_text"]
+    assert metrics.dead == 1
+    email_repair_repo.create_pending.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_apply_listmonk_upsert_success_returns_duplicate_reason_on_duplicate_email() -> None:
     worker = _worker()
     claim = OutboxClaim(
         id=6,
@@ -236,7 +393,7 @@ async def test_apply_listmonk_upsert_success_returns_false_on_duplicate_email() 
 
     state = SubscriberState(subscriber_id=777, status="unconfirmed", list_ids=[1])
 
-    async def run_in_session(operation: Callable[[AsyncSession], Awaitable[bool]]) -> bool:
+    async def run_in_session(operation: Callable[[AsyncSession], Awaitable[object]]) -> object:
         session = AsyncMock()
         with (
             patch(
@@ -271,7 +428,9 @@ async def test_apply_listmonk_upsert_success_returns_false_on_duplicate_email() 
             claim=claim, state=state, event_type="CREATE"
         )
 
-    assert result is False
+    assert result.mapped is False
+    assert result.duplicate_reason is not None
+    assert "dup@example.com" in result.duplicate_reason
 
 
 @pytest.mark.asyncio

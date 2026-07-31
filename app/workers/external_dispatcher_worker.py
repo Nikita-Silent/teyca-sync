@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
@@ -56,6 +56,20 @@ DEFAULT_OUTBOX_OPERATIONS = (
     *INVALID_EMAIL_OUTBOX_OPERATIONS,
     *MERGE_OUTBOX_OPERATIONS,
 )
+
+
+@dataclass(slots=True)
+class ListmonkUpsertOutcome:
+    """Result of persisting a listmonk_upsert mapping.
+
+    `duplicate_reason` set means the mapping conflicted (subscriber_id or
+    email already claimed by another user) and the claim must retry/dead,
+    never mark_done (teyca-sync-kia) — the discrepancy would otherwise be
+    silently lost until the next reconcile.
+    """
+
+    mapped: bool
+    duplicate_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -293,12 +307,30 @@ class ExternalDispatcherWorker:
             attributes=attributes,
             subscriber_id=subscriber_id,
         )
-        mapped = await self._apply_listmonk_upsert_success(
+        outcome = await self._apply_listmonk_upsert_success(
             claim=claim,
             state=state,
             event_type=event_type,
         )
-        if mapped:
+        if outcome.duplicate_reason is not None:
+            status = await self._mark_retry(
+                outbox_id=claim.id,
+                attempts=claim.attempts + 1,
+                error_text=outcome.duplicate_reason,
+            )
+            if status == "dead":
+                metrics.dead += 1
+            else:
+                metrics.retried += 1
+            logger.error(
+                "external_dispatcher_listmonk_upsert_duplicate_retry_scheduled",
+                outbox_id=claim.id,
+                attempts=claim.attempts + 1,
+                status=status,
+                error=outcome.duplicate_reason,
+            )
+            return
+        if outcome.mapped:
             await self._accrue_consent_bonus_if_needed(user_id=claim.user_id)
         await self._mark_done(outbox_id=claim.id)
         metrics.done += 1
@@ -316,18 +348,20 @@ class ExternalDispatcherWorker:
         claim: OutboxClaim,
         state: SubscriberState,
         event_type: str,
-    ) -> bool:
-        """Persist the restored mapping. Returns True when the mapping was written
-        without conflict — the only case eligible for a consent bonus (Р5)."""
+    ) -> ListmonkUpsertOutcome:
+        """Persist the restored mapping. `mapped=True` only when the mapping was
+        written without conflict — the only case eligible for a consent bonus
+        (Р5). A conflict sets `duplicate_reason` so the caller retries/deads
+        the claim instead of marking it done (teyca-sync-kia)."""
 
-        async def operation(session: AsyncSession) -> bool:
+        async def operation(session: AsyncSession) -> ListmonkUpsertOutcome:
             users_repo = UsersRepository(session)
             listmonk_repo = ListmonkUsersRepository(session)
             email_repair_repo = EmailRepairLogRepository(session)
 
             current_user = await users_repo.get_by_user_id(user_id=claim.user_id)
             if current_user is None:
-                return False
+                return ListmonkUpsertOutcome(mapped=False)
             try:
                 await listmonk_repo.upsert(
                     user_id=claim.user_id,
@@ -345,7 +379,7 @@ class ExternalDispatcherWorker:
                     subscriber_id=exc.subscriber_id,
                     existing_user_ids=exc.user_ids,
                 )
-                return False
+                return ListmonkUpsertOutcome(mapped=False, duplicate_reason=str(exc))
             except DuplicateListmonkUserEmailError as exc:
                 for existing_user_id in exc.existing_user_ids:
                     await email_repair_repo.create_pending(
@@ -363,11 +397,11 @@ class ExternalDispatcherWorker:
                     email=exc.normalized_email,
                     existing_user_ids=exc.existing_user_ids,
                 )
-                return False
+                return ListmonkUpsertOutcome(mapped=False, duplicate_reason=str(exc))
             await listmonk_repo.set_consent_pending(user_id=claim.user_id)
-            return True
+            return ListmonkUpsertOutcome(mapped=True)
 
-        return bool(await self._run_in_session(operation))
+        return cast(ListmonkUpsertOutcome, await self._run_in_session(operation))
 
     async def _process_listmonk_delete(
         self,
