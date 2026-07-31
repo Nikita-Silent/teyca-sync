@@ -297,45 +297,24 @@ class ConsentSyncWorker:
             normalized_status = subscriber.status.strip().lower()
             blocked_in_targets = subscriber.has_blocked_for_any(target_list_ids=target_list_ids)
             if normalized_status in {"blocked", "blocklisted", "blacklisted"} or blocked_in_targets:
-                teyca_success = True
-                try:
-                    await self.teyca_client.update_pass_fields(
-                        user_id=user_id,
-                        fields={"key1": TEYCA_KEY1_BLOCKED},
-                    )
-                    _inc(metrics, "blocked_done")
-                    await self._mark_checked(
-                        user_id=user_id,
-                        subscriber_id=subscriber_id,
-                        pending=False,
-                        confirmed=False,
-                        status=TEYCA_KEY1_BLOCKED,
-                        listmonk_repo=listmonk_repo,
-                    )
-                    logger.info(
-                        "consent_sync_blocked",
-                        user_id=user_id,
-                        subscriber_id=subscriber_id,
-                        status=subscriber.status,
-                    )
-                except TeycaAPIError as exc:
-                    teyca_success = False
-                    await self._mark_checked(
-                        user_id=user_id,
-                        subscriber_id=subscriber_id,
-                        pending=True,
-                        confirmed=False,
-                        status=TEYCA_KEY1_BLOCKED,
-                        listmonk_repo=listmonk_repo,
-                    )
-                    _inc(metrics, "teyca_errors")
-                    logger.error(
-                        "consent_sync_blocked_key1_update_failed",
-                        user_id=user_id,
-                        subscriber_id=subscriber_id,
-                        error=str(exc),
-                    )
-                return teyca_success
+                # Р11 (закрыто 2026-07-30): отписки в Teyca не отправляем, фиксируем
+                # только локально — синхронный вызов сюда выжигал суточный лимит.
+                _inc(metrics, "blocked_done")
+                await self._mark_checked(
+                    user_id=user_id,
+                    subscriber_id=subscriber_id,
+                    pending=False,
+                    confirmed=False,
+                    status=TEYCA_KEY1_BLOCKED,
+                    listmonk_repo=listmonk_repo,
+                )
+                logger.info(
+                    "consent_sync_blocked",
+                    user_id=user_id,
+                    subscriber_id=subscriber_id,
+                    status=subscriber.status,
+                )
+                return True
 
             confirmed = subscriber.is_confirmed_for_all(target_list_ids=target_list_ids)
             if not confirmed:

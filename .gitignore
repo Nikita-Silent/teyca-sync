@@ -43,6 +43,11 @@ config.yaml
 .DS_Store
 *.log
 
+# Дампы БД (персональные данные — никогда в git)
+*.dump
+*.sql.gz
+*.backup
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

@@ -144,17 +144,16 @@ async def test_process_pending_user_blocked() -> None:
         list_ids=[1],
     )
 
-    await worker._process_pending_user(
+    result = await worker._process_pending_user(
         pending=pending,
         target_list_ids=[1],
         listmonk_repo=listmonk_repo,
         accrual_repo=accrual_repo,
     )
 
-    mocks.teyca_client.update_pass_fields.assert_awaited_once_with(
-        user_id=12,
-        fields={"key1": "blocked"},
-    )
+    assert result is True
+    mocks.teyca_client.update_pass_fields.assert_not_awaited()
+    mocks.teyca_client.accrue_bonuses.assert_not_awaited()
     listmonk_repo.mark_checked.assert_awaited_once_with(
         user_id=12,
         pending=False,
@@ -177,49 +176,19 @@ async def test_process_pending_user_blocked_has_priority_over_confirmed_in_other
         list_statuses={1: "confirmed", 2: "blocklisted"},
     )
 
-    await worker._process_pending_user(
+    result = await worker._process_pending_user(
         pending=pending,
         target_list_ids=[1, 2],
         listmonk_repo=listmonk_repo,
         accrual_repo=accrual_repo,
     )
 
-    mocks.teyca_client.update_pass_fields.assert_awaited_once_with(
-        user_id=15,
-        fields={"key1": "blocked"},
-    )
+    assert result is True
+    mocks.teyca_client.update_pass_fields.assert_not_awaited()
     accrual_repo.reserve.assert_not_awaited()
     listmonk_repo.mark_checked.assert_awaited_once_with(
         user_id=15,
         pending=False,
-        confirmed=False,
-        status="blocked",
-    )
-
-
-@pytest.mark.asyncio
-async def test_process_pending_user_blocked_teyca_update_failed() -> None:
-    worker, mocks = _worker()
-    pending = SimpleNamespace(user_id=13, subscriber_id=113)
-    listmonk_repo = AsyncMock()
-    accrual_repo = AsyncMock()
-    mocks.listmonk_client.get_subscriber_state.return_value = SubscriberState(
-        subscriber_id=113,
-        status="blocked",
-        list_ids=[1],
-    )
-    mocks.teyca_client.update_pass_fields.side_effect = TeycaAPIError("boom")
-
-    await worker._process_pending_user(
-        pending=pending,
-        target_list_ids=[1],
-        listmonk_repo=listmonk_repo,
-        accrual_repo=accrual_repo,
-    )
-
-    listmonk_repo.mark_checked.assert_awaited_once_with(
-        user_id=13,
-        pending=True,
         confirmed=False,
         status="blocked",
     )
