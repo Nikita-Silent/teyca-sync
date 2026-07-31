@@ -25,7 +25,6 @@ htmlcov/
 .nox/
 beads_teyca-sync/*
 config.yaml
-.beads
 .dolt*
 # Env (secrets)
 .env

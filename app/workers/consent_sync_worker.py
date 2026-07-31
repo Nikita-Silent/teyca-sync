@@ -1,4 +1,11 @@
-"""Periodic worker: sync Listmonk consent and accrue consent bonuses."""
+"""Periodic worker: track Listmonk unsubscribes/blocks for local bookkeeping.
+
+Bonus accrual lives in `app.workers.external_dispatcher_worker` (teyca-sync-4ue,
+Р4а): only a successful CRM-triggered `listmonk_upsert` may pay the consent
+bonus. This worker never reads or grants bonuses and never calls Teyca — it
+only mirrors Listmonk unsubscribe/block state locally so `consent_pending`
+reflects "needs a Listmonk recheck", nothing more (Р12).
+"""
 
 from __future__ import annotations
 
@@ -12,10 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog import contextvars as log_contextvars
 
 from app.clients.listmonk import ListmonkSDKClient, SubscriberDelta, SubscriberState
-from app.clients.teyca import BonusOperation, TeycaAPIError, TeycaClient, build_teyca_client
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
-from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.listmonk_users import (
     DuplicateListmonkSubscriberIdError,
     ListmonkUsersRepository,
@@ -24,9 +29,7 @@ from app.repositories.sync_state import SyncStateRepository
 
 logger = structlog.get_logger()
 
-BONUS_REASON_EMAIL_CONSENT = "email_consent"
 TEYCA_KEY1_BLOCKED = "blocked"
-TEYCA_KEY1_CONFIRMED = "confirmed"
 
 
 def parse_list_ids(raw_list_ids: str) -> list[int]:
@@ -45,12 +48,11 @@ def parse_list_ids(raw_list_ids: str) -> list[int]:
 
 @dataclass(slots=True)
 class ConsentSyncWorker:
-    """Runs consent sync loop for pending users."""
+    """Runs the consent sync loop: unsubscribe/block tracking only."""
 
     settings: Settings
     session_factory: async_sessionmaker[AsyncSession]
     listmonk_client: ListmonkSDKClient
-    teyca_client: TeycaClient
 
     async def _run_in_session(
         self,
@@ -117,7 +119,6 @@ class ConsentSyncWorker:
         user_id: int,
         subscriber_id: int,
         pending: bool,
-        confirmed: bool,
         status: str | None = None,
         listmonk_repo: ListmonkUsersRepository | None = None,
     ) -> None:
@@ -126,7 +127,7 @@ class ConsentSyncWorker:
             await listmonk_repo.mark_checked(
                 user_id=user_id,
                 pending=pending,
-                confirmed=confirmed,
+                confirmed=False,
                 status=status,
             )
             return
@@ -145,109 +146,8 @@ class ConsentSyncWorker:
             await repo.mark_checked(
                 user_id=user_id,
                 pending=pending,
-                confirmed=confirmed,
+                confirmed=False,
                 status=status,
-            )
-
-        await self._run_in_session(operation)
-
-    async def _reserve_operation(
-        self,
-        *,
-        user_id: int,
-        reason: str,
-        idempotency_key: str,
-        payload: dict[str, Any] | None,
-        accrual_repo: BonusAccrualRepository | None = None,
-    ) -> bool:
-        """Reserve an idempotent bonus operation."""
-        if accrual_repo is not None:
-            return await accrual_repo.reserve(
-                user_id=user_id,
-                reason=reason,
-                idempotency_key=idempotency_key,
-                payload=payload,
-            )
-
-        async def operation(session: AsyncSession) -> bool:
-            repo = BonusAccrualRepository(session)
-            return await repo.reserve(
-                user_id=user_id,
-                reason=reason,
-                idempotency_key=idempotency_key,
-                payload=payload,
-            )
-
-        return bool(await self._run_in_session(operation))
-
-    async def _get_operation_payload(
-        self,
-        *,
-        idempotency_key: str,
-        accrual_repo: BonusAccrualRepository | None = None,
-    ) -> dict[str, Any] | None:
-        """Load saved step-progress payload for an idempotent operation."""
-        if accrual_repo is not None:
-            current = await accrual_repo.get_by_key(idempotency_key=idempotency_key)
-            return None if current is None else dict(current.payload or {})
-
-        async def operation(session: AsyncSession) -> dict[str, Any] | None:
-            repo = BonusAccrualRepository(session)
-            current = await repo.get_by_key(idempotency_key=idempotency_key)
-            return None if current is None else dict(current.payload or {})
-
-        return await self._run_in_session(operation)
-
-    async def _save_progress(
-        self,
-        *,
-        idempotency_key: str,
-        payload: dict[str, Any],
-        status: str,
-        error_text: str | None,
-        accrual_repo: BonusAccrualRepository | None = None,
-    ) -> None:
-        """Persist intermediate consent bonus progress in a short transaction."""
-        if accrual_repo is not None:
-            await accrual_repo.save_progress(
-                idempotency_key=idempotency_key,
-                payload=payload,
-                status=status,
-                error_text=error_text,
-            )
-            return
-
-        async def operation(session: AsyncSession) -> None:
-            repo = BonusAccrualRepository(session)
-            await repo.save_progress(
-                idempotency_key=idempotency_key,
-                payload=payload,
-                status=status,
-                error_text=error_text,
-            )
-
-        await self._run_in_session(operation)
-
-    async def _mark_done(
-        self,
-        *,
-        idempotency_key: str,
-        payload: dict[str, Any],
-        accrual_repo: BonusAccrualRepository | None = None,
-    ) -> None:
-        """Persist final completed step-progress state."""
-        if accrual_repo is not None:
-            await accrual_repo.mark_done_with_payload(
-                idempotency_key=idempotency_key,
-                payload=payload,
-            )
-            return
-
-        async def operation(session: AsyncSession) -> None:
-            repo = BonusAccrualRepository(session)
-            await repo.mark_done_with_payload(
-                idempotency_key=idempotency_key,
-                payload=payload,
             )
 
         await self._run_in_session(operation)
@@ -258,14 +158,15 @@ class ConsentSyncWorker:
         pending: Any,
         target_list_ids: list[int],
         listmonk_repo: ListmonkUsersRepository | None = None,
-        accrual_repo: BonusAccrualRepository | None = None,
         subscriber_override: SubscriberState | None = None,
         metrics: ConsentSyncMetrics | None = None,
     ) -> bool:
-        """Process one pending user. Returns True when it is safe to advance the watermark."""
+        """Track one pending user's unsubscribe/block state.
+
+        Returns True when it is safe to advance the watermark.
+        """
         user_id = int(pending.user_id)
         subscriber_id = int(pending.subscriber_id)
-        idempotency_key = f"{BONUS_REASON_EMAIL_CONSENT}:{user_id}"
         trace_id = f"consent-sync:{user_id}:{subscriber_id}"
         source_event_id = f"consent-sync:{subscriber_id}"
 
@@ -284,7 +185,6 @@ class ConsentSyncWorker:
                     user_id=user_id,
                     subscriber_id=subscriber_id,
                     pending=True,
-                    confirmed=False,
                     listmonk_repo=listmonk_repo,
                 )
                 logger.info(
@@ -297,14 +197,13 @@ class ConsentSyncWorker:
             normalized_status = subscriber.status.strip().lower()
             blocked_in_targets = subscriber.has_blocked_for_any(target_list_ids=target_list_ids)
             if normalized_status in {"blocked", "blocklisted", "blacklisted"} or blocked_in_targets:
-                # Р11 (закрыто 2026-07-30): отписки в Teyca не отправляем, фиксируем
-                # только локально — синхронный вызов сюда выжигал суточный лимит.
+                # Р11 (закрыто 2026-07-30): отписки в Teyca не отправляем синхронно —
+                # синхронный вызов сюда выжигал суточный лимит (авария, teyca-sync-i6r).
                 _inc(metrics, "blocked_done")
                 await self._mark_checked(
                     user_id=user_id,
                     subscriber_id=subscriber_id,
                     pending=False,
-                    confirmed=False,
                     status=TEYCA_KEY1_BLOCKED,
                     listmonk_repo=listmonk_repo,
                 )
@@ -316,146 +215,15 @@ class ConsentSyncWorker:
                 )
                 return True
 
-            confirmed = subscriber.is_confirmed_for_all(target_list_ids=target_list_ids)
-            if not confirmed:
-                _inc(metrics, "not_confirmed")
-                await self._mark_checked(
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    pending=True,
-                    confirmed=False,
-                    status="unconfirmed",
-                    listmonk_repo=listmonk_repo,
-                )
-                logger.info(
-                    "consent_sync_not_confirmed",
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    status="unconfirmed",
-                )
-                return True
-
-            reserved = await self._reserve_operation(
+            _inc(metrics, "not_blocked")
+            await self._mark_checked(
                 user_id=user_id,
-                reason=BONUS_REASON_EMAIL_CONSENT,
-                idempotency_key=idempotency_key,
-                payload=_initial_consent_payload(
-                    subscriber_id=subscriber_id,
-                    list_ids=subscriber.list_ids,
-                ),
-                accrual_repo=accrual_repo,
-            )
-            if not reserved:
-                _inc(metrics, "accrual_resumed")
-            saved_payload = await self._get_operation_payload(
-                idempotency_key=idempotency_key,
-                accrual_repo=accrual_repo,
-            )
-            if saved_payload is None:
-                logger.error(
-                    "consent_sync_operation_missing",
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    idempotency_key=idempotency_key,
-                )
-                _inc(metrics, "operation_missing")
-                await self._mark_checked(
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    pending=True,
-                    confirmed=False,
-                    status=subscriber.status,
-                    listmonk_repo=listmonk_repo,
-                )
-                return False
-
-            bonus_operation = BonusOperation.one_shot(
-                value=str(self.settings.consent_bonus_amount),
-            )
-            payload = _normalize_progress_payload(
-                raw_payload=saved_payload,
                 subscriber_id=subscriber_id,
-                list_ids=subscriber.list_ids,
+                pending=False,
+                status=subscriber.status,
+                listmonk_repo=listmonk_repo,
             )
-
-            try:
-                if not payload["bonus_done"]:
-                    await self.teyca_client.accrue_bonuses(
-                        user_id=user_id,
-                        bonuses=[bonus_operation],
-                    )
-                    payload["bonus_done"] = True
-                    await self._save_progress(
-                        idempotency_key=idempotency_key,
-                        payload=payload,
-                        status="pending",
-                        error_text=None,
-                        accrual_repo=accrual_repo,
-                    )
-
-                if not payload["key1_done"]:
-                    await self.teyca_client.update_pass_fields(
-                        user_id=user_id,
-                        fields={"key1": TEYCA_KEY1_CONFIRMED},
-                    )
-                    payload["key1_done"] = True
-                    await self._save_progress(
-                        idempotency_key=idempotency_key,
-                        payload=payload,
-                        status="pending",
-                        error_text=None,
-                        accrual_repo=accrual_repo,
-                    )
-
-                await self._mark_done(
-                    idempotency_key=idempotency_key,
-                    payload=payload,
-                    accrual_repo=accrual_repo,
-                )
-                await self._mark_checked(
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    pending=False,
-                    confirmed=True,
-                    status=TEYCA_KEY1_CONFIRMED,
-                    listmonk_repo=listmonk_repo,
-                )
-                _inc(metrics, "confirmed_done")
-                logger.info(
-                    "consent_sync_confirmed_done",
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    reserved=reserved,
-                    bonus_done=payload["bonus_done"],
-                    key1_done=payload["key1_done"],
-                )
-                return True
-            except TeycaAPIError as exc:
-                await self._save_progress(
-                    idempotency_key=idempotency_key,
-                    payload=payload,
-                    status="failed",
-                    error_text=str(exc),
-                    accrual_repo=accrual_repo,
-                )
-                await self._mark_checked(
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    pending=True,
-                    confirmed=False,
-                    status=subscriber.status,
-                    listmonk_repo=listmonk_repo,
-                )
-                _inc(metrics, "teyca_errors")
-                logger.error(
-                    "consent_sync_confirmed_step_failed",
-                    user_id=user_id,
-                    subscriber_id=subscriber_id,
-                    error=str(exc),
-                    bonus_done=payload["bonus_done"],
-                    key1_done=payload["key1_done"],
-                )
-                return False
+            return True
         finally:
             log_contextvars.unbind_contextvars("trace_id", "source_event_id", "user_id")
 
@@ -552,17 +320,12 @@ class ConsentSyncWorker:
             "consent_sync_metrics",
             processed=processed,
             batch_size=metrics.batch_size,
-            consent_bonus_amount=self.settings.consent_bonus_amount,
             deltas_fetched=metrics.deltas_fetched,
             unmapped_subscribers=metrics.unmapped_subscribers,
             duplicate_subscriber_mappings=metrics.duplicate_subscriber_mappings,
             subscriber_not_found=metrics.subscriber_not_found,
             blocked_done=metrics.blocked_done,
-            not_confirmed=metrics.not_confirmed,
-            confirmed_done=metrics.confirmed_done,
-            accrual_resumed=metrics.accrual_resumed,
-            operation_missing=metrics.operation_missing,
-            teyca_errors=metrics.teyca_errors,
+            not_blocked=metrics.not_blocked,
         )
         return processed
 
@@ -574,31 +337,7 @@ def build_consent_sync_worker() -> ConsentSyncWorker:
         settings=settings,
         session_factory=SessionLocal,
         listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=build_teyca_client(settings),
     )
-
-
-def _initial_consent_payload(*, subscriber_id: int, list_ids: list[int]) -> dict[str, Any]:
-    return {
-        "subscriber_id": subscriber_id,
-        "list_ids": list_ids,
-        "bonus_done": False,
-        "key1_done": False,
-    }
-
-
-def _normalize_progress_payload(
-    *,
-    raw_payload: dict[str, Any] | None,
-    subscriber_id: int,
-    list_ids: list[int],
-) -> dict[str, Any]:
-    payload = dict(raw_payload or {})
-    payload["subscriber_id"] = int(payload.get("subscriber_id", subscriber_id))
-    payload["list_ids"] = payload.get("list_ids", list_ids)
-    payload["bonus_done"] = bool(payload.get("bonus_done", False))
-    payload["key1_done"] = bool(payload.get("key1_done", False))
-    return payload
 
 
 def _delta_to_state(delta: SubscriberDelta) -> SubscriberState:
@@ -620,11 +359,7 @@ class ConsentSyncMetrics:
     duplicate_subscriber_mappings: int = 0
     subscriber_not_found: int = 0
     blocked_done: int = 0
-    not_confirmed: int = 0
-    confirmed_done: int = 0
-    accrual_resumed: int = 0
-    operation_missing: int = 0
-    teyca_errors: int = 0
+    not_blocked: int = 0
 
 
 @dataclass(slots=True, frozen=True)

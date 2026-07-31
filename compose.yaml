@@ -157,15 +157,15 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    command: /bin/sh -c 'while true; do python -m app.workers.run_consent_sync; sleep 60; done'
+    command: /bin/sh -c 'while true; do python -m app.workers.run_consent_sync; sleep 3600; done'
     restart: unless-stopped
     healthcheck:
       test:
         - CMD
         - python
         - -c
-        - 'import asyncio; from app.service_health import is_heartbeat_fresh; raise SystemExit(0 if asyncio.run(is_heartbeat_fresh("consent-sync", max_age_seconds=180)) else 1)'
-      interval: 30s
+        - 'import asyncio; from app.service_health import is_heartbeat_fresh; raise SystemExit(0 if asyncio.run(is_heartbeat_fresh("consent-sync", max_age_seconds=4500)) else 1)'
+      interval: 60s
       timeout: 10s
       retries: 3
       start_period: 30s

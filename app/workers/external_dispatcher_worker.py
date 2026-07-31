@@ -22,6 +22,7 @@ from app.clients.teyca import (
 )
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
+from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_DELETE,
@@ -40,6 +41,9 @@ from app.repositories.merge_log import MergeLogRepository
 from app.repositories.users import UsersRepository
 
 logger = structlog.get_logger()
+
+BONUS_REASON_EMAIL_CONSENT = "email_consent"
+TEYCA_KEY1_CONFIRMED = "confirmed"
 
 LISTMONK_OUTBOX_OPERATIONS = (
     OUTBOX_OP_LISTMONK_UPSERT,
@@ -289,11 +293,13 @@ class ExternalDispatcherWorker:
             attributes=attributes,
             subscriber_id=subscriber_id,
         )
-        await self._apply_listmonk_upsert_success(
+        mapped = await self._apply_listmonk_upsert_success(
             claim=claim,
             state=state,
             event_type=event_type,
         )
+        if mapped:
+            await self._accrue_consent_bonus_if_needed(user_id=claim.user_id)
         await self._mark_done(outbox_id=claim.id)
         metrics.done += 1
         logger.info(
@@ -310,15 +316,18 @@ class ExternalDispatcherWorker:
         claim: OutboxClaim,
         state: SubscriberState,
         event_type: str,
-    ) -> None:
-        async def operation(session: AsyncSession) -> None:
+    ) -> bool:
+        """Persist the restored mapping. Returns True when the mapping was written
+        without conflict — the only case eligible for a consent bonus (Р5)."""
+
+        async def operation(session: AsyncSession) -> bool:
             users_repo = UsersRepository(session)
             listmonk_repo = ListmonkUsersRepository(session)
             email_repair_repo = EmailRepairLogRepository(session)
 
             current_user = await users_repo.get_by_user_id(user_id=claim.user_id)
             if current_user is None:
-                return
+                return False
             try:
                 await listmonk_repo.upsert(
                     user_id=claim.user_id,
@@ -336,7 +345,7 @@ class ExternalDispatcherWorker:
                     subscriber_id=exc.subscriber_id,
                     existing_user_ids=exc.user_ids,
                 )
-                return
+                return False
             except DuplicateListmonkUserEmailError as exc:
                 for existing_user_id in exc.existing_user_ids:
                     await email_repair_repo.create_pending(
@@ -354,10 +363,11 @@ class ExternalDispatcherWorker:
                     email=exc.normalized_email,
                     existing_user_ids=exc.existing_user_ids,
                 )
-                return
+                return False
             await listmonk_repo.set_consent_pending(user_id=claim.user_id)
+            return True
 
-        await self._run_in_session(operation)
+        return bool(await self._run_in_session(operation))
 
     async def _process_listmonk_delete(
         self,
@@ -512,6 +522,118 @@ class ExternalDispatcherWorker:
             )
 
         await self._run_in_session(operation)
+
+    async def _accrue_consent_bonus_if_needed(self, *, user_id: int) -> None:
+        """Pay the consent bonus once per user (Р4а/Р5).
+
+        Triggered only from a successfully applied CRM-driven `listmonk_upsert` —
+        never from reconcile or bulk subscriber-id recompute, which restore the
+        mapping without any evidence of a fresh CRM event. Idempotent across
+        retries via `bonus_accrual_log` keyed by `email_consent:{user_id}`, same
+        key the previous consent-sync-driven accrual used.
+        """
+        idempotency_key = f"{BONUS_REASON_EMAIL_CONSENT}:{user_id}"
+        await self._bonus_reserve(
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            payload=_initial_bonus_payload(),
+        )
+        saved_payload = await self._bonus_get_payload(idempotency_key=idempotency_key)
+        if saved_payload is None:
+            logger.error(
+                "external_dispatcher_consent_bonus_operation_missing",
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+            )
+            return
+        payload = _normalize_bonus_payload(saved_payload)
+
+        if not payload["bonus_done"]:
+            await self.teyca_client.accrue_bonuses(
+                user_id=user_id,
+                bonuses=[BonusOperation.one_shot(value=str(self.settings.consent_bonus_amount))],
+                rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+            )
+            payload["bonus_done"] = True
+            await self._bonus_save_progress(idempotency_key=idempotency_key, payload=payload)
+
+        if not payload["key1_done"]:
+            await self.teyca_client.update_pass_fields(
+                user_id=user_id,
+                fields={"key1": TEYCA_KEY1_CONFIRMED},
+                rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+            )
+            payload["key1_done"] = True
+            await self._bonus_save_progress(idempotency_key=idempotency_key, payload=payload)
+
+        await self._bonus_mark_done(idempotency_key=idempotency_key, payload=payload)
+        logger.info(
+            "external_dispatcher_consent_bonus_done",
+            user_id=user_id,
+            bonus_done=payload["bonus_done"],
+            key1_done=payload["key1_done"],
+        )
+
+    async def _bonus_reserve(
+        self,
+        *,
+        user_id: int,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        async def operation(session: AsyncSession) -> bool:
+            repo = BonusAccrualRepository(session)
+            return await repo.reserve(
+                user_id=user_id,
+                reason=BONUS_REASON_EMAIL_CONSENT,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+
+        return bool(await self._run_in_session(operation))
+
+    async def _bonus_get_payload(self, *, idempotency_key: str) -> dict[str, Any] | None:
+        async def operation(session: AsyncSession) -> dict[str, Any] | None:
+            repo = BonusAccrualRepository(session)
+            current = await repo.get_by_key(idempotency_key=idempotency_key)
+            return None if current is None else dict(current.payload or {})
+
+        return await self._run_in_session(operation)
+
+    async def _bonus_save_progress(
+        self,
+        *,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        async def operation(session: AsyncSession) -> None:
+            repo = BonusAccrualRepository(session)
+            await repo.save_progress(
+                idempotency_key=idempotency_key,
+                payload=payload,
+                status="pending",
+                error_text=None,
+            )
+
+        await self._run_in_session(operation)
+
+    async def _bonus_mark_done(self, *, idempotency_key: str, payload: dict[str, Any]) -> None:
+        async def operation(session: AsyncSession) -> None:
+            repo = BonusAccrualRepository(session)
+            await repo.mark_done_with_payload(idempotency_key=idempotency_key, payload=payload)
+
+        await self._run_in_session(operation)
+
+
+def _initial_bonus_payload() -> dict[str, Any]:
+    return {"bonus_done": False, "key1_done": False}
+
+
+def _normalize_bonus_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "bonus_done": bool(raw_payload.get("bonus_done", False)),
+        "key1_done": bool(raw_payload.get("key1_done", False)),
+    }
 
 
 def _payload_text(payload: dict[str, Any], *, key: str) -> str | None:

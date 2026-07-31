@@ -33,9 +33,14 @@ def _settings(**overrides: object) -> Settings:
         "external_dispatcher_retry_max_delay_ms": 60_000,
         "external_dispatcher_max_retries": 5,
         "external_dispatcher_teyca_rate_limit_max_wait_seconds": 0.0,
+        "consent_bonus_amount": "100.0",
     }
     defaults.update(overrides)
     return cast(Settings, SimpleNamespace(**defaults))
+
+
+async def _run_operation_directly(operation: Callable[[AsyncSession], Awaitable[object]]) -> object:
+    return await operation(cast(AsyncSession, AsyncMock()))
 
 
 def _worker(*, operations: tuple[str, ...] = DEFAULT_OUTBOX_OPERATIONS) -> ExternalDispatcherWorker:
@@ -124,6 +129,275 @@ async def test_external_dispatcher_skips_listmonk_upsert_when_user_missing() -> 
     cast(AsyncMock, worker.listmonk_client.upsert_subscriber).assert_not_awaited()
     mark_done.assert_awaited_once_with(outbox_id=1, payload=claim.payload)
     assert metrics.skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_listmonk_upsert_success_accrues_consent_bonus() -> None:
+    """Р4а/teyca-sync-4ue: a successful CRM-driven listmonk_upsert is the only
+    trigger for the consent bonus."""
+    from app.clients.listmonk import SubscriberState
+
+    worker = _worker()
+    claim = OutboxClaim(
+        id=4,
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key="listmonk-sync:40",
+        user_id=40,
+        payload={"email": "user@example.com", "list_ids": [1], "event_type": "CREATE"},
+        attempts=0,
+        trace_id="trace-4",
+        source_event_id="event-4",
+        queue_name="queue-create",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    state = SubscriberState(subscriber_id=999, status="unconfirmed", list_ids=[1])
+    cast(AsyncMock, worker.listmonk_client.upsert_subscriber).return_value = state
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_apply_listmonk_upsert_success",
+            new=AsyncMock(return_value=True),
+        ) as apply_success,
+        patch.object(
+            ExternalDispatcherWorker,
+            "_accrue_consent_bonus_if_needed",
+            new=AsyncMock(),
+        ) as accrue_bonus,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+    ):
+        await worker._process_listmonk_upsert(claim=claim, metrics=metrics)
+
+    apply_success.assert_awaited_once()
+    accrue_bonus.assert_awaited_once_with(user_id=40)
+    mark_done.assert_awaited_once_with(outbox_id=4)
+    assert metrics.done == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_listmonk_upsert_conflict_skips_consent_bonus() -> None:
+    """Duplicate-email/subscriber conflicts must never accrue a bonus (Р5)."""
+    from app.clients.listmonk import SubscriberState
+
+    worker = _worker()
+    claim = OutboxClaim(
+        id=5,
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key="listmonk-sync:50",
+        user_id=50,
+        payload={"email": "dup@example.com", "list_ids": [1], "event_type": "CREATE"},
+        attempts=0,
+        trace_id="trace-5",
+        source_event_id="event-5",
+        queue_name="queue-create",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    cast(AsyncMock, worker.listmonk_client.upsert_subscriber).return_value = SubscriberState(
+        subscriber_id=888, status="unconfirmed", list_ids=[1]
+    )
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_apply_listmonk_upsert_success",
+            new=AsyncMock(return_value=False),
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_accrue_consent_bonus_if_needed",
+            new=AsyncMock(),
+        ) as accrue_bonus,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()),
+    ):
+        await worker._process_listmonk_upsert(claim=claim, metrics=metrics)
+
+    accrue_bonus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apply_listmonk_upsert_success_returns_false_on_duplicate_email() -> None:
+    from app.repositories.listmonk_users import DuplicateListmonkUserEmailError
+
+    worker = _worker()
+    claim = OutboxClaim(
+        id=6,
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key="listmonk-sync:60",
+        user_id=60,
+        payload={"email": "dup@example.com", "list_ids": [1]},
+        attempts=0,
+        trace_id="trace-6",
+        source_event_id="event-6",
+        queue_name="queue-create",
+    )
+    from app.clients.listmonk import SubscriberState
+
+    state = SubscriberState(subscriber_id=777, status="unconfirmed", list_ids=[1])
+
+    async def run_in_session(operation: Callable[[AsyncSession], Awaitable[bool]]) -> bool:
+        session = AsyncMock()
+        with (
+            patch(
+                "app.workers.external_dispatcher_worker.UsersRepository",
+                return_value=AsyncMock(
+                    get_by_user_id=AsyncMock(return_value=SimpleNamespace(user_id=60))
+                ),
+            ),
+            patch(
+                "app.workers.external_dispatcher_worker.ListmonkUsersRepository",
+                return_value=AsyncMock(
+                    upsert=AsyncMock(
+                        side_effect=DuplicateListmonkUserEmailError(
+                            normalized_email="dup@example.com",
+                            user_id=60,
+                            existing_user_ids=[61],
+                        )
+                    )
+                ),
+            ),
+            patch(
+                "app.workers.external_dispatcher_worker.EmailRepairLogRepository",
+                return_value=AsyncMock(),
+            ),
+        ):
+            return await operation(cast(AsyncSession, session))
+
+    with patch.object(
+        ExternalDispatcherWorker, "_run_in_session", new=AsyncMock(side_effect=run_in_session)
+    ):
+        result = await worker._apply_listmonk_upsert_success(
+            claim=claim, state=state, event_type="CREATE"
+        )
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_accrue_consent_bonus_resumes_only_remaining_step() -> None:
+    worker = _worker()
+
+    with (
+        patch(
+            "app.workers.external_dispatcher_worker.BonusAccrualRepository",
+            return_value=AsyncMock(
+                reserve=AsyncMock(return_value=False),
+                get_by_key=AsyncMock(
+                    return_value=SimpleNamespace(payload={"bonus_done": True, "key1_done": False})
+                ),
+                save_progress=AsyncMock(),
+                mark_done_with_payload=AsyncMock(),
+            ),
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        await worker._accrue_consent_bonus_if_needed(user_id=70)
+
+    cast(AsyncMock, worker.teyca_client.accrue_bonuses).assert_not_awaited()
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_awaited_once_with(
+        user_id=70,
+        fields={"key1": "confirmed"},
+        rate_limit_max_wait_seconds=0.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_accrue_consent_bonus_runs_both_steps_and_marks_done() -> None:
+    worker = _worker()
+    accrual_repo = AsyncMock(
+        reserve=AsyncMock(return_value=True),
+        get_by_key=AsyncMock(
+            return_value=SimpleNamespace(payload={"bonus_done": False, "key1_done": False})
+        ),
+        save_progress=AsyncMock(),
+        mark_done_with_payload=AsyncMock(),
+    )
+
+    with (
+        patch(
+            "app.workers.external_dispatcher_worker.BonusAccrualRepository",
+            return_value=accrual_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        await worker._accrue_consent_bonus_if_needed(user_id=72)
+
+    cast(AsyncMock, worker.teyca_client.accrue_bonuses).assert_awaited_once()
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_awaited_once_with(
+        user_id=72,
+        fields={"key1": "confirmed"},
+        rate_limit_max_wait_seconds=0.0,
+    )
+    assert accrual_repo.save_progress.await_count == 2
+    done_payload = accrual_repo.mark_done_with_payload.await_args.kwargs["payload"]
+    assert done_payload == {"bonus_done": True, "key1_done": True}
+
+
+@pytest.mark.asyncio
+async def test_accrue_consent_bonus_logs_and_returns_when_operation_missing() -> None:
+    worker = _worker()
+
+    with (
+        patch(
+            "app.workers.external_dispatcher_worker.BonusAccrualRepository",
+            return_value=AsyncMock(
+                reserve=AsyncMock(return_value=True),
+                get_by_key=AsyncMock(return_value=None),
+            ),
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+        patch("app.workers.external_dispatcher_worker.logger") as logger,
+    ):
+        await worker._accrue_consent_bonus_if_needed(user_id=73)
+
+    cast(AsyncMock, worker.teyca_client.accrue_bonuses).assert_not_awaited()
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_not_awaited()
+    logger.error.assert_called_once_with(
+        "external_dispatcher_consent_bonus_operation_missing",
+        user_id=73,
+        idempotency_key="email_consent:73",
+    )
+
+
+@pytest.mark.asyncio
+async def test_accrue_consent_bonus_skips_when_already_done() -> None:
+    worker = _worker()
+
+    with (
+        patch(
+            "app.workers.external_dispatcher_worker.BonusAccrualRepository",
+            return_value=AsyncMock(
+                reserve=AsyncMock(return_value=False),
+                get_by_key=AsyncMock(
+                    return_value=SimpleNamespace(payload={"bonus_done": True, "key1_done": True})
+                ),
+                save_progress=AsyncMock(),
+                mark_done_with_payload=AsyncMock(),
+            ),
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        await worker._accrue_consent_bonus_if_needed(user_id=71)
+
+    cast(AsyncMock, worker.teyca_client.accrue_bonuses).assert_not_awaited()
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_not_awaited()
 
 
 @pytest.mark.asyncio
