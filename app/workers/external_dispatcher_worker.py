@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import httpx
@@ -436,11 +436,7 @@ class ExternalDispatcherWorker:
             logger.info("external_dispatcher_invalid_email_block_user_missing", outbox_id=claim.id)
             return
         status = _payload_text(claim.payload, key="status") or "blocked"
-        await self.teyca_client.update_pass_fields(
-            user_id=claim.user_id,
-            fields={"key1": status},
-            rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
-        )
+        await self._send_teyca_key_if_changed(user_id=claim.user_id, key="key1", value=status)
         await self._apply_invalid_email_block_success(user_id=claim.user_id, status=status)
         await self._mark_done(outbox_id=claim.id)
         metrics.done += 1
@@ -495,10 +491,10 @@ class ExternalDispatcherWorker:
             await self._save_progress(outbox_id=claim.id, payload=payload)
 
         if not payload["key2_done"]:
-            await self.teyca_client.update_pass_fields(
+            await self._send_teyca_key_if_changed(
                 user_id=claim.user_id,
-                fields={"key2": _payload_text(payload, key="merge_key2_value")},
-                rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+                key="key2",
+                value=_payload_text(payload, key="merge_key2_value") or "",
             )
             payload["key2_done"] = True
             await self._save_progress(outbox_id=claim.id, payload=payload)
@@ -521,6 +517,43 @@ class ExternalDispatcherWorker:
             key2_done=payload["key2_done"],
             merge_logged=payload["merge_logged"],
         )
+
+    async def _send_teyca_key_if_changed(
+        self, *, user_id: int, key: Literal["key1", "key2"], value: str
+    ) -> None:
+        """Call Teyca update_pass_fields only if this value wasn't already sent.
+
+        Resending the same key1/key2 wastes rate limit budget (teyca-sync-i6r
+        burned the daily limit resending key1=blocked to 6362 already-blocked
+        subscribers) — skip the call when the last value we actually sent
+        matches.
+        """
+
+        async def read_operation(session: AsyncSession) -> str | None:
+            users_repo = UsersRepository(session)
+            return await users_repo.get_teyca_key_value(user_id=user_id, key=key)
+
+        last_sent = await self._run_in_session(read_operation)
+        if last_sent == value:
+            logger.info(
+                "external_dispatcher_teyca_key_unchanged",
+                user_id=user_id,
+                key=key,
+                value=value,
+            )
+            return
+
+        await self.teyca_client.update_pass_fields(
+            user_id=user_id,
+            fields={key: value},
+            rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+        )
+
+        async def write_operation(session: AsyncSession) -> None:
+            users_repo = UsersRepository(session)
+            await users_repo.set_teyca_key_value(user_id=user_id, key=key, value=value)
+
+        await self._run_in_session(write_operation)
 
     async def _user_exists(self, *, user_id: int) -> bool:
         async def operation(session: AsyncSession) -> bool:
@@ -592,10 +625,8 @@ class ExternalDispatcherWorker:
             await self._bonus_save_progress(idempotency_key=idempotency_key, payload=payload)
 
         if not payload["key1_done"]:
-            await self.teyca_client.update_pass_fields(
-                user_id=user_id,
-                fields={"key1": TEYCA_KEY1_CONFIRMED},
-                rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+            await self._send_teyca_key_if_changed(
+                user_id=user_id, key="key1", value=TEYCA_KEY1_CONFIRMED
             )
             payload["key1_done"] = True
             await self._bonus_save_progress(idempotency_key=idempotency_key, payload=payload)

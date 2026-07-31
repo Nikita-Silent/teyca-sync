@@ -42,6 +42,10 @@ class User(Base):
     city: Mapped[str | None] = mapped_column(String(255), nullable=True)
     referal: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tags: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
+    # Last value actually sent to Teyca for this pass field (not the CRM/Listmonk
+    # state) — used to skip redundant outgoing calls that would waste rate limit.
+    teyca_key1_sent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    teyca_key2_sent: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, nullable=True

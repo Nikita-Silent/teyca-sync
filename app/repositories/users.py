@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import Select, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -109,6 +109,23 @@ class UsersRepository:
     async def clear_email(self, *, user_id: int) -> None:
         """Clear stored email for a user."""
         stmt = update(User).where(User.user_id == user_id).values(email=None)
+        await self._session.execute(stmt)
+
+    async def get_teyca_key_value(
+        self, *, user_id: int, key: Literal["key1", "key2"]
+    ) -> str | None:
+        """Return the last value we actually sent to Teyca for this pass field."""
+        column = User.teyca_key1_sent if key == "key1" else User.teyca_key2_sent
+        stmt = select(column).where(User.user_id == user_id)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def set_teyca_key_value(
+        self, *, user_id: int, key: Literal["key1", "key2"], value: str | None
+    ) -> None:
+        """Record the value we just sent to Teyca for this pass field."""
+        column_name = "teyca_key1_sent" if key == "key1" else "teyca_key2_sent"
+        stmt = update(User).where(User.user_id == user_id).values(**{column_name: value})
         await self._session.execute(stmt)
 
 

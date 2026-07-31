@@ -502,6 +502,46 @@ async def test_accrue_consent_bonus_runs_both_steps_and_marks_done() -> None:
 
 
 @pytest.mark.asyncio
+async def test_accrue_consent_bonus_skips_teyca_call_when_key1_unchanged() -> None:
+    """teyca-sync-agd: resending the same key1 wastes rate limit budget."""
+    worker = _worker()
+    accrual_repo = AsyncMock(
+        reserve=AsyncMock(return_value=True),
+        get_by_key=AsyncMock(
+            return_value=SimpleNamespace(payload={"bonus_done": True, "key1_done": False})
+        ),
+        save_progress=AsyncMock(),
+        mark_done_with_payload=AsyncMock(),
+    )
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value="confirmed"),
+        set_teyca_key_value=AsyncMock(),
+    )
+
+    with (
+        patch(
+            "app.workers.external_dispatcher_worker.BonusAccrualRepository",
+            return_value=accrual_repo,
+        ),
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        await worker._accrue_consent_bonus_if_needed(user_id=74)
+
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_not_awaited()
+    users_repo.set_teyca_key_value.assert_not_awaited()
+    done_payload = accrual_repo.mark_done_with_payload.await_args.kwargs["payload"]
+    assert done_payload["key1_done"] is True
+
+
+@pytest.mark.asyncio
 async def test_accrue_consent_bonus_logs_and_returns_when_operation_missing() -> None:
     worker = _worker()
 
@@ -574,6 +614,10 @@ async def test_external_dispatcher_invalid_email_block_success() -> None:
         queue_name="queue-update",
     )
     metrics = ExternalDispatcherMetrics(batch_size=10)
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value=None),
+        set_teyca_key_value=AsyncMock(),
+    )
 
     with (
         patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
@@ -583,6 +627,15 @@ async def test_external_dispatcher_invalid_email_block_success() -> None:
             new=AsyncMock(),
         ) as apply_ok,
         patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
     ):
         await worker._process_invalid_email_block(claim=claim, metrics=metrics)
 
@@ -591,6 +644,56 @@ async def test_external_dispatcher_invalid_email_block_success() -> None:
         fields={"key1": "blocked"},
         rate_limit_max_wait_seconds=0.0,
     )
+    users_repo.set_teyca_key_value.assert_awaited_once_with(
+        user_id=20, key="key1", value="blocked"
+    )
+    apply_ok.assert_awaited_once_with(user_id=20, status="blocked")
+    mark_done.assert_awaited_once_with(outbox_id=2)
+    assert metrics.done == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_invalid_email_block_skips_teyca_call_when_unchanged() -> None:
+    worker = _worker()
+    claim = OutboxClaim(
+        id=2,
+        operation=OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+        dedupe_key="invalid-email-block:20",
+        user_id=20,
+        payload={"status": "blocked"},
+        attempts=1,
+        trace_id="trace-2",
+        source_event_id="event-2",
+        queue_name="queue-update",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value="blocked"),
+        set_teyca_key_value=AsyncMock(),
+    )
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_apply_invalid_email_block_success",
+            new=AsyncMock(),
+        ) as apply_ok,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        await worker._process_invalid_email_block(claim=claim, metrics=metrics)
+
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_not_awaited()
+    users_repo.set_teyca_key_value.assert_not_awaited()
     apply_ok.assert_awaited_once_with(user_id=20, status="blocked")
     mark_done.assert_awaited_once_with(outbox_id=2)
     assert metrics.done == 1
@@ -618,6 +721,10 @@ async def test_external_dispatcher_merge_finalize_tracks_step_progress() -> None
         queue_name="queue-update",
     )
     metrics = ExternalDispatcherMetrics(batch_size=10)
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value=None),
+        set_teyca_key_value=AsyncMock(),
+    )
 
     with (
         patch.object(
@@ -631,6 +738,15 @@ async def test_external_dispatcher_merge_finalize_tracks_step_progress() -> None
             ExternalDispatcherWorker, "_write_merge_log", new=AsyncMock()
         ) as write_merge_log,
         patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
     ):
         await worker._process_merge_finalize(claim=claim, metrics=metrics)
 
@@ -639,6 +755,9 @@ async def test_external_dispatcher_merge_finalize_tracks_step_progress() -> None
         user_id=30,
         fields={"key2": "merge 30.03.2026 12:00"},
         rate_limit_max_wait_seconds=0.0,
+    )
+    users_repo.set_teyca_key_value.assert_awaited_once_with(
+        user_id=30, key="key2", value="merge 30.03.2026 12:00"
     )
     accrue_await_args = cast(AsyncMock, worker.teyca_client.accrue_bonuses).await_args
     assert accrue_await_args is not None
@@ -657,6 +776,63 @@ async def test_external_dispatcher_merge_finalize_tracks_step_progress() -> None
     assert done_payload["bonus_done"] is True
     assert done_payload["key2_done"] is True
     assert done_payload["merge_logged"] is True
+    assert metrics.done == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_merge_finalize_skips_teyca_call_when_key2_unchanged() -> None:
+    """teyca-sync-agd: resending the same key2 wastes rate limit budget."""
+    worker = _worker()
+    claim = OutboxClaim(
+        id=3,
+        operation=OUTBOX_OP_MERGE_FINALIZE,
+        dedupe_key="merge-finalize:30",
+        user_id=30,
+        payload={
+            "bonus_done": True,
+            "key2_done": False,
+            "merge_logged": False,
+            "old_bonus_value": 40.0,
+            "merge_key2_value": "merge 30.03.2026 12:00",
+            "source_event_type": "UPDATE",
+        },
+        attempts=0,
+        trace_id="trace-3",
+        source_event_id="event-3",
+        queue_name="queue-update",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value="merge 30.03.2026 12:00"),
+        set_teyca_key_value=AsyncMock(),
+    )
+
+    with (
+        patch.object(
+            ExternalDispatcherWorker,
+            "_merge_already_logged",
+            new=AsyncMock(return_value=False),
+        ),
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(ExternalDispatcherWorker, "_save_progress", new=AsyncMock()),
+        patch.object(ExternalDispatcherWorker, "_write_merge_log", new=AsyncMock()),
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        await worker._process_merge_finalize(claim=claim, metrics=metrics)
+
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_not_awaited()
+    users_repo.set_teyca_key_value.assert_not_awaited()
+    done_payload = mark_done.await_args.kwargs["payload"]
+    assert done_payload["key2_done"] is True
     assert metrics.done == 1
 
 
