@@ -12,7 +12,7 @@ from app.consumers.common import (
     build_listmonk_attributes,
     build_merge_key2_value,
     build_profile_from_pass,
-    is_valid_email,
+    is_email_deliverable,
     merge_profile_with_old_data,
 )
 from app.mq.queues import QUEUE_CREATE
@@ -90,7 +90,7 @@ async def handle(
 
     target_list_ids = parse_list_ids(deps.settings.listmonk_list_ids)
     existing = await deps.listmonk_repo.get_by_user_id(user_id=user_id)
-    if not is_valid_email(event.pass_data.email):
+    if not await is_email_deliverable(event.pass_data.email):
         await deps.outbox_repo.enqueue_latest(
             operation=OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
             dedupe_key=dedupe_key_for_invalid_email_block(user_id=user_id),

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
+from app.clients.dns_mx import has_valid_mx
 from app.repositories.old_db import OldUserData
 from app.schemas.webhook import PassData
 
@@ -120,6 +121,21 @@ def is_valid_email(email: str | None) -> bool:
     if len(local_part) > 64:
         return False
     return EMAIL_RE.fullmatch(normalized) is not None
+
+
+async def is_email_deliverable(email: str | None) -> bool:
+    """Level 1 (syntax) + level 3 (domain MX record) email validation.
+
+    Level 3 catches syntactically valid junk like 123@mail.ru that
+    level 1 alone lets through (docs/reverse-engineering-plan.md,
+    section 5). Only checks MX once syntax already passed, so a bad
+    address never costs a DNS lookup.
+    """
+    if not is_valid_email(email):
+        return False
+    assert email is not None
+    domain = email.strip().rsplit("@", maxsplit=1)[1]
+    return await has_valid_mx(domain)
 
 
 def _to_optional_float(raw: object) -> float | None:

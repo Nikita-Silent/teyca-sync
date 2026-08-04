@@ -34,7 +34,7 @@ from app.clients.teyca import (
     build_teyca_client,
 )
 from app.config import Settings, get_settings
-from app.consumers.common import is_valid_email
+from app.consumers.common import is_email_deliverable
 from app.db.session import SessionLocal
 from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.listmonk_users import ListmonkUsersRepository
@@ -116,7 +116,7 @@ class ConsentBonusBackfill:
             candidates: list[ConsentBonusCandidate] = []
             for row in rows:
                 email = row.email
-                if not is_valid_email(email):
+                if not await is_email_deliverable(email):
                     continue
                 assert email is not None
                 normalized_email = email.strip().lower()
