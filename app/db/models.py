@@ -173,6 +173,9 @@ class EmailRepairLog(Base):
     existing_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     winner_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     winner_subscriber_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mark_bad_email: Mapped[bool] = mapped_column(
+        default=True, server_default="true", nullable=False
+    )
     source_event_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -70,8 +70,13 @@ class EmailRepairLogRepository:
         winner_subscriber_id: int | None,
         source_event_id: str | None,
         trace_id: str | None,
+        mark_bad_email: bool = True,
     ) -> None:
-        """Persist a loser/winner plan after local DB normalization is committed."""
+        """Persist a loser/winner plan after local DB normalization is committed.
+
+        `mark_bad_email=False` is the Р5/Р6 "same person" case (teyca-sync-37z):
+        the loser's email is cleared but Teyca sync must not set key1=bad email.
+        """
         now = datetime.now(UTC)
         stmt = insert(EmailRepairLog).values(
             normalized_email=normalized_email,
@@ -87,6 +92,7 @@ class EmailRepairLogRepository:
             next_retry_at=None,
             error_text=None,
             processed_at=now,
+            mark_bad_email=mark_bad_email,
         )
         stmt = stmt.on_conflict_do_update(
             constraint="uq_email_repair_log_email_user_pair",
@@ -101,6 +107,7 @@ class EmailRepairLogRepository:
                 "next_retry_at": None,
                 "error_text": None,
                 "processed_at": now,
+                "mark_bad_email": mark_bad_email,
             },
         )
         await self._session.execute(stmt)

@@ -15,6 +15,10 @@ from app.clients.listmonk import ListmonkClientError, ListmonkSDKClient
 from app.clients.teyca import TeycaAPIError, TeycaClient, build_teyca_client
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
+from app.policies.email_duplicate_policy import (
+    EmailDuplicateCandidate,
+    resolve_email_duplicate_group,
+)
 from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.listmonk_users import (
     DuplicateListmonkSubscriberIdError,
@@ -34,8 +38,9 @@ class DuplicateEmailBackfillPlan:
 
     normalized_email: str
     winner_user_id: int
-    winner_subscriber_id: int
+    winner_subscriber_id: int | None
     loser_user_ids: list[int]
+    mark_bad_email: bool = True
 
 
 @dataclass(slots=True)
@@ -97,7 +102,7 @@ class DuplicateEmailBackfill:
         *,
         repair_id: int,
         winner_user_id: int,
-        winner_subscriber_id: int,
+        winner_subscriber_id: int | None,
     ) -> None:
         """Persist successful Teyca sync in a short transaction."""
 
@@ -197,6 +202,44 @@ class DuplicateEmailBackfill:
 
         return plans, issues
 
+    async def collect_plans_via_policy(
+        self,
+    ) -> tuple[list[DuplicateEmailBackfillPlan], list[DuplicateEmailBackfillIssue]]:
+        """Resolve users.email duplicate groups via the Р5/Р6 policy (teyca-sync-37z).
+
+        Unlike collect_plans(), this never calls Listmonk: the winner is
+        picked by phone match and activity recency, purely from `users`
+        table data. Deterministic by design, so no issues are produced —
+        manual review stays reserved for technical failures (Р6).
+        """
+        async with self.session_factory() as session:
+            users_repo = UsersRepository(session)
+            groups = await users_repo.get_duplicate_email_groups()
+
+            plans: list[DuplicateEmailBackfillPlan] = []
+            for normalized_email, rows in groups:
+                candidates = [
+                    EmailDuplicateCandidate(
+                        user_id=int(row.user_id),
+                        phone=row.phone,
+                        date_last=row.date_last,
+                        updated_at=row.updated_at,
+                    )
+                    for row in rows
+                ]
+                resolution = resolve_email_duplicate_group(candidates)
+                plans.append(
+                    DuplicateEmailBackfillPlan(
+                        normalized_email=normalized_email,
+                        winner_user_id=resolution.winner_user_id,
+                        winner_subscriber_id=None,
+                        loser_user_ids=resolution.loser_user_ids,
+                        mark_bad_email=resolution.mark_bad_email,
+                    )
+                )
+
+        return plans, []
+
     async def apply(
         self,
         *,
@@ -233,6 +276,7 @@ class DuplicateEmailBackfill:
                         winner_subscriber_id=plan.winner_subscriber_id,
                         source_event_id=run_id,
                         trace_id=run_id,
+                        mark_bad_email=plan.mark_bad_email,
                     )
 
             await session.commit()
@@ -255,13 +299,19 @@ class DuplicateEmailBackfill:
         for row in rows:
             repair_id = int(row.id)
             loser_user_id = int(row.incoming_user_id)
-            if row.winner_user_id is None or row.winner_subscriber_id is None:
+            if row.winner_user_id is None:
                 raise DuplicateEmailBackfillError(
                     f"repair_id={repair_id} is missing winner metadata for Teyca sync"
                 )
             winner_user_id = int(row.winner_user_id)
-            winner_subscriber_id = int(row.winner_subscriber_id)
+            winner_subscriber_id = (
+                int(row.winner_subscriber_id) if row.winner_subscriber_id is not None else None
+            )
             attempts = int(row.attempts) + 1
+
+            loser_fields: dict[str, Any] = {"email": None, "key6": TEYCA_KEY6_BUGS}
+            if row.mark_bad_email:
+                loser_fields["key1"] = TEYCA_KEY1_BAD_EMAIL
 
             try:
                 await self.teyca_client.update_pass_fields(
@@ -270,11 +320,7 @@ class DuplicateEmailBackfill:
                 )
                 await self.teyca_client.update_pass_fields(
                     user_id=loser_user_id,
-                    fields={
-                        "email": None,
-                        "key1": TEYCA_KEY1_BAD_EMAIL,
-                        "key6": TEYCA_KEY6_BUGS,
-                    },
+                    fields=loser_fields,
                 )
                 await self._mark_teyca_synced(
                     repair_id=repair_id,

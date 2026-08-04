@@ -84,6 +84,35 @@ class UsersRepository:
         result = await self._session.execute(stmt)
         return [int(value) for value in result.scalars().all()]
 
+    async def get_duplicate_email_groups(self) -> list[tuple[str, list[User]]]:
+        """Return users.email duplicate groups keyed by lower(trim(email)).
+
+        Used by the one-time Р5/Р6 cleanup (teyca-sync-y1c): unlike
+        get_other_user_ids_by_email, this scans the whole table for
+        groups of size > 1 rather than checking a single candidate.
+        """
+        normalized_email = func.lower(func.trim(User.email))
+        duplicate_emails = (
+            select(normalized_email.label("normalized_email"))
+            .where(User.email.is_not(None), func.trim(User.email) != "")
+            .group_by(normalized_email)
+            .having(func.count(User.user_id) > 1)
+        ).subquery()
+        stmt: Select[tuple[User]] = (
+            select(User)
+            .where(normalized_email.in_(select(duplicate_emails.c.normalized_email)))
+            .order_by(normalized_email.asc(), User.user_id.asc())
+        )
+        result = await self._session.execute(stmt)
+
+        groups: dict[str, list[User]] = {}
+        for row in result.scalars().all():
+            key = _normalize_email(row.email)
+            if key is None:
+                continue
+            groups.setdefault(key, []).append(row)
+        return list(groups.items())
+
     async def upsert(self, *, user_id: int, profile: dict[str, Any]) -> None:
         """Insert or update user profile by user_id."""
         values: dict[str, Any] = {"user_id": user_id}

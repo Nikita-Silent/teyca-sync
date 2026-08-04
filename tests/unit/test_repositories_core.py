@@ -84,6 +84,33 @@ async def test_users_repository_paths() -> None:
 
 
 @pytest.mark.asyncio
+async def test_users_repository_get_duplicate_email_groups_groups_by_normalized_email() -> None:
+    session = AsyncMock()
+    repo = UsersRepository(session)
+
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(user_id=1, email="dup@example.com"),
+                SimpleNamespace(user_id=2, email=" Dup@Example.com "),
+                SimpleNamespace(user_id=3, email="other@example.com"),
+                SimpleNamespace(user_id=4, email="other@example.com"),
+            ]
+        )
+    )
+
+    groups = await repo.get_duplicate_email_groups()
+
+    session.execute.assert_awaited_once()
+    assert [normalized_email for normalized_email, _ in groups] == [
+        "dup@example.com",
+        "other@example.com",
+    ]
+    dup_group = dict(groups)["dup@example.com"]
+    assert [row.user_id for row in dup_group] == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_listmonk_users_repository_paths() -> None:
     session = MagicMock()
     session.execute = AsyncMock()
@@ -294,6 +321,22 @@ async def test_email_repair_log_repository_paths() -> None:
     assert params["status"] == "db_applied"
     assert params["winner_user_id"] == 20
     assert params["winner_subscriber_id"] == 33
+    assert params["mark_bad_email"] is True
+    session.execute.reset_mock()
+
+    await repo.create_db_applied(
+        normalized_email="same-person@example.com",
+        incoming_user_id=11,
+        existing_user_id=21,
+        winner_user_id=21,
+        winner_subscriber_id=None,
+        source_event_id="backfill-2",
+        trace_id="trace-2",
+        mark_bad_email=False,
+    )
+    params = session.execute.await_args.args[0].compile().params
+    assert params["winner_subscriber_id"] is None
+    assert params["mark_bad_email"] is False
     session.execute.reset_mock()
 
     session.execute.return_value = SimpleNamespace()
