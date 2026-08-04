@@ -1,4 +1,4 @@
-.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once consumers legacy-import legacy-import-dry-run consent-bonus-backfill consent-bonus-backfill-apply
+.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once consumers legacy-import legacy-import-dry-run consent-bonus-backfill consent-bonus-backfill-apply consent-block-backfill consent-block-backfill-apply
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
@@ -137,3 +137,9 @@ consent-bonus-backfill:
 
 consent-bonus-backfill-apply:
 	docker compose run --rm --build app python -m app.workers.run_consent_bonus_backfill --apply
+
+consent-block-backfill:
+	docker compose run --rm --build app python -m app.workers.run_consent_block_backfill
+
+consent-block-backfill-apply:
+	docker compose run --rm --build app python -m app.workers.run_consent_block_backfill --apply
