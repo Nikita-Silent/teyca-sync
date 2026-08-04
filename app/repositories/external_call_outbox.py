@@ -23,6 +23,7 @@ OUTBOX_OP_LISTMONK_DELETE = "listmonk_delete"
 OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL = "teyca_block_invalid_email"
 OUTBOX_OP_MERGE_FINALIZE = "merge_finalize"
 OUTBOX_OP_TEYCA_BLOCK_CONSENT = "teyca_block_consent"
+OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC = "teyca_email_repair_sync"
 
 
 def dedupe_key_for_listmonk_sync(*, user_id: int) -> str:
@@ -43,6 +44,10 @@ def dedupe_key_for_merge_finalize(*, user_id: int) -> str:
 
 def dedupe_key_for_consent_block(*, user_id: int) -> str:
     return f"consent-block:{user_id}"
+
+
+def dedupe_key_for_email_repair_sync(*, repair_id: int) -> str:
+    return f"email-repair-sync:{repair_id}"
 
 
 @dataclass(slots=True)
@@ -171,6 +176,7 @@ class ExternalCallOutboxRepository:
         priority = case(
             (ExternalCallOutbox.operation == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL, 0),
             (ExternalCallOutbox.operation == OUTBOX_OP_TEYCA_BLOCK_CONSENT, 2),
+            (ExternalCallOutbox.operation == OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC, 2),
             else_=1,
         )
         stmt: Select[tuple[ExternalCallOutbox]] = (

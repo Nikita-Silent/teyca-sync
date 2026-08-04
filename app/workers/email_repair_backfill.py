@@ -7,12 +7,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.listmonk import ListmonkClientError, ListmonkSDKClient
-from app.clients.teyca import TeycaAPIError, TeycaClient, build_teyca_client
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.policies.email_duplicate_policy import (
@@ -20,16 +18,18 @@ from app.policies.email_duplicate_policy import (
     resolve_email_duplicate_group,
 )
 from app.repositories.email_repair_log import EmailRepairLogRepository
+from app.repositories.external_call_outbox import (
+    OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,
+    ExternalCallOutboxRepository,
+    dedupe_key_for_email_repair_sync,
+)
 from app.repositories.listmonk_users import (
     DuplicateListmonkSubscriberIdError,
     ListmonkUsersRepository,
 )
 from app.repositories.users import UsersRepository
-from app.workers.email_repair_worker import EMAIL_REPAIR_MAX_ATTEMPTS, TEYCA_KEY1_BAD_EMAIL
 
 logger = structlog.get_logger()
-
-TEYCA_KEY6_BUGS = "bugs"
 
 
 @dataclass(slots=True)
@@ -60,9 +60,7 @@ class DuplicateEmailBackfillSummary:
     resolved_emails: int = 0
     unresolved_emails: int = 0
     loser_rows: int = 0
-    teyca_synced: int = 0
-    teyca_failed: int = 0
-    manual_review: int = 0
+    enqueued: int = 0
 
 
 @dataclass(slots=True)
@@ -72,7 +70,6 @@ class DuplicateEmailBackfill:
     settings: Settings
     session_factory: async_sessionmaker[AsyncSession]
     listmonk_client: ListmonkSDKClient
-    teyca_client: TeycaClient
 
     async def _run_in_session(
         self,
@@ -96,45 +93,6 @@ class DuplicateEmailBackfill:
             return await repair_repo.get_db_applied_batch(limit=max(1, limit))
 
         return await self._run_in_session(operation)
-
-    async def _mark_teyca_synced(
-        self,
-        *,
-        repair_id: int,
-        winner_user_id: int,
-        winner_subscriber_id: int | None,
-    ) -> None:
-        """Persist successful Teyca sync in a short transaction."""
-
-        async def operation(session: AsyncSession) -> None:
-            repair_repo = EmailRepairLogRepository(session)
-            await repair_repo.mark_teyca_synced(
-                repair_id=repair_id,
-                winner_user_id=winner_user_id,
-                winner_subscriber_id=winner_subscriber_id,
-            )
-
-        await self._run_in_session(operation)
-
-    async def _mark_retry(
-        self,
-        *,
-        repair_id: int,
-        attempts: int,
-        error_text: str,
-    ) -> str:
-        """Persist failed Teyca sync state in a short transaction."""
-
-        async def operation(session: AsyncSession) -> str:
-            repair_repo = EmailRepairLogRepository(session)
-            return await repair_repo.mark_retry(
-                repair_id=repair_id,
-                attempts=attempts,
-                error_text=error_text,
-                max_attempts=EMAIL_REPAIR_MAX_ATTEMPTS,
-            )
-
-        return str(await self._run_in_session(operation))
 
     async def collect_plans(
         self,
@@ -291,76 +249,60 @@ class DuplicateEmailBackfill:
         return summary
 
     async def sync_teyca(self, *, batch_size: int) -> DuplicateEmailBackfillSummary:
-        """Sync already-applied loser cleanup rows to Teyca."""
+        """Seed outbox tasks for already-applied loser cleanup rows.
+
+        This used to call Teyca directly in a tight loop. In practice the
+        shared Teyca budget (500/hour, contended by live webhook/dispatcher
+        traffic) got exhausted mid-batch, and each budget-noise failure
+        burned one of this table's 3 retry attempts — rows landed in
+        manual_review from pure timing, not real failures. Seeding
+        `external_call_outbox` instead lets `external_dispatcher_worker`
+        drain this backlog at its own budget-aware pace, with proper
+        defer/backoff (25 attempts, real wait time from the limiter) instead
+        of a fixed 5-minute guess. `enqueue_once` is idempotent per
+        `repair_id`, so re-running this after a partial batch never
+        double-enqueues.
+        """
         summary = DuplicateEmailBackfillSummary()
         rows = await self._load_db_applied_rows(limit=batch_size)
         summary.loser_rows = len(rows)
 
-        for row in rows:
-            repair_id = int(row.id)
-            loser_user_id = int(row.incoming_user_id)
-            if row.winner_user_id is None:
-                raise DuplicateEmailBackfillError(
-                    f"repair_id={repair_id} is missing winner metadata for Teyca sync"
+        async def operation(session: AsyncSession) -> int:
+            outbox_repo = ExternalCallOutboxRepository(session)
+            enqueued = 0
+            for row in rows:
+                repair_id = int(row.id)
+                if row.winner_user_id is None:
+                    raise DuplicateEmailBackfillError(
+                        f"repair_id={repair_id} is missing winner metadata for Teyca sync"
+                    )
+                created = await outbox_repo.enqueue_once(
+                    operation=OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,
+                    dedupe_key=dedupe_key_for_email_repair_sync(repair_id=repair_id),
+                    user_id=int(row.incoming_user_id),
+                    payload={
+                        "repair_id": repair_id,
+                        "winner_user_id": int(row.winner_user_id),
+                        "winner_subscriber_id": (
+                            int(row.winner_subscriber_id)
+                            if row.winner_subscriber_id is not None
+                            else None
+                        ),
+                        "mark_bad_email": bool(row.mark_bad_email),
+                    },
+                    trace_id=row.trace_id,
+                    source_event_id=row.source_event_id,
+                    queue_name=None,
                 )
-            winner_user_id = int(row.winner_user_id)
-            winner_subscriber_id = (
-                int(row.winner_subscriber_id) if row.winner_subscriber_id is not None else None
-            )
-            attempts = int(row.attempts) + 1
+                if created:
+                    enqueued += 1
+            return enqueued
 
-            loser_fields: dict[str, Any] = {"email": None, "key6": TEYCA_KEY6_BUGS}
-            if row.mark_bad_email:
-                loser_fields["key1"] = TEYCA_KEY1_BAD_EMAIL
-
-            try:
-                await self.teyca_client.update_pass_fields(
-                    user_id=winner_user_id,
-                    fields={"key6": TEYCA_KEY6_BUGS},
-                )
-                await self.teyca_client.update_pass_fields(
-                    user_id=loser_user_id,
-                    fields=loser_fields,
-                )
-                await self._mark_teyca_synced(
-                    repair_id=repair_id,
-                    winner_user_id=winner_user_id,
-                    winner_subscriber_id=winner_subscriber_id,
-                )
-                summary.teyca_synced += 1
-                logger.info(
-                    "email_repair_backfill_teyca_synced",
-                    repair_id=repair_id,
-                    loser_user_id=loser_user_id,
-                    winner_user_id=winner_user_id,
-                    winner_subscriber_id=winner_subscriber_id,
-                )
-            except (TeycaAPIError, httpx.HTTPError) as exc:
-                status = await self._mark_retry(
-                    repair_id=repair_id,
-                    attempts=attempts,
-                    error_text=str(exc),
-                )
-                if status == "manual_review":
-                    summary.manual_review += 1
-                else:
-                    summary.teyca_failed += 1
-                logger.error(
-                    "email_repair_backfill_teyca_failed",
-                    repair_id=repair_id,
-                    loser_user_id=loser_user_id,
-                    attempts=attempts,
-                    status=status,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-
+        summary.enqueued = await self._run_in_session(operation)
         logger.info(
-            "email_repair_backfill_teyca_summary",
+            "email_repair_backfill_teyca_sync_enqueued",
             loser_rows=summary.loser_rows,
-            teyca_synced=summary.teyca_synced,
-            teyca_failed=summary.teyca_failed,
-            manual_review=summary.manual_review,
+            enqueued=summary.enqueued,
         )
         return summary
 
@@ -376,5 +318,4 @@ def build_duplicate_email_backfill() -> DuplicateEmailBackfill:
         settings=settings,
         session_factory=SessionLocal,
         listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=build_teyca_client(settings, session_factory=SessionLocal),
     )

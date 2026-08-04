@@ -1,4 +1,4 @@
-.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once consumers legacy-import legacy-import-dry-run consent-bonus-backfill consent-bonus-backfill-apply consent-block-backfill consent-block-backfill-apply
+.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once external-dispatcher-email-repair-sync-once consumers legacy-import legacy-import-dry-run consent-bonus-backfill consent-bonus-backfill-apply consent-block-backfill consent-block-backfill-apply
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
@@ -122,6 +122,9 @@ external-dispatcher-invalid-email-once:
 
 external-dispatcher-consent-block-once:
 	docker compose run --rm app python -m app.workers.run_external_dispatcher_consent_block
+
+external-dispatcher-email-repair-sync-once:
+	docker compose run --rm app python -m app.workers.run_external_dispatcher_email_repair_sync
 
 consumers:
 	docker compose run --rm app python -m app.workers.run_queue_consumers

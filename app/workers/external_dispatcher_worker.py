@@ -31,6 +31,7 @@ from app.repositories.external_call_outbox import (
     OUTBOX_OP_MERGE_FINALIZE,
     OUTBOX_OP_TEYCA_BLOCK_CONSENT,
     OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+    OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,
     ExternalCallOutboxRepository,
     OutboxClaim,
 )
@@ -48,6 +49,8 @@ logger = structlog.get_logger()
 BONUS_REASON_EMAIL_CONSENT = "email_consent"
 TEYCA_KEY1_CONFIRMED = "confirmed"
 TEYCA_KEY1_BLOCKED = "blocked"
+TEYCA_KEY1_BAD_EMAIL = "bad email"
+TEYCA_KEY6_BUGS = "bugs"
 
 LISTMONK_OUTBOX_OPERATIONS = (
     OUTBOX_OP_LISTMONK_UPSERT,
@@ -56,11 +59,13 @@ LISTMONK_OUTBOX_OPERATIONS = (
 INVALID_EMAIL_OUTBOX_OPERATIONS = (OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,)
 MERGE_OUTBOX_OPERATIONS = (OUTBOX_OP_MERGE_FINALIZE,)
 CONSENT_BLOCK_OUTBOX_OPERATIONS = (OUTBOX_OP_TEYCA_BLOCK_CONSENT,)
+EMAIL_REPAIR_SYNC_OUTBOX_OPERATIONS = (OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,)
 DEFAULT_OUTBOX_OPERATIONS = (
     *LISTMONK_OUTBOX_OPERATIONS,
     *INVALID_EMAIL_OUTBOX_OPERATIONS,
     *MERGE_OUTBOX_OPERATIONS,
     *CONSENT_BLOCK_OUTBOX_OPERATIONS,
+    *EMAIL_REPAIR_SYNC_OUTBOX_OPERATIONS,
 )
 
 
@@ -277,6 +282,19 @@ class ExternalDispatcherWorker:
         )
         return metrics.processed
 
+    def _claim_handler(
+        self, *, operation: str
+    ) -> Callable[..., Awaitable[None]] | None:
+        handlers: dict[str, Callable[..., Awaitable[None]]] = {
+            OUTBOX_OP_LISTMONK_UPSERT: self._process_listmonk_upsert,
+            OUTBOX_OP_LISTMONK_DELETE: self._process_listmonk_delete,
+            OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL: self._process_invalid_email_block,
+            OUTBOX_OP_MERGE_FINALIZE: self._process_merge_finalize,
+            OUTBOX_OP_TEYCA_BLOCK_CONSENT: self._process_consent_block,
+            OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC: self._process_email_repair_sync,
+        }
+        return handlers.get(operation)
+
     async def _process_claim(
         self,
         *,
@@ -284,22 +302,10 @@ class ExternalDispatcherWorker:
         metrics: ExternalDispatcherMetrics,
     ) -> None:
         try:
-            if claim.operation == OUTBOX_OP_LISTMONK_UPSERT:
-                await self._process_listmonk_upsert(claim=claim, metrics=metrics)
-                return
-            if claim.operation == OUTBOX_OP_LISTMONK_DELETE:
-                await self._process_listmonk_delete(claim=claim, metrics=metrics)
-                return
-            if claim.operation == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL:
-                await self._process_invalid_email_block(claim=claim, metrics=metrics)
-                return
-            if claim.operation == OUTBOX_OP_MERGE_FINALIZE:
-                await self._process_merge_finalize(claim=claim, metrics=metrics)
-                return
-            if claim.operation == OUTBOX_OP_TEYCA_BLOCK_CONSENT:
-                await self._process_consent_block(claim=claim, metrics=metrics)
-                return
-            raise RuntimeError(f"Unsupported outbox operation: {claim.operation}")
+            handler = self._claim_handler(operation=claim.operation)
+            if handler is None:
+                raise RuntimeError(f"Unsupported outbox operation: {claim.operation}")
+            await handler(claim=claim, metrics=metrics)
         except TeycaRateLimitBusyError as exc:
             status = await self._defer_rate_limit_busy(
                 outbox_id=claim.id,
@@ -544,6 +550,89 @@ class ExternalDispatcherWorker:
             outbox_id=claim.id,
             status=status,
         )
+
+    async def _process_email_repair_sync(
+        self,
+        *,
+        claim: OutboxClaim,
+        metrics: ExternalDispatcherMetrics,
+    ) -> None:
+        """Deliver the Р5/Р6 winner/loser Teyca update for one duplicate-email
+        group (teyca-sync-y1c). Seeded by run_email_duplicate_policy_backfill's
+        --sync-teyca instead of calling Teyca directly, so this one-time
+        cleanup backlog drains under the same budget-aware pacing as
+        real-time work instead of a tight loop that blows through the
+        hourly window in one shot. `claim.user_id` is the loser."""
+        repair_id = _payload_optional_int(claim.payload, key="repair_id")
+        winner_user_id = _payload_optional_int(claim.payload, key="winner_user_id")
+        if repair_id is None or winner_user_id is None:
+            raise RuntimeError(
+                f"email_repair_sync payload missing repair_id/winner_user_id: {claim.payload}"
+            )
+        winner_subscriber_id = _payload_optional_int(claim.payload, key="winner_subscriber_id")
+        mark_bad_email = bool(claim.payload.get("mark_bad_email", True))
+        loser_user_id = claim.user_id
+
+        if not await self._user_exists(user_id=loser_user_id):
+            await self._mark_email_repair_synced(
+                repair_id=repair_id,
+                winner_user_id=winner_user_id,
+                winner_subscriber_id=winner_subscriber_id,
+            )
+            await self._mark_done(outbox_id=claim.id)
+            metrics.skipped += 1
+            logger.info(
+                "external_dispatcher_email_repair_sync_user_missing",
+                outbox_id=claim.id,
+                repair_id=repair_id,
+            )
+            return
+
+        await self.teyca_client.update_pass_fields(
+            user_id=winner_user_id,
+            fields={"key6": TEYCA_KEY6_BUGS},
+            rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+        )
+        loser_fields: dict[str, Any] = {"email": None, "key6": TEYCA_KEY6_BUGS}
+        if mark_bad_email:
+            loser_fields["key1"] = TEYCA_KEY1_BAD_EMAIL
+        await self.teyca_client.update_pass_fields(
+            user_id=loser_user_id,
+            fields=loser_fields,
+            rate_limit_max_wait_seconds=self._teyca_rate_limit_max_wait_seconds(),
+        )
+        await self._mark_email_repair_synced(
+            repair_id=repair_id,
+            winner_user_id=winner_user_id,
+            winner_subscriber_id=winner_subscriber_id,
+        )
+        await self._mark_done(outbox_id=claim.id)
+        metrics.done += 1
+        logger.info(
+            "external_dispatcher_email_repair_sync_done",
+            outbox_id=claim.id,
+            repair_id=repair_id,
+            winner_user_id=winner_user_id,
+            loser_user_id=loser_user_id,
+            mark_bad_email=mark_bad_email,
+        )
+
+    async def _mark_email_repair_synced(
+        self,
+        *,
+        repair_id: int,
+        winner_user_id: int,
+        winner_subscriber_id: int | None,
+    ) -> None:
+        async def operation(session: AsyncSession) -> None:
+            repair_repo = EmailRepairLogRepository(session)
+            await repair_repo.mark_teyca_synced(
+                repair_id=repair_id,
+                winner_user_id=winner_user_id,
+                winner_subscriber_id=winner_subscriber_id,
+            )
+
+        await self._run_in_session(operation)
 
     async def _process_merge_finalize(
         self,

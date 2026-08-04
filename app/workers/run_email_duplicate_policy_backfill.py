@@ -35,13 +35,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sync-teyca",
         action="store_true",
-        help="Sync already-applied loser cleanup rows to Teyca",
+        help=(
+            "Enqueue already-applied loser cleanup rows for Teyca sync "
+            "(external_call_outbox; drained by "
+            "run_external_dispatcher_email_repair_sync, not sent directly)"
+        ),
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=100,
-        help="Batch size for --sync-teyca rows (default: 100)",
+        help="Batch size for --sync-teyca enqueue (default: 100)",
     )
     return parser
 

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 from app.config import Settings
@@ -21,20 +20,17 @@ from app.workers.email_repair_backfill import (
 class _BackfillMocks:
     session_factory: MagicMock
     listmonk_client: AsyncMock
-    teyca_client: AsyncMock
 
 
 def _backfill() -> tuple[DuplicateEmailBackfill, _BackfillMocks]:
     mocks = _BackfillMocks(
         session_factory=MagicMock(),
         listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
     )
     backfill = DuplicateEmailBackfill(
         settings=cast(Settings, SimpleNamespace()),
         session_factory=mocks.session_factory,
         listmonk_client=mocks.listmonk_client,
-        teyca_client=mocks.teyca_client,
     )
     return backfill, mocks
 
@@ -250,8 +246,17 @@ async def test_apply_rejects_partial_execution_when_issues_exist() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_teyca_marks_rows_synced() -> None:
+async def test_sync_teyca_enqueues_outbox_task_per_row() -> None:
+    """teyca-sync-y1c: sync_teyca no longer calls Teyca directly (the shared
+    hourly budget is contended by live traffic and a tight loop burned real
+    retry attempts on budget noise) — it seeds external_call_outbox and lets
+    external_dispatcher_worker drain it under budget."""
     backfill, mocks = _backfill()
+    session = AsyncMock()
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session
+    mocks.session_factory.return_value = session_cm
+
     rows = [
         SimpleNamespace(
             id=1,
@@ -260,77 +265,79 @@ async def test_sync_teyca_marks_rows_synced() -> None:
             winner_subscriber_id=777,
             attempts=0,
             mark_bad_email=True,
-        )
-    ]
-
-    with (
-        patch.object(
-            DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
+            trace_id="trace-1",
+            source_event_id="event-1",
         ),
-        patch.object(
-            DuplicateEmailBackfill, "_mark_teyca_synced", new=AsyncMock()
-        ) as mark_teyca_synced,
-    ):
-        summary = await backfill.sync_teyca(batch_size=10)
-
-    assert summary.teyca_synced == 1
-    assert mocks.teyca_client.update_pass_fields.await_count == 2
-    mocks.teyca_client.update_pass_fields.assert_any_await(
-        user_id=20,
-        fields={"key6": "bugs"},
-    )
-    mocks.teyca_client.update_pass_fields.assert_any_await(
-        user_id=10,
-        fields={"email": None, "key1": "bad email", "key6": "bugs"},
-    )
-    mark_teyca_synced.assert_awaited_once_with(
-        repair_id=1,
-        winner_user_id=20,
-        winner_subscriber_id=777,
-    )
-
-
-@pytest.mark.asyncio
-async def test_sync_teyca_same_person_loser_skips_bad_email_mark() -> None:
-    """Р5/Р6 (teyca-sync-37z): same-phone losers are cleared without key1=bad email."""
-    backfill, mocks = _backfill()
-    rows = [
         SimpleNamespace(
             id=2,
             incoming_user_id=11,
             winner_user_id=21,
             winner_subscriber_id=None,
-            attempts=0,
+            attempts=1,
             mark_bad_email=False,
-        )
+            trace_id=None,
+            source_event_id=None,
+        ),
     ]
+
+    outbox_repo = AsyncMock()
+    outbox_repo.enqueue_once.return_value = True
 
     with (
         patch.object(
             DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
         ),
-        patch.object(
-            DuplicateEmailBackfill, "_mark_teyca_synced", new=AsyncMock()
-        ) as mark_teyca_synced,
+        patch(
+            "app.workers.email_repair_backfill.ExternalCallOutboxRepository",
+            return_value=outbox_repo,
+        ),
     ):
         summary = await backfill.sync_teyca(batch_size=10)
 
-    assert summary.teyca_synced == 1
-    mocks.teyca_client.update_pass_fields.assert_any_await(
+    assert summary.loser_rows == 2
+    assert summary.enqueued == 2
+    assert outbox_repo.enqueue_once.await_count == 2
+    outbox_repo.enqueue_once.assert_any_await(
+        operation="teyca_email_repair_sync",
+        dedupe_key="email-repair-sync:1",
+        user_id=10,
+        payload={
+            "repair_id": 1,
+            "winner_user_id": 20,
+            "winner_subscriber_id": 777,
+            "mark_bad_email": True,
+        },
+        trace_id="trace-1",
+        source_event_id="event-1",
+        queue_name=None,
+    )
+    outbox_repo.enqueue_once.assert_any_await(
+        operation="teyca_email_repair_sync",
+        dedupe_key="email-repair-sync:2",
         user_id=11,
-        fields={"email": None, "key6": "bugs"},
+        payload={
+            "repair_id": 2,
+            "winner_user_id": 21,
+            "winner_subscriber_id": None,
+            "mark_bad_email": False,
+        },
+        trace_id=None,
+        source_event_id=None,
+        queue_name=None,
     )
-    mark_teyca_synced.assert_awaited_once_with(
-        repair_id=2,
-        winner_user_id=21,
-        winner_subscriber_id=None,
-    )
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_sync_teyca_marks_retry_on_teyca_error() -> None:
+async def test_sync_teyca_is_idempotent_on_repeated_enqueue() -> None:
+    """enqueue_once is a no-op for a dedupe key already in the outbox, so
+    re-running --sync-teyca after a partial batch never double-enqueues."""
     backfill, mocks = _backfill()
-    mocks.teyca_client.update_pass_fields.side_effect = httpx.ReadTimeout("boom")
+    session = AsyncMock()
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session
+    mocks.session_factory.return_value = session_cm
+
     rows = [
         SimpleNamespace(
             id=1,
@@ -339,6 +346,46 @@ async def test_sync_teyca_marks_retry_on_teyca_error() -> None:
             winner_subscriber_id=777,
             attempts=0,
             mark_bad_email=True,
+            trace_id=None,
+            source_event_id=None,
+        )
+    ]
+    outbox_repo = AsyncMock()
+    outbox_repo.enqueue_once.return_value = False
+
+    with (
+        patch.object(
+            DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
+        ),
+        patch(
+            "app.workers.email_repair_backfill.ExternalCallOutboxRepository",
+            return_value=outbox_repo,
+        ),
+    ):
+        summary = await backfill.sync_teyca(batch_size=10)
+
+    assert summary.loser_rows == 1
+    assert summary.enqueued == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_teyca_rejects_rows_missing_winner_metadata() -> None:
+    backfill, mocks = _backfill()
+    session = AsyncMock()
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session
+    mocks.session_factory.return_value = session_cm
+
+    rows = [
+        SimpleNamespace(
+            id=1,
+            incoming_user_id=10,
+            winner_user_id=None,
+            winner_subscriber_id=None,
+            attempts=0,
+            mark_bad_email=True,
+            trace_id=None,
+            source_event_id=None,
         )
     ]
 
@@ -346,15 +393,10 @@ async def test_sync_teyca_marks_retry_on_teyca_error() -> None:
         patch.object(
             DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
         ),
-        patch.object(
-            DuplicateEmailBackfill, "_mark_retry", new=AsyncMock(return_value="failed")
-        ) as mark_retry,
+        patch(
+            "app.workers.email_repair_backfill.ExternalCallOutboxRepository",
+            return_value=AsyncMock(),
+        ),
+        pytest.raises(DuplicateEmailBackfillError),
     ):
-        summary = await backfill.sync_teyca(batch_size=10)
-
-    assert summary.teyca_failed == 1
-    mark_retry.assert_awaited_once_with(
-        repair_id=1,
-        attempts=1,
-        error_text="boom",
-    )
+        await backfill.sync_teyca(batch_size=10)

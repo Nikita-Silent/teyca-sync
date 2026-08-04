@@ -16,6 +16,7 @@ from app.repositories.external_call_outbox import (
     OUTBOX_OP_MERGE_FINALIZE,
     OUTBOX_OP_TEYCA_BLOCK_CONSENT,
     OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+    OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,
     OutboxClaim,
 )
 from app.repositories.listmonk_users import (
@@ -25,6 +26,7 @@ from app.repositories.listmonk_users import (
 from app.workers import run_external_dispatcher
 from app.workers.external_dispatcher_worker import (
     DEFAULT_OUTBOX_OPERATIONS,
+    EMAIL_REPAIR_SYNC_OUTBOX_OPERATIONS,
     MERGE_OUTBOX_OPERATIONS,
     ExternalDispatcherMetrics,
     ExternalDispatcherWorker,
@@ -1295,3 +1297,142 @@ async def test_run_external_dispatcher_single_iteration_logs_completion() -> Non
         "external-dispatcher-merge",
         extra={"stage": "started"},
     )
+
+
+def _email_repair_sync_claim(
+    *,
+    mark_bad_email: bool = True,
+    winner_subscriber_id: int | None = 777,
+) -> OutboxClaim:
+    return OutboxClaim(
+        id=40,
+        operation=OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,
+        dedupe_key="email-repair-sync:5",
+        user_id=10,
+        payload={
+            "repair_id": 5,
+            "winner_user_id": 20,
+            "winner_subscriber_id": winner_subscriber_id,
+            "mark_bad_email": mark_bad_email,
+        },
+        attempts=0,
+        trace_id="trace-40",
+        source_event_id="event-40",
+        queue_name=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_email_repair_sync_delivers_winner_and_loser() -> None:
+    """teyca-sync-y1c: no longer called directly by the backfill script — this
+    is the paced replacement that never blows through the shared hourly
+    Teyca budget in one burst."""
+    worker = _worker()
+    claim = _email_repair_sync_claim()
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(
+            ExternalDispatcherWorker, "_mark_email_repair_synced", new=AsyncMock()
+        ) as mark_synced,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+    ):
+        await worker._process_email_repair_sync(claim=claim, metrics=metrics)
+
+    update_pass_fields = cast(AsyncMock, worker.teyca_client.update_pass_fields)
+    assert update_pass_fields.await_count == 2
+    update_pass_fields.assert_any_await(
+        user_id=20,
+        fields={"key6": "bugs"},
+        rate_limit_max_wait_seconds=0.0,
+    )
+    update_pass_fields.assert_any_await(
+        user_id=10,
+        fields={"email": None, "key6": "bugs", "key1": "bad email"},
+        rate_limit_max_wait_seconds=0.0,
+    )
+    mark_synced.assert_awaited_once_with(repair_id=5, winner_user_id=20, winner_subscriber_id=777)
+    mark_done.assert_awaited_once_with(outbox_id=40)
+    assert metrics.done == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_email_repair_sync_same_person_skips_bad_email_mark() -> None:
+    """Р5/Р6 (teyca-sync-37z): same-phone losers are cleared without key1=bad email."""
+    worker = _worker()
+    claim = _email_repair_sync_claim(mark_bad_email=False, winner_subscriber_id=None)
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(ExternalDispatcherWorker, "_mark_email_repair_synced", new=AsyncMock()),
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()),
+    ):
+        await worker._process_email_repair_sync(claim=claim, metrics=metrics)
+
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_any_await(
+        user_id=10,
+        fields={"email": None, "key6": "bugs"},
+        rate_limit_max_wait_seconds=0.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_email_repair_sync_skips_when_loser_missing() -> None:
+    worker = _worker()
+    claim = _email_repair_sync_claim()
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=False)),
+        patch.object(
+            ExternalDispatcherWorker, "_mark_email_repair_synced", new=AsyncMock()
+        ) as mark_synced,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+    ):
+        await worker._process_email_repair_sync(claim=claim, metrics=metrics)
+
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_not_awaited()
+    mark_synced.assert_awaited_once_with(repair_id=5, winner_user_id=20, winner_subscriber_id=777)
+    mark_done.assert_awaited_once_with(outbox_id=40)
+    assert metrics.skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_email_repair_sync_rejects_incomplete_payload() -> None:
+    worker = _worker()
+    claim = OutboxClaim(
+        id=41,
+        operation=OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,
+        dedupe_key="email-repair-sync:6",
+        user_id=10,
+        payload={"repair_id": 6},
+        attempts=0,
+        trace_id=None,
+        source_event_id=None,
+        queue_name=None,
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with pytest.raises(RuntimeError):
+        await worker._process_email_repair_sync(claim=claim, metrics=metrics)
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_process_claim_routes_email_repair_sync() -> None:
+    worker = _worker()
+    claim = _email_repair_sync_claim()
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with patch.object(
+        ExternalDispatcherWorker, "_process_email_repair_sync", new=AsyncMock()
+    ) as process_email_repair_sync:
+        await worker._process_claim(claim=claim, metrics=metrics)
+
+    process_email_repair_sync.assert_awaited_once_with(claim=claim, metrics=metrics)
+
+
+def test_default_outbox_operations_include_email_repair_sync() -> None:
+    assert OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC in DEFAULT_OUTBOX_OPERATIONS
+    assert EMAIL_REPAIR_SYNC_OUTBOX_OPERATIONS == (OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,)
