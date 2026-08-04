@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.clients.teyca import TeycaAPIError
+from app.clients.teyca import TeycaAPIError, TeycaRateLimitBusyError
 from app.config import Settings
 from app.workers.consent_bonus_backfill import (
     BACKFILL_STATUSES,
@@ -36,7 +36,7 @@ def test_consent_bonus_idempotency_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_collect_candidates_filters_invalid_duplicate_and_already_logged() -> None:
+async def test_collect_candidates_filters_invalid_duplicate_done_and_failed() -> None:
     backfill, _ = _backfill()
     rows = [
         SimpleNamespace(
@@ -49,6 +49,9 @@ async def test_collect_candidates_filters_invalid_duplicate_and_already_logged()
         SimpleNamespace(
             user_id=4, subscriber_id=104, email="already-paid@example.com", status="enabled"
         ),
+        SimpleNamespace(
+            user_id=5, subscriber_id=105, email="no-card@example.com", status="enabled"
+        ),
     ]
 
     listmonk_repo = AsyncMock()
@@ -60,6 +63,8 @@ async def test_collect_candidates_filters_invalid_duplicate_and_already_logged()
     async def get_by_key(*, idempotency_key: str) -> object | None:
         if idempotency_key == "email_consent:4":
             return SimpleNamespace(status="done")
+        if idempotency_key == "email_consent:5":
+            return SimpleNamespace(status="failed")
         return None
 
     accrual_repo.get_by_key.side_effect = get_by_key
@@ -205,6 +210,72 @@ async def test_accrue_one_resumes_only_remaining_step() -> None:
 
     teyca_client.accrue_bonuses.assert_not_awaited()
     teyca_client.update_pass_fields.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_accrue_one_marks_failed_on_permanent_teyca_error() -> None:
+    """"Card not found"-style 400s are permanent — mark_failed so
+    collect_candidates() stops resurfacing this user forever."""
+    backfill, teyca_client = _backfill()
+    teyca_client.accrue_bonuses.side_effect = TeycaAPIError(
+        "Teyca bonuses request failed: status=400, body=Карта не найдена",
+        status_code=400,
+    )
+    accrual_repo = AsyncMock()
+    accrual_repo.get_by_key.return_value = SimpleNamespace(
+        payload={"bonus_done": False, "key1_done": False}
+    )
+
+    with (
+        patch(
+            "app.workers.consent_bonus_backfill.BonusAccrualRepository",
+            return_value=accrual_repo,
+        ),
+        patch.object(
+            ConsentBonusBackfill,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        with pytest.raises(TeycaAPIError):
+            await backfill._accrue_one(user_id=10)
+
+    accrual_repo.mark_failed.assert_awaited_once()
+    call_kwargs = accrual_repo.mark_failed.await_args.kwargs
+    assert call_kwargs["idempotency_key"] == "email_consent:10"
+    assert "Карта не найдена" in call_kwargs["error_text"]
+    accrual_repo.mark_done_with_payload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_accrue_one_does_not_mark_failed_on_transient_rate_limit() -> None:
+    """Rate-limit-busy is transient (shared budget with live traffic) — the
+    row must stay retryable, not get permanently excluded."""
+    backfill, teyca_client = _backfill()
+    teyca_client.accrue_bonuses.side_effect = TeycaRateLimitBusyError(
+        wait_seconds=20.0, max_wait_seconds=0.0, backend="postgres"
+    )
+    accrual_repo = AsyncMock()
+    accrual_repo.get_by_key.return_value = SimpleNamespace(
+        payload={"bonus_done": False, "key1_done": False}
+    )
+
+    with (
+        patch(
+            "app.workers.consent_bonus_backfill.BonusAccrualRepository",
+            return_value=accrual_repo,
+        ),
+        patch.object(
+            ConsentBonusBackfill,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        with pytest.raises(TeycaRateLimitBusyError):
+            await backfill._accrue_one(user_id=11)
+
+    accrual_repo.mark_failed.assert_not_awaited()
+    accrual_repo.mark_done_with_payload.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,13 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.clients.teyca import BonusOperation, TeycaAPIError, TeycaClient, build_teyca_client
+from app.clients.teyca import (
+    BonusOperation,
+    TeycaAPIError,
+    TeycaClient,
+    TeycaRateLimitBusyError,
+    build_teyca_client,
+)
 from app.config import Settings, get_settings
 from app.consumers.common import is_valid_email
 from app.db.session import SessionLocal
@@ -92,7 +98,14 @@ class ConsentBonusBackfill:
 
     async def collect_candidates(self) -> list[ConsentBonusCandidate]:
         """Select unconfirmed/enabled users with a valid, non-conflicting email
-        and no existing `bonus_accrual_log` entry for the consent bonus."""
+        and no existing `bonus_accrual_log` entry for the consent bonus.
+
+        Skips both `done` (already paid) and `failed` (permanently rejected by
+        Teyca, e.g. "card not found" — retrying would never succeed and would
+        resurface the same user in every future dry-run forever) rows. Only
+        `pending` rows (never attempted, or interrupted by a transient rate
+        limit) are retried.
+        """
 
         async def operation(session: AsyncSession) -> list[ConsentBonusCandidate]:
             listmonk_repo = ListmonkUsersRepository(session)
@@ -113,7 +126,7 @@ class ConsentBonusBackfill:
                 existing = await accrual_repo.get_by_key(
                     idempotency_key=consent_bonus_idempotency_key(user_id)
                 )
-                if existing is not None and existing.status == "done":
+                if existing is not None and existing.status in ("done", "failed"):
                     continue
                 candidates.append(
                     ConsentBonusCandidate(
@@ -193,21 +206,34 @@ class ConsentBonusBackfill:
             "key1_done": bool(saved_payload.get("key1_done", False)),
         }
 
-        if not payload["bonus_done"]:
-            await self.teyca_client.accrue_bonuses(
-                user_id=user_id,
-                bonuses=[BonusOperation.one_shot(value=str(self.settings.consent_bonus_amount))],
-            )
-            payload["bonus_done"] = True
-            await self._save_progress(idempotency_key=idempotency_key, payload=payload)
+        try:
+            if not payload["bonus_done"]:
+                await self.teyca_client.accrue_bonuses(
+                    user_id=user_id,
+                    bonuses=[
+                        BonusOperation.one_shot(value=str(self.settings.consent_bonus_amount))
+                    ],
+                )
+                payload["bonus_done"] = True
+                await self._save_progress(idempotency_key=idempotency_key, payload=payload)
 
-        if not payload["key1_done"]:
-            await self.teyca_client.update_pass_fields(
-                user_id=user_id,
-                fields={"key1": TEYCA_KEY1_CONFIRMED},
-            )
-            payload["key1_done"] = True
-            await self._save_progress(idempotency_key=idempotency_key, payload=payload)
+            if not payload["key1_done"]:
+                await self.teyca_client.update_pass_fields(
+                    user_id=user_id,
+                    fields={"key1": TEYCA_KEY1_CONFIRMED},
+                )
+                payload["key1_done"] = True
+                await self._save_progress(idempotency_key=idempotency_key, payload=payload)
+        except TeycaRateLimitBusyError:
+            # Transient — budget is shared with live production traffic. Leave
+            # the row as `pending` so the next run retries it.
+            raise
+        except TeycaAPIError as exc:
+            # Permanent (e.g. "card not found", HTTP 400) — retrying would
+            # never succeed. Mark `failed` so collect_candidates() stops
+            # resurfacing this user forever; needs manual resolution.
+            await self._mark_failed(idempotency_key=idempotency_key, error_text=str(exc))
+            raise
 
         await self._mark_done(idempotency_key=idempotency_key, payload=payload)
 
@@ -247,6 +273,13 @@ class ConsentBonusBackfill:
         async def operation(session: AsyncSession) -> None:
             repo = BonusAccrualRepository(session)
             await repo.mark_done_with_payload(idempotency_key=idempotency_key, payload=payload)
+
+        await self._run_in_session(operation)
+
+    async def _mark_failed(self, *, idempotency_key: str, error_text: str) -> None:
+        async def operation(session: AsyncSession) -> None:
+            repo = BonusAccrualRepository(session)
+            await repo.mark_failed(idempotency_key=idempotency_key, error_text=error_text)
 
         await self._run_in_session(operation)
 
