@@ -1,4 +1,4 @@
-.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once consumers legacy-import legacy-import-dry-run
+.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once consumers legacy-import legacy-import-dry-run consent-bonus-backfill consent-bonus-backfill-apply
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
@@ -120,6 +120,9 @@ external-dispatcher-merge-once:
 external-dispatcher-invalid-email-once:
 	docker compose run --rm app python -m app.workers.run_external_dispatcher_invalid_email
 
+external-dispatcher-consent-block-once:
+	docker compose run --rm app python -m app.workers.run_external_dispatcher_consent_block
+
 consumers:
 	docker compose run --rm app python -m app.workers.run_queue_consumers
 
@@ -128,3 +131,9 @@ legacy-import:
 
 legacy-import-dry-run:
 	docker compose run --rm --build app python -m app.workers.run_legacy_snapshot_import --source-db-url "$$SOURCE_DB_URL" --dry-run --batch-size "$${BATCH_SIZE:-500}"
+
+consent-bonus-backfill:
+	docker compose run --rm --build app python -m app.workers.run_consent_bonus_backfill
+
+consent-bonus-backfill-apply:
+	docker compose run --rm --build app python -m app.workers.run_consent_bonus_backfill --apply

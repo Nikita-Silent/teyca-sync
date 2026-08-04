@@ -96,6 +96,7 @@ async def test_process_pending_user_blocked() -> None:
     worker, mocks = _worker()
     pending = SimpleNamespace(user_id=12, subscriber_id=112)
     listmonk_repo = AsyncMock()
+    outbox_repo = AsyncMock()
     mocks.listmonk_client.get_subscriber_state.return_value = SubscriberState(
         subscriber_id=112,
         status="blocked",
@@ -106,6 +107,7 @@ async def test_process_pending_user_blocked() -> None:
         pending=pending,
         target_list_ids=[1],
         listmonk_repo=listmonk_repo,
+        outbox_repo=outbox_repo,
     )
 
     assert result is True
@@ -115,6 +117,15 @@ async def test_process_pending_user_blocked() -> None:
         confirmed=False,
         status="blocked",
     )
+    outbox_repo.enqueue_once.assert_awaited_once_with(
+        operation="teyca_block_consent",
+        dedupe_key="consent-block:12",
+        user_id=12,
+        payload={"status": "blocked"},
+        trace_id="consent-sync:12:112",
+        source_event_id="consent-sync:112",
+        queue_name=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -122,6 +133,7 @@ async def test_process_pending_user_blocked_in_target_list_only() -> None:
     worker, mocks = _worker()
     pending = SimpleNamespace(user_id=15, subscriber_id=115)
     listmonk_repo = AsyncMock()
+    outbox_repo = AsyncMock()
     mocks.listmonk_client.get_subscriber_state.return_value = SubscriberState(
         subscriber_id=115,
         status="enabled",
@@ -133,6 +145,7 @@ async def test_process_pending_user_blocked_in_target_list_only() -> None:
         pending=pending,
         target_list_ids=[1, 2],
         listmonk_repo=listmonk_repo,
+        outbox_repo=outbox_repo,
     )
 
     assert result is True
@@ -142,6 +155,111 @@ async def test_process_pending_user_blocked_in_target_list_only() -> None:
         confirmed=False,
         status="blocked",
     )
+    outbox_repo.enqueue_once.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_pending_user_blocked_without_outbox_repo_uses_own_transaction() -> None:
+    """When only listmonk_repo is injected (not outbox_repo), the method must
+    fall back to its own short transaction rather than silently skip the
+    outbox enqueue."""
+    session = AsyncMock()
+    context_manager = AsyncMock()
+    context_manager.__aenter__.return_value = session
+    context_manager.__aexit__.return_value = False
+    session_factory = MagicMock(return_value=context_manager)
+
+    listmonk_client = AsyncMock()
+    listmonk_client.get_subscriber_state.return_value = SubscriberState(
+        subscriber_id=212,
+        status="blocked",
+        list_ids=[1],
+    )
+    worker = ConsentSyncWorker(
+        settings=cast(
+            Settings, SimpleNamespace(listmonk_list_ids="1", consent_sync_batch_size=500)
+        ),
+        session_factory=session_factory,
+        listmonk_client=listmonk_client,
+    )
+
+    with (
+        patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
+        patch(
+            "app.workers.consent_sync_worker.ExternalCallOutboxRepository"
+        ) as outbox_cls,
+    ):
+        listmonk_repo = AsyncMock()
+        listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=212)
+        repo_cls.return_value = listmonk_repo
+        outbox_repo = AsyncMock()
+        outbox_cls.return_value = outbox_repo
+
+        result = await worker._process_pending_user(
+            pending=SimpleNamespace(user_id=20, subscriber_id=212),
+            target_list_ids=[1],
+        )
+
+    assert result is True
+    listmonk_repo.mark_checked.assert_awaited_once_with(
+        user_id=20,
+        pending=False,
+        confirmed=False,
+        status="blocked",
+    )
+    outbox_repo.enqueue_once.assert_awaited_once_with(
+        operation="teyca_block_consent",
+        dedupe_key="consent-block:20",
+        user_id=20,
+        payload={"status": "blocked"},
+        trace_id="consent-sync:20:212",
+        source_event_id="consent-sync:212",
+        queue_name=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_pending_user_blocked_skips_when_mapping_changed() -> None:
+    session = AsyncMock()
+    context_manager = AsyncMock()
+    context_manager.__aenter__.return_value = session
+    context_manager.__aexit__.return_value = False
+    session_factory = MagicMock(return_value=context_manager)
+
+    listmonk_client = AsyncMock()
+    listmonk_client.get_subscriber_state.return_value = SubscriberState(
+        subscriber_id=312,
+        status="blocked",
+        list_ids=[1],
+    )
+    worker = ConsentSyncWorker(
+        settings=cast(
+            Settings, SimpleNamespace(listmonk_list_ids="1", consent_sync_batch_size=500)
+        ),
+        session_factory=session_factory,
+        listmonk_client=listmonk_client,
+    )
+
+    with (
+        patch("app.workers.consent_sync_worker.ListmonkUsersRepository") as repo_cls,
+        patch(
+            "app.workers.consent_sync_worker.ExternalCallOutboxRepository"
+        ) as outbox_cls,
+    ):
+        listmonk_repo = AsyncMock()
+        listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=999)
+        repo_cls.return_value = listmonk_repo
+        outbox_repo = AsyncMock()
+        outbox_cls.return_value = outbox_repo
+
+        result = await worker._process_pending_user(
+            pending=SimpleNamespace(user_id=21, subscriber_id=312),
+            target_list_ids=[1],
+        )
+
+    assert result is True
+    listmonk_repo.mark_checked.assert_not_awaited()
+    outbox_repo.enqueue_once.assert_not_awaited()
 
 
 def test_worker_has_no_teyca_client_or_bonus_dependency() -> None:

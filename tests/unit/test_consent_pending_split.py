@@ -1,8 +1,14 @@
 """Р12/teyca-sync-s5f: consent_pending must mean "needs a Listmonk recheck"
 only. It is written from four technical call sites — none of them may be able
-to reach bonus accrual or Teyca. The consent bonus is granted from exactly one
-place: a successful CRM-driven listmonk_upsert (teyca-sync-4ue, Р4а), in
-app.workers.external_dispatcher_worker._accrue_consent_bonus_if_needed.
+to reach bonus accrual or Teyca. The consent bonus has exactly two legitimate
+triggers, both keyed by the same `email_consent:{user_id}` idempotency row in
+`bonus_accrual_log` so neither can ever double-pay the other:
+
+- the live path: a successful CRM-driven listmonk_upsert (teyca-sync-4ue,
+  Р4а), in app.workers.external_dispatcher_worker._accrue_consent_bonus_if_needed
+- the one-time backdated backfill (teyca-sync-io3), in
+  app.workers.consent_bonus_backfill, run once for the 106 clients missed by
+  the confirmed-status bug (С2) before it was fixed
 
 These tests assert the architectural invariant at the module level: reconcile
 (phase 1 + phase 2) and the bulk subscriber-id refresh CLI — which all call
@@ -55,10 +61,22 @@ def test_consent_sync_worker_never_references_bonus_or_teyca() -> None:
     assert _referenced_names(module_path).isdisjoint(_FORBIDDEN_NAMES)
 
 
-def test_external_dispatcher_worker_is_the_sole_bonus_trigger() -> None:
-    """Contrast case: this is the one module allowed to accrue the bonus."""
+def test_external_dispatcher_worker_is_the_live_bonus_trigger() -> None:
+    """Contrast case: this is the recurring path allowed to accrue the bonus."""
     import app.workers.external_dispatcher_worker as dispatcher_module
 
     module_path = Path(dispatcher_module.__file__)
     assert "BonusAccrualRepository" in _referenced_names(module_path)
     assert "accrue_bonuses" in _referenced_names(module_path)
+
+
+def test_consent_bonus_backfill_is_the_one_time_bonus_trigger() -> None:
+    """Contrast case: the one-time backdated backfill (teyca-sync-io3) shares
+    the same email_consent:{user_id} idempotency key as the live path, so it
+    can never double-pay a user the live path already paid."""
+    import app.workers.consent_bonus_backfill as backfill_module
+
+    module_path = Path(backfill_module.__file__)
+    assert "BonusAccrualRepository" in _referenced_names(module_path)
+    assert "accrue_bonuses" in _referenced_names(module_path)
+    assert backfill_module.BONUS_REASON_EMAIL_CONSENT == "email_consent"

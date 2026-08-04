@@ -14,6 +14,7 @@ from app.config import Settings
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_UPSERT,
     OUTBOX_OP_MERGE_FINALIZE,
+    OUTBOX_OP_TEYCA_BLOCK_CONSENT,
     OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
     OutboxClaim,
 )
@@ -726,6 +727,160 @@ async def test_external_dispatcher_invalid_email_block_skips_teyca_call_when_unc
     apply_ok.assert_awaited_once_with(user_id=20, status="blocked")
     mark_done.assert_awaited_once_with(outbox_id=2)
     assert metrics.done == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_consent_block_success() -> None:
+    """teyca-sync-dd2.1: consent-sync unsubscribes deliver key1=blocked via
+    this low-priority outbox operation, not synchronously from consent_sync."""
+    worker = _worker()
+    claim = OutboxClaim(
+        id=8,
+        operation=OUTBOX_OP_TEYCA_BLOCK_CONSENT,
+        dedupe_key="consent-block:30",
+        user_id=30,
+        payload={"status": "blocked"},
+        attempts=0,
+        trace_id="trace-8",
+        source_event_id="event-8",
+        queue_name="queue-consent-sync",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value=None),
+        set_teyca_key_value=AsyncMock(),
+    )
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_apply_invalid_email_block_success",
+            new=AsyncMock(),
+        ) as apply_ok,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        await worker._process_consent_block(claim=claim, metrics=metrics)
+
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_awaited_once_with(
+        user_id=30,
+        fields={"key1": "blocked"},
+        rate_limit_max_wait_seconds=0.0,
+    )
+    apply_ok.assert_awaited_once_with(user_id=30, status="blocked")
+    mark_done.assert_awaited_once_with(outbox_id=8)
+    assert metrics.done == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_consent_block_skips_teyca_call_when_unchanged() -> None:
+    worker = _worker()
+    claim = OutboxClaim(
+        id=8,
+        operation=OUTBOX_OP_TEYCA_BLOCK_CONSENT,
+        dedupe_key="consent-block:30",
+        user_id=30,
+        payload={"status": "blocked"},
+        attempts=0,
+        trace_id="trace-8",
+        source_event_id="event-8",
+        queue_name="queue-consent-sync",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value="blocked"),
+        set_teyca_key_value=AsyncMock(),
+    )
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=True)),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_apply_invalid_email_block_success",
+            new=AsyncMock(),
+        ) as apply_ok,
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        await worker._process_consent_block(claim=claim, metrics=metrics)
+
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_not_awaited()
+    users_repo.set_teyca_key_value.assert_not_awaited()
+    apply_ok.assert_awaited_once_with(user_id=30, status="blocked")
+    mark_done.assert_awaited_once_with(outbox_id=8)
+    assert metrics.done == 1
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_consent_block_skips_when_user_missing() -> None:
+    worker = _worker()
+    claim = OutboxClaim(
+        id=9,
+        operation=OUTBOX_OP_TEYCA_BLOCK_CONSENT,
+        dedupe_key="consent-block:31",
+        user_id=31,
+        payload={"status": "blocked"},
+        attempts=0,
+        trace_id="trace-9",
+        source_event_id="event-9",
+        queue_name="queue-consent-sync",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with (
+        patch.object(ExternalDispatcherWorker, "_user_exists", new=AsyncMock(return_value=False)),
+        patch.object(ExternalDispatcherWorker, "_mark_done", new=AsyncMock()) as mark_done,
+    ):
+        await worker._process_consent_block(claim=claim, metrics=metrics)
+
+    cast(AsyncMock, worker.teyca_client.update_pass_fields).assert_not_awaited()
+    mark_done.assert_awaited_once_with(outbox_id=9, payload=claim.payload)
+    assert metrics.skipped == 1
+
+
+def test_default_outbox_operations_include_consent_block() -> None:
+    assert OUTBOX_OP_TEYCA_BLOCK_CONSENT in DEFAULT_OUTBOX_OPERATIONS
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_process_claim_routes_consent_block() -> None:
+    worker = _worker()
+    claim = OutboxClaim(
+        id=10,
+        operation=OUTBOX_OP_TEYCA_BLOCK_CONSENT,
+        dedupe_key="consent-block:32",
+        user_id=32,
+        payload={"status": "blocked"},
+        attempts=0,
+        trace_id="trace-10",
+        source_event_id="event-10",
+        queue_name="queue-consent-sync",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+
+    with patch.object(
+        ExternalDispatcherWorker, "_process_consent_block", new=AsyncMock()
+    ) as process_consent_block:
+        await worker._process_claim(claim=claim, metrics=metrics)
+
+    process_consent_block.assert_awaited_once_with(claim=claim, metrics=metrics)
 
 
 @pytest.mark.asyncio

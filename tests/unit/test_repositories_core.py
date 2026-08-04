@@ -13,8 +13,10 @@ from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_UPSERT,
     OUTBOX_OP_MERGE_FINALIZE,
+    OUTBOX_OP_TEYCA_BLOCK_CONSENT,
     OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
     ExternalCallOutboxRepository,
+    dedupe_key_for_consent_block,
 )
 from app.repositories.listmonk_user_archive import ListmonkUserArchiveRepository
 from app.repositories.listmonk_users import (
@@ -224,6 +226,8 @@ async def test_listmonk_users_repository_paths() -> None:
     )
     assert await repo.get_pending_batch(limit=10) == ["a", "b"]
     assert await repo.get_batch_after_user_id(last_user_id=1, limit=10) == ["a", "b"]
+    assert await repo.get_by_statuses(statuses=["unconfirmed", "enabled"]) == ["a", "b"]
+    assert await repo.get_by_statuses(statuses=[]) == []
 
     await repo.mark_checked(user_id=1, pending=False, confirmed=True, status="confirmed")
     await repo.mark_checked(user_id=2, pending=True, confirmed=False)
@@ -437,6 +441,40 @@ async def test_claim_batch_orders_invalid_email_block_first() -> None:
     assert order_by_clause.index("teyca_block_invalid_email") < order_by_clause.index(
         "created_at"
     )
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_orders_consent_block_last() -> None:
+    """teyca-sync-dd2.1: the consent-unsubscribe backlog must sort behind
+    invalid-email blocks AND bonus/merge work — it's low priority by design."""
+    session = AsyncMock()
+    repo = ExternalCallOutboxRepository(session)
+    session.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+    await repo.claim_batch(
+        operations=[
+            OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
+            OUTBOX_OP_MERGE_FINALIZE,
+            OUTBOX_OP_TEYCA_BLOCK_CONSENT,
+        ],
+        limit=10,
+        worker_id="worker-1",
+    )
+
+    stmt = session.execute.await_args.args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    order_by_clause = compiled[compiled.index("ORDER BY") :]
+    assert "'teyca_block_invalid_email') THEN 0" in order_by_clause
+    assert "'teyca_block_consent') THEN 2" in order_by_clause
+    assert "ELSE 1" in order_by_clause
+    invalid_email_pos = order_by_clause.index("teyca_block_invalid_email")
+    consent_block_pos = order_by_clause.index("teyca_block_consent")
+    created_at_pos = order_by_clause.index("created_at")
+    assert invalid_email_pos < consent_block_pos < created_at_pos
+
+
+def test_dedupe_key_for_consent_block() -> None:
+    assert dedupe_key_for_consent_block(user_id=42) == "consent-block:42"
 
 
 @pytest.mark.asyncio

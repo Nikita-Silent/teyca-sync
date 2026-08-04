@@ -21,6 +21,11 @@ from structlog import contextvars as log_contextvars
 from app.clients.listmonk import ListmonkSDKClient, SubscriberDelta, SubscriberState
 from app.config import Settings, get_settings
 from app.db.session import SessionLocal
+from app.repositories.external_call_outbox import (
+    OUTBOX_OP_TEYCA_BLOCK_CONSENT,
+    ExternalCallOutboxRepository,
+    dedupe_key_for_consent_block,
+)
 from app.repositories.listmonk_users import (
     DuplicateListmonkSubscriberIdError,
     ListmonkUsersRepository,
@@ -152,12 +157,78 @@ class ConsentSyncWorker:
 
         await self._run_in_session(operation)
 
+    async def _mark_blocked_and_enqueue_teyca_task(
+        self,
+        *,
+        user_id: int,
+        subscriber_id: int,
+        trace_id: str,
+        source_event_id: str,
+        listmonk_repo: ListmonkUsersRepository | None = None,
+        outbox_repo: ExternalCallOutboxRepository | None = None,
+    ) -> None:
+        """Persist the local blocked state and enqueue a low-priority Teyca
+        delivery task in the same transaction (teyca-sync-dd2.1).
+
+        `enqueue_once` is a no-op if this user already has a consent-block
+        task (pending, processing, or done) — repeated detections of the same
+        blocked state never create a second task or a second Teyca call.
+        """
+        if listmonk_repo is not None and outbox_repo is not None:
+            await listmonk_repo.mark_checked(
+                user_id=user_id,
+                pending=False,
+                confirmed=False,
+                status=TEYCA_KEY1_BLOCKED,
+            )
+            await outbox_repo.enqueue_once(
+                operation=OUTBOX_OP_TEYCA_BLOCK_CONSENT,
+                dedupe_key=dedupe_key_for_consent_block(user_id=user_id),
+                user_id=user_id,
+                payload={"status": TEYCA_KEY1_BLOCKED},
+                trace_id=trace_id,
+                source_event_id=source_event_id,
+                queue_name=None,
+            )
+            return
+
+        async def operation(session: AsyncSession) -> None:
+            repo = ListmonkUsersRepository(session)
+            current = await repo.get_by_user_id(user_id=user_id)
+            if current is None or int(current.subscriber_id) != subscriber_id:
+                logger.warning(
+                    "consent_sync_mapping_changed_skip_mark_checked",
+                    user_id=user_id,
+                    subscriber_id=subscriber_id,
+                    current_subscriber_id=None if current is None else int(current.subscriber_id),
+                )
+                return
+            await repo.mark_checked(
+                user_id=user_id,
+                pending=False,
+                confirmed=False,
+                status=TEYCA_KEY1_BLOCKED,
+            )
+            outbox = ExternalCallOutboxRepository(session)
+            await outbox.enqueue_once(
+                operation=OUTBOX_OP_TEYCA_BLOCK_CONSENT,
+                dedupe_key=dedupe_key_for_consent_block(user_id=user_id),
+                user_id=user_id,
+                payload={"status": TEYCA_KEY1_BLOCKED},
+                trace_id=trace_id,
+                source_event_id=source_event_id,
+                queue_name=None,
+            )
+
+        await self._run_in_session(operation)
+
     async def _process_pending_user(
         self,
         *,
         pending: Any,
         target_list_ids: list[int],
         listmonk_repo: ListmonkUsersRepository | None = None,
+        outbox_repo: ExternalCallOutboxRepository | None = None,
         subscriber_override: SubscriberState | None = None,
         metrics: ConsentSyncMetrics | None = None,
     ) -> bool:
@@ -197,15 +268,18 @@ class ConsentSyncWorker:
             normalized_status = subscriber.status.strip().lower()
             blocked_in_targets = subscriber.has_blocked_for_any(target_list_ids=target_list_ids)
             if normalized_status in {"blocked", "blocklisted", "blacklisted"} or blocked_in_targets:
-                # Р11 (закрыто 2026-07-30): отписки в Teyca не отправляем синхронно —
-                # синхронный вызов сюда выжигал суточный лимит (авария, teyca-sync-i6r).
+                # Р11 (пересмотрено 2026-07-31, teyca-sync-dd2.1): consent_sync сам
+                # никогда не вызывает Teyca — синхронный вызов отсюда выжигал суточный
+                # лимит (авария, teyca-sync-i6r). Доставка key1=blocked уходит в
+                # external_call_outbox с низким приоритетом, под бюджетом вызовов.
                 _inc(metrics, "blocked_done")
-                await self._mark_checked(
+                await self._mark_blocked_and_enqueue_teyca_task(
                     user_id=user_id,
                     subscriber_id=subscriber_id,
-                    pending=False,
-                    status=TEYCA_KEY1_BLOCKED,
+                    trace_id=trace_id,
+                    source_event_id=source_event_id,
                     listmonk_repo=listmonk_repo,
+                    outbox_repo=outbox_repo,
                 )
                 logger.info(
                     "consent_sync_blocked",

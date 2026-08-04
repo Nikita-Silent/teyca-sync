@@ -214,6 +214,18 @@ class ListmonkUsersRepository:
                 rows=_to_duplicate_mapping_rows(duplicate_rows),
             ) from exc
 
+    async def get_by_statuses(self, *, statuses: list[str]) -> list[ListmonkUser]:
+        """Return rows whose current status matches one of the given values."""
+        if not statuses:
+            return []
+        stmt: Select[tuple[ListmonkUser]] = (
+            select(ListmonkUser)
+            .where(ListmonkUser.status.in_(statuses))
+            .order_by(ListmonkUser.user_id.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_pending_batch(self, *, limit: int) -> list[ListmonkUser]:
         """Return batch of pending users ordered by user_id."""
         stmt: Select[tuple[ListmonkUser]] = (

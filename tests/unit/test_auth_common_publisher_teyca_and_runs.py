@@ -16,6 +16,7 @@ from app.clients.teyca import (
     TeycaClient,
     TeycaRateLimitBusyError,
     _build_budget_limits,
+    _extract_operation_items,
     build_teyca_client,
     build_teyca_rate_limiter,
 )
@@ -223,6 +224,79 @@ async def test_teyca_client_all_branches_with_injected_http_client() -> None:
         await client.update_pass_fields(user_id=10, fields={"k": "v"})
 
     assert rate_limiter.acquire.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_teyca_client_list_operations_returns_items_and_respects_budget() -> None:
+    settings = SimpleNamespace(
+        teyca_base_url="https://api.example.com/",
+        teyca_api_key="api-key",
+        teyca_token="token-1",
+    )
+    http_client = AsyncMock()
+    http_client.post.return_value = SimpleNamespace(
+        status_code=200,
+        text="ok",
+        json=lambda: [{"user_id": 10, "value": "100.0"}],
+    )
+    rate_limiter = AsyncMock()
+    client = TeycaClient(
+        settings=cast(Settings, settings),
+        http_client=http_client,
+        rate_limiter=rate_limiter,
+    )
+
+    items = await client.list_operations(user_ids=[10, 11])
+
+    assert items == [{"user_id": 10, "value": "100.0"}]
+    rate_limiter.acquire.assert_awaited_once()
+    call_kwargs = http_client.post.await_args.kwargs
+    assert call_kwargs["json"] == {"filters": {"user_ids": [10, 11]}, "order": "desc"}
+
+
+@pytest.mark.asyncio
+async def test_teyca_client_list_operations_empty_user_ids_skips_request() -> None:
+    client = TeycaClient(
+        settings=cast(
+            Settings,
+            SimpleNamespace(
+                teyca_base_url="https://api.example.com/",
+                teyca_api_key="api-key",
+                teyca_token="token-1",
+            ),
+        ),
+        http_client=AsyncMock(),
+        rate_limiter=AsyncMock(),
+    )
+    assert await client.list_operations(user_ids=[]) == []
+
+
+@pytest.mark.asyncio
+async def test_teyca_client_list_operations_raises_on_error_status() -> None:
+    http_client = AsyncMock()
+    http_client.post.return_value = SimpleNamespace(status_code=500, text="boom")
+    client = TeycaClient(
+        settings=cast(
+            Settings,
+            SimpleNamespace(
+                teyca_base_url="https://api.example.com/",
+                teyca_api_key="api-key",
+                teyca_token="token-1",
+            ),
+        ),
+        http_client=http_client,
+        rate_limiter=AsyncMock(),
+    )
+    with pytest.raises(TeycaAPIError):
+        await client.list_operations(user_ids=[1])
+
+
+def test_extract_operation_items_handles_wrapped_and_plain_shapes() -> None:
+    assert _extract_operation_items([{"user_id": 1}, "bad"]) == [{"user_id": 1}]
+    assert _extract_operation_items({"items": [{"user_id": 2}]}) == [{"user_id": 2}]
+    assert _extract_operation_items({"data": [{"user_id": 3}]}) == [{"user_id": 3}]
+    assert _extract_operation_items({"unexpected": "shape"}) == []
+    assert _extract_operation_items("not a container") == []
 
 
 def test_teyca_client_settings_validation() -> None:

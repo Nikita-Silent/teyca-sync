@@ -323,6 +323,70 @@ class TeycaClient:
             status_code=response.status_code,
         )
 
+    async def list_operations(
+        self,
+        *,
+        user_ids: list[int],
+        limit: int = 100,
+        offset: int = 0,
+        rate_limit_max_wait_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Call POST /v1/{token}/operations filtered by user_ids[] (batch history read).
+
+        Used before one-off backdated accruals (teyca-sync-io3) to cross-check that
+        Teyca does not already show a matching operation our own bonus_accrual_log
+        missed — the log is the authoritative idempotency guard, this is a secondary
+        sanity check against out-of-band grants.
+        """
+        if not user_ids:
+            return []
+        headers = self._get_headers()
+        url = (
+            f"{self._settings.teyca_base_url.rstrip('/')}"
+            f"/v1/{self._settings.teyca_token}/operations?limit={limit}&offset={offset}"
+        )
+        payload: dict[str, Any] = {"filters": {"user_ids": list(user_ids)}, "order": "desc"}
+        request_id = str(uuid4())
+        logger.info(
+            "teyca_list_operations_request",
+            request_id=request_id,
+            url=url,
+            user_id_count=len(user_ids),
+        )
+        await self._rate_limiter.acquire(max_wait_seconds=rate_limit_max_wait_seconds)
+        response = await self._execute(
+            "post",
+            url,
+            json=payload,
+            headers=headers,
+            action="list_operations",
+        )
+
+        if response.status_code >= 400:
+            logger.error(
+                "teyca_list_operations_failed",
+                request_id=request_id,
+                url=url,
+                status_code=response.status_code,
+                response_body=response.text,
+            )
+            raise TeycaAPIError(
+                (
+                    "Teyca operations request failed: "
+                    f"status={response.status_code}, body={response.text}"
+                ),
+                status_code=response.status_code,
+            )
+        items = _extract_operation_items(response.json())
+        logger.info(
+            "teyca_list_operations_done",
+            request_id=request_id,
+            url=url,
+            status_code=response.status_code,
+            item_count=len(items),
+        )
+        return items
+
     def _get_headers(self) -> dict[str, str]:
         if not self._settings.teyca_token or not self._settings.teyca_api_key:
             raise TeycaAPIError("TEYCA_TOKEN/TEYCA_API_KEY are not configured")
@@ -333,6 +397,17 @@ class TeycaClient:
             f"{self._settings.teyca_base_url.rstrip('/')}"
             f"/v1/{self._settings.teyca_token}/passes/{user_id}"
         )
+
+
+def _extract_operation_items(data: object) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("items", "data", "results", "operations"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
 
 
 def build_teyca_rate_limiter(

@@ -22,6 +22,7 @@ OUTBOX_OP_LISTMONK_UPSERT = "listmonk_upsert"
 OUTBOX_OP_LISTMONK_DELETE = "listmonk_delete"
 OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL = "teyca_block_invalid_email"
 OUTBOX_OP_MERGE_FINALIZE = "merge_finalize"
+OUTBOX_OP_TEYCA_BLOCK_CONSENT = "teyca_block_consent"
 
 
 def dedupe_key_for_listmonk_sync(*, user_id: int) -> str:
@@ -38,6 +39,10 @@ def dedupe_key_for_invalid_email_block(*, user_id: int) -> str:
 
 def dedupe_key_for_merge_finalize(*, user_id: int) -> str:
     return f"merge-finalize:{user_id}"
+
+
+def dedupe_key_for_consent_block(*, user_id: int) -> str:
+    return f"consent-block:{user_id}"
 
 
 @dataclass(slots=True)
@@ -151,16 +156,21 @@ class ExternalCallOutboxRepository:
     ) -> list[OutboxClaim]:
         """Claim due jobs in a short transaction using SKIP LOCKED.
 
-        Ordered by priority first (teyca-sync-3al): invalid-email blocks ahead
-        of everything else, so a scarce Teyca call budget spends itself on
-        blocking bad addresses before bonus/merge work. `limit<=0` (budget
-        exhausted) claims nothing at all rather than clamping to 1.
+        Ordered by priority first (teyca-sync-3al, teyca-sync-dd2.1):
+        invalid-email blocks ahead of everything else, so a scarce Teyca call
+        budget spends itself on blocking bad addresses before bonus/merge
+        work; consent-unsubscribe blocks (the 6362-record backlog from
+        teyca-sync-i6r) sort last so they never compete with real-time work,
+        only trickling out under whatever budget is left over.
+        `limit<=0` (budget exhausted) claims nothing at all rather than
+        clamping to 1.
         """
         if not operations or limit <= 0:
             return []
         now = datetime.now(UTC)
         priority = case(
             (ExternalCallOutbox.operation == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL, 0),
+            (ExternalCallOutbox.operation == OUTBOX_OP_TEYCA_BLOCK_CONSENT, 2),
             else_=1,
         )
         stmt: Select[tuple[ExternalCallOutbox]] = (

@@ -29,6 +29,7 @@ from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_DELETE,
     OUTBOX_OP_LISTMONK_UPSERT,
     OUTBOX_OP_MERGE_FINALIZE,
+    OUTBOX_OP_TEYCA_BLOCK_CONSENT,
     OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,
     ExternalCallOutboxRepository,
     OutboxClaim,
@@ -46,6 +47,7 @@ logger = structlog.get_logger()
 
 BONUS_REASON_EMAIL_CONSENT = "email_consent"
 TEYCA_KEY1_CONFIRMED = "confirmed"
+TEYCA_KEY1_BLOCKED = "blocked"
 
 LISTMONK_OUTBOX_OPERATIONS = (
     OUTBOX_OP_LISTMONK_UPSERT,
@@ -53,10 +55,12 @@ LISTMONK_OUTBOX_OPERATIONS = (
 )
 INVALID_EMAIL_OUTBOX_OPERATIONS = (OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL,)
 MERGE_OUTBOX_OPERATIONS = (OUTBOX_OP_MERGE_FINALIZE,)
+CONSENT_BLOCK_OUTBOX_OPERATIONS = (OUTBOX_OP_TEYCA_BLOCK_CONSENT,)
 DEFAULT_OUTBOX_OPERATIONS = (
     *LISTMONK_OUTBOX_OPERATIONS,
     *INVALID_EMAIL_OUTBOX_OPERATIONS,
     *MERGE_OUTBOX_OPERATIONS,
+    *CONSENT_BLOCK_OUTBOX_OPERATIONS,
 )
 
 
@@ -292,6 +296,9 @@ class ExternalDispatcherWorker:
             if claim.operation == OUTBOX_OP_MERGE_FINALIZE:
                 await self._process_merge_finalize(claim=claim, metrics=metrics)
                 return
+            if claim.operation == OUTBOX_OP_TEYCA_BLOCK_CONSENT:
+                await self._process_consent_block(claim=claim, metrics=metrics)
+                return
             raise RuntimeError(f"Unsupported outbox operation: {claim.operation}")
         except TeycaRateLimitBusyError as exc:
             status = await self._defer_rate_limit_busy(
@@ -510,6 +517,33 @@ class ExternalDispatcherWorker:
             )
 
         await self._run_in_session(operation)
+
+    async def _process_consent_block(
+        self,
+        *,
+        claim: OutboxClaim,
+        metrics: ExternalDispatcherMetrics,
+    ) -> None:
+        """Deliver key1=blocked to Teyca for a consent-sync unsubscribe
+        (teyca-sync-dd2.1). Lowest dispatch priority (`claim_batch`) so this
+        6362-record backlog never competes with real-time work — it only
+        drains whatever Teyca call budget is left over. `_send_teyca_key_if_changed`
+        skips the call entirely if this user's key1 already reads `blocked`."""
+        if not await self._user_exists(user_id=claim.user_id):
+            await self._mark_done(outbox_id=claim.id, payload=claim.payload)
+            metrics.skipped += 1
+            logger.info("external_dispatcher_consent_block_user_missing", outbox_id=claim.id)
+            return
+        status = _payload_text(claim.payload, key="status") or TEYCA_KEY1_BLOCKED
+        await self._send_teyca_key_if_changed(user_id=claim.user_id, key="key1", value=status)
+        await self._apply_invalid_email_block_success(user_id=claim.user_id, status=status)
+        await self._mark_done(outbox_id=claim.id)
+        metrics.done += 1
+        logger.info(
+            "external_dispatcher_consent_block_done",
+            outbox_id=claim.id,
+            status=status,
+        )
 
     async def _process_merge_finalize(
         self,
