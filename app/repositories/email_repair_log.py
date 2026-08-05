@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from app.db.models import EmailRepairLog
+from app.db.models import EmailRepairLog, User
 
 
 class EmailRepairLogRepository:
@@ -142,6 +143,49 @@ class EmailRepairLogRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_stale_pending_batch(self, *, limit: int) -> list[EmailRepairLog]:
+        """Return pending rows whose recorded conflict no longer exists.
+
+        A pending row is stale once either side's current `users.email` no
+        longer matches `normalized_email` (`IS DISTINCT FROM`, so a missing
+        user or a NULL email counts as a mismatch too) — the conflict it
+        describes was already resolved by other means, most likely this
+        row's own duplicate group getting cleared by the y1c policy
+        backfill under a different email_repair_log row. The never-scheduled
+        email_repair_worker never marked the original row done, so it was
+        left pending indefinitely (teyca-sync-y1c).
+        """
+        incoming_user = aliased(User)
+        existing_user = aliased(User)
+        normalized_incoming = func.lower(func.trim(incoming_user.email))
+        normalized_existing = func.lower(func.trim(existing_user.email))
+        stmt: Select[tuple[EmailRepairLog]] = (
+            select(EmailRepairLog)
+            .outerjoin(incoming_user, incoming_user.user_id == EmailRepairLog.incoming_user_id)
+            .outerjoin(existing_user, existing_user.user_id == EmailRepairLog.existing_user_id)
+            .where(
+                EmailRepairLog.status == "pending",
+                or_(
+                    normalized_incoming.is_distinct_from(EmailRepairLog.normalized_email),
+                    normalized_existing.is_distinct_from(EmailRepairLog.normalized_email),
+                ),
+            )
+            .order_by(EmailRepairLog.id.asc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def mark_stale(self, *, repair_id: int, reason: str) -> None:
+        """Terminally mark a pending row whose recorded conflict no longer exists."""
+        now = datetime.now(UTC)
+        stmt = (
+            update(EmailRepairLog)
+            .where(EmailRepairLog.id == repair_id)
+            .values(status="stale", error_text=reason, processed_at=now, next_retry_at=None)
+        )
+        await self._session.execute(stmt)
 
     async def mark_processing(self, *, repair_id: int) -> None:
         """Mark a remediation row as being processed."""

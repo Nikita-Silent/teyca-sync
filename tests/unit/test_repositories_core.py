@@ -354,6 +354,17 @@ async def test_email_repair_log_repository_paths() -> None:
     )
     assert await repo.get_db_applied_batch(limit=10) == ["row"]
 
+    session.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: ["stale-row"])
+    )
+    assert await repo.get_stale_pending_batch(limit=10) == ["stale-row"]
+
+    session.execute.reset_mock()
+    await repo.mark_stale(repair_id=5, reason="no longer conflicting")
+    params = session.execute.await_args.args[0].compile().params
+    assert params["status"] == "stale"
+    assert params["error_text"] == "no longer conflicting"
+
 
 @pytest.mark.asyncio
 async def test_external_call_outbox_repository_paths() -> None:

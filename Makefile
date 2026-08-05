@@ -1,4 +1,4 @@
-.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once external-dispatcher-email-repair-sync-once consumers legacy-import legacy-import-dry-run consent-bonus-backfill consent-bonus-backfill-apply consent-block-backfill consent-block-backfill-apply
+.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once external-dispatcher-email-repair-sync-once consumers legacy-import legacy-import-dry-run consent-bonus-backfill consent-bonus-backfill-apply consent-block-backfill consent-block-backfill-apply stale-pending-repair-cleanup stale-pending-repair-cleanup-apply
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
@@ -146,3 +146,9 @@ consent-block-backfill:
 
 consent-block-backfill-apply:
 	docker compose run --rm --build app python -m app.workers.run_consent_block_backfill --apply
+
+stale-pending-repair-cleanup:
+	docker compose run --rm --build app python -m app.workers.run_stale_pending_repair_cleanup
+
+stale-pending-repair-cleanup-apply:
+	docker compose run --rm --build app python -m app.workers.run_stale_pending_repair_cleanup --apply
