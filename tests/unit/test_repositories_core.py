@@ -307,8 +307,9 @@ async def test_email_repair_log_repository_paths() -> None:
     assert params["trace_id"] == "trace-1"
 
     session.execute.reset_mock()
+    session.execute.return_value = SimpleNamespace(scalar_one=lambda: 99)
 
-    await repo.create_db_applied(
+    repair_id = await repo.create_db_applied(
         normalized_email="duplicate@example.com",
         incoming_user_id=10,
         existing_user_id=20,
@@ -317,12 +318,14 @@ async def test_email_repair_log_repository_paths() -> None:
         source_event_id="backfill-1",
         trace_id="trace-1",
     )
+    assert repair_id == 99
     params = session.execute.await_args.args[0].compile().params
     assert params["status"] == "db_applied"
     assert params["winner_user_id"] == 20
     assert params["winner_subscriber_id"] == 33
     assert params["mark_bad_email"] is True
     session.execute.reset_mock()
+    session.execute.return_value = SimpleNamespace(scalar_one=lambda: 100)
 
     await repo.create_db_applied(
         normalized_email="same-person@example.com",
@@ -339,16 +342,6 @@ async def test_email_repair_log_repository_paths() -> None:
     assert params["mark_bad_email"] is False
     session.execute.reset_mock()
 
-    session.execute.return_value = SimpleNamespace()
-    assert (
-        await repo.mark_retry(
-            repair_id=1,
-            attempts=3,
-            error_text="boom",
-            max_attempts=3,
-        )
-        == "manual_review"
-    )
     session.execute.return_value = SimpleNamespace(
         scalars=lambda: SimpleNamespace(all=lambda: ["row"])
     )

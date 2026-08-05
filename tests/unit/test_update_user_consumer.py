@@ -4,6 +4,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.config import Settings
 from app.consumers.update_user import UpdateConsumerDeps, handle
@@ -29,11 +30,24 @@ def _payload(user_id: int = 20, email: str = "up@example.com") -> dict[str, obje
     }
 
 
+class _FakeUniqueViolation(Exception):
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__(constraint_name)
+        self.constraint_name = constraint_name
+
+
+def _email_unique_violation() -> IntegrityError:
+    return IntegrityError(
+        "INSERT ...",
+        {},
+        _FakeUniqueViolation("uq_users_email_lower_trim"),
+    )
+
+
 @dataclass(slots=True)
 class _Mocks:
     users_repo: AsyncMock
     listmonk_repo: AsyncMock
-    email_repair_repo: AsyncMock
     outbox_repo: AsyncMock
     merge_repo: AsyncMock
     old_db_repo: AsyncMock
@@ -43,16 +57,15 @@ def _deps() -> tuple[UpdateConsumerDeps, _Mocks]:
     mocks = _Mocks(
         users_repo=AsyncMock(),
         listmonk_repo=AsyncMock(),
-        email_repair_repo=AsyncMock(),
         outbox_repo=AsyncMock(),
         merge_repo=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
     deps = UpdateConsumerDeps(
         settings=cast(Settings, SimpleNamespace(listmonk_list_ids="3")),
+        session=AsyncMock(),
         users_repo=mocks.users_repo,
         listmonk_repo=mocks.listmonk_repo,
-        email_repair_repo=mocks.email_repair_repo,
         outbox_repo=mocks.outbox_repo,
         merge_repo=mocks.merge_repo,
         old_db_repo=mocks.old_db_repo,
@@ -66,7 +79,6 @@ async def test_update_when_merge_already_exists_enqueues_only_listmonk_sync() ->
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = True
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps)
 
@@ -83,7 +95,6 @@ async def test_update_when_merge_missing_and_old_data_exists_enqueues_merge_fina
     mocks.merge_repo.exists.return_value = False
     mocks.old_db_repo.get_user_data.return_value = OldUserData(bonus=40.0, summ=15)
     mocks.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=902)
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
     mocks.outbox_repo.enqueue_once.return_value = True
 
     await handle(_payload(), deps=deps)
@@ -102,7 +113,6 @@ async def test_update_skips_merge_if_merge_log_appears_after_old_db_prefetch() -
     mocks.merge_repo.exists.side_effect = [False, True]
     mocks.old_db_repo.get_user_data.return_value = OldUserData(bonus=40.0, summ=15)
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps)
 
@@ -117,7 +127,6 @@ async def test_update_when_merge_missing_but_old_data_empty() -> None:
     mocks.merge_repo.exists.return_value = False
     mocks.old_db_repo.get_user_data.return_value = None
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps)
 
@@ -133,7 +142,6 @@ async def test_update_invalid_email_enqueues_block_and_skips_listmonk_sync() -> 
 
     await handle(_payload(email="not-an-email"), deps=deps)
 
-    mocks.listmonk_repo.get_other_user_ids_by_email.assert_not_awaited()
     mocks.outbox_repo.enqueue_once.assert_not_awaited()
     latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
     assert latest_kwargs["operation"] == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL
@@ -146,7 +154,6 @@ async def test_update_retry_waits_for_user_lock() -> None:
     mocks.merge_repo.exists.return_value = True
     mocks.users_repo.get_by_user_id.return_value = None
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps, wait_for_lock=True)
 
@@ -160,7 +167,6 @@ async def test_update_emits_step_logs_for_major_phases() -> None:
     mocks.users_repo.get_by_user_id.return_value = None
     mocks.old_db_repo.get_user_data.return_value = OldUserData(bonus=40.0, summ=15)
     mocks.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=902)
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
     mocks.outbox_repo.enqueue_once.return_value = True
 
     with patch("app.consumers.update_user.logger") as logger:
@@ -173,8 +179,6 @@ async def test_update_emits_step_logs_for_major_phases() -> None:
     assert "update_consumer_old_db_read_done" in step_events
     assert "update_consumer_users_upsert_start" in step_events
     assert "update_consumer_users_upsert_done" in step_events
-    assert "update_consumer_email_conflict_check_start" in step_events
-    assert "update_consumer_email_conflict_check_done" in step_events
     assert "update_consumer_listmonk_enqueue_start" in step_events
     assert "update_consumer_listmonk_enqueue_done" in step_events
     assert "update_consumer_merge_enqueue_start" in step_events
@@ -182,25 +186,46 @@ async def test_update_emits_step_logs_for_major_phases() -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_duplicate_email_schedules_repair_and_skips_outbox() -> None:
+async def test_update_email_race_won_proceeds_to_listmonk_sync() -> None:
+    """teyca-sync-eh8: users.upsert raising the unique-email constraint is
+    resolved in-process via the Р5/Р6 policy, not scheduled for a
+    never-run worker. Winning the race continues normally."""
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = True
     mocks.users_repo.get_by_user_id.return_value = None
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = [21]
+    mocks.users_repo.upsert.side_effect = [_email_unique_violation(), None]
 
-    await handle(_payload(email="duplicate@example.com"), deps=deps)
+    with patch(
+        "app.consumers.update_user.resolve_users_email_conflict",
+        new=AsyncMock(return_value=True),
+    ) as resolver:
+        await handle(_payload(email="duplicate@example.com"), deps=deps)
 
-    mocks.email_repair_repo.create_pending.assert_awaited_once_with(
-        normalized_email="duplicate@example.com",
-        incoming_user_id=20,
-        existing_user_id=21,
-        source_event_type="UPDATE",
-        source_event_id=None,
-        trace_id=None,
-    )
+    resolver.assert_awaited_once()
+    resolver_await_args = resolver.await_args
+    assert resolver_await_args is not None
+    assert resolver_await_args.kwargs["user_id"] == 20
+    latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
+    assert latest_kwargs["operation"] == OUTBOX_OP_LISTMONK_UPSERT
+
+
+@pytest.mark.asyncio
+async def test_update_email_race_lost_stops_without_listmonk_sync() -> None:
+    deps, mocks = _deps()
+    mocks.merge_repo.exists.return_value = True
+    mocks.users_repo.get_by_user_id.return_value = None
+    mocks.users_repo.upsert.side_effect = _email_unique_violation()
+
+    with patch(
+        "app.consumers.update_user.resolve_users_email_conflict",
+        new=AsyncMock(return_value=False),
+    ) as resolver:
+        await handle(_payload(email="duplicate@example.com"), deps=deps)
+
+    resolver.assert_awaited_once()
     mocks.outbox_repo.enqueue_latest.assert_not_awaited()
-    mocks.outbox_repo.enqueue_once.assert_not_awaited()
+    mocks.listmonk_repo.get_by_user_id.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -223,7 +248,6 @@ async def test_update_preserves_existing_tags_when_payload_omits_them() -> None:
     mocks.merge_repo.exists.return_value = True
     mocks.users_repo.get_by_user_id.return_value = SimpleNamespace(tags=[7, 8])
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps)
 
@@ -239,7 +263,6 @@ async def test_update_overwrites_tags_when_payload_provides_them() -> None:
     mocks.merge_repo.exists.return_value = True
     mocks.users_repo.get_by_user_id.return_value = SimpleNamespace(tags=[7, 8])
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     payload = _payload()
     cast(dict[str, object], payload["pass"])["tags"] = [1, 2, 3]

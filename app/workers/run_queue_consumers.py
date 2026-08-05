@@ -36,7 +36,6 @@ from app.mq.queues import (
     QUEUE_UPDATE_RETRY,
 )
 from app.repositories.bonus_accrual import BonusAccrualRepository
-from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.external_call_outbox import ExternalCallOutboxRepository
 from app.repositories.listmonk_users import ListmonkUsersRepository
 from app.repositories.merge_log import MergeLogRepository
@@ -84,9 +83,9 @@ class ConsumersRunner:
         async with SessionLocal() as session:
             deps = CreateConsumerDeps(
                 settings=self.settings,
+                session=session,
                 users_repo=UsersRepository(session),
                 listmonk_repo=ListmonkUsersRepository(session),
-                email_repair_repo=EmailRepairLogRepository(session),
                 outbox_repo=ExternalCallOutboxRepository(session),
                 merge_repo=MergeLogRepository(session),
                 old_db_repo=self.old_db_repo,
@@ -104,9 +103,9 @@ class ConsumersRunner:
         async with SessionLocal() as session:
             deps = UpdateConsumerDeps(
                 settings=self.settings,
+                session=session,
                 users_repo=UsersRepository(session),
                 listmonk_repo=ListmonkUsersRepository(session),
-                email_repair_repo=EmailRepairLogRepository(session),
                 outbox_repo=ExternalCallOutboxRepository(session),
                 merge_repo=MergeLogRepository(session),
                 old_db_repo=self.old_db_repo,

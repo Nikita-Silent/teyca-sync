@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -72,11 +72,12 @@ class EmailRepairLogRepository:
         source_event_id: str | None,
         trace_id: str | None,
         mark_bad_email: bool = True,
-    ) -> None:
+    ) -> int:
         """Persist a loser/winner plan after local DB normalization is committed.
 
         `mark_bad_email=False` is the Р5/Р6 "same person" case (teyca-sync-37z):
         the loser's email is cleared but Teyca sync must not set key1=bad email.
+        Returns the row id, used as the outbox dedupe key for Teyca sync.
         """
         now = datetime.now(UTC)
         stmt = insert(EmailRepairLog).values(
@@ -111,22 +112,9 @@ class EmailRepairLogRepository:
                 "mark_bad_email": mark_bad_email,
             },
         )
-        await self._session.execute(stmt)
-
-    async def get_pending_batch(self, *, limit: int) -> list[EmailRepairLog]:
-        """Return rows ready for remediation processing."""
-        now = datetime.now(UTC)
-        stmt: Select[tuple[EmailRepairLog]] = (
-            select(EmailRepairLog)
-            .where(
-                EmailRepairLog.status.in_(("pending", "failed")),
-                (EmailRepairLog.next_retry_at.is_(None)) | (EmailRepairLog.next_retry_at <= now),
-            )
-            .order_by(EmailRepairLog.created_at.asc(), EmailRepairLog.id.asc())
-            .limit(limit)
-        )
+        stmt = stmt.returning(EmailRepairLog.id)
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        return int(result.scalar_one())
 
     async def get_db_applied_batch(self, *, limit: int) -> list[EmailRepairLog]:
         """Return rows whose local DB cleanup is done and Teyca sync is pending."""
@@ -187,15 +175,6 @@ class EmailRepairLogRepository:
         )
         await self._session.execute(stmt)
 
-    async def mark_processing(self, *, repair_id: int) -> None:
-        """Mark a remediation row as being processed."""
-        stmt = (
-            update(EmailRepairLog)
-            .where(EmailRepairLog.id == repair_id)
-            .values(status="processing", error_text=None)
-        )
-        await self._session.execute(stmt)
-
     async def mark_teyca_synced(
         self,
         *,
@@ -218,30 +197,3 @@ class EmailRepairLogRepository:
             )
         )
         await self._session.execute(stmt)
-
-    async def mark_retry(
-        self,
-        *,
-        repair_id: int,
-        attempts: int,
-        error_text: str,
-        max_attempts: int,
-    ) -> str:
-        """Schedule another attempt or terminal manual review."""
-        status = "manual_review" if attempts >= max_attempts else "failed"
-        next_retry_at = None
-        if status == "failed":
-            next_retry_at = datetime.now(UTC) + timedelta(minutes=min(60, 5 * attempts))
-        stmt = (
-            update(EmailRepairLog)
-            .where(EmailRepairLog.id == repair_id)
-            .values(
-                status=status,
-                attempts=attempts,
-                error_text=error_text,
-                next_retry_at=next_retry_at,
-                processed_at=None,
-            )
-        )
-        await self._session.execute(stmt)
-        return status

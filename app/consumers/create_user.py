@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.consumers.common import (
@@ -15,8 +17,8 @@ from app.consumers.common import (
     is_email_deliverable,
     merge_profile_with_old_data,
 )
+from app.consumers.email_conflict import is_email_unique_violation, resolve_users_email_conflict
 from app.mq.queues import QUEUE_CREATE
-from app.repositories.email_repair_log import EmailRepairLogRepository
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_UPSERT,
     OUTBOX_OP_MERGE_FINALIZE,
@@ -45,9 +47,9 @@ class CreateConsumerDeps:
     """Dependencies for create consumer business logic."""
 
     settings: Settings
+    session: AsyncSession
     users_repo: UsersRepository
     listmonk_repo: ListmonkUsersRepository
-    email_repair_repo: EmailRepairLogRepository
     outbox_repo: ExternalCallOutboxRepository
     merge_repo: MergeLogRepository
     old_db_repo: OldDBRepository
@@ -86,7 +88,33 @@ async def handle(
 
     profile = build_profile_from_pass(event.pass_data)
     merge_result = merge_profile_with_old_data(profile, old_data)
-    await deps.users_repo.upsert(user_id=user_id, profile=merge_result.profile)
+    try:
+        await deps.users_repo.upsert(user_id=user_id, profile=merge_result.profile)
+    except IntegrityError as exc:
+        if not is_email_unique_violation(exc):
+            raise
+        won = await resolve_users_email_conflict(
+            session=deps.session,
+            user_id=user_id,
+            profile=merge_result.profile,
+            source_event_type=event.type,
+            source_event_id=source_event_id,
+            trace_id=trace_id,
+        )
+        if not won:
+            logger.info(
+                "create_consumer_email_conflict_lost",
+                user_id=user_id,
+                trace_id=trace_id,
+                source_event_id=source_event_id,
+            )
+            return
+        logger.info(
+            "create_consumer_email_conflict_won",
+            user_id=user_id,
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+        )
 
     target_list_ids = parse_list_ids(deps.settings.listmonk_list_ids)
     existing = await deps.listmonk_repo.get_by_user_id(user_id=user_id)
@@ -107,34 +135,6 @@ async def handle(
             source_event_id=source_event_id,
             email=event.pass_data.email,
             had_existing_mapping=existing is not None,
-        )
-        return
-
-    valid_email = event.pass_data.email
-    if valid_email is None:
-        raise ValueError("valid email expected after validation")
-    conflicting_user_ids = await deps.listmonk_repo.get_other_user_ids_by_email(
-        user_id=user_id,
-        email=valid_email,
-    )
-    if conflicting_user_ids:
-        normalized_email = valid_email.strip().lower()
-        for existing_user_id in conflicting_user_ids:
-            await deps.email_repair_repo.create_pending(
-                normalized_email=normalized_email,
-                incoming_user_id=user_id,
-                existing_user_id=existing_user_id,
-                source_event_type=event.type,
-                source_event_id=source_event_id,
-                trace_id=trace_id,
-            )
-        logger.error(
-            "create_consumer_duplicate_email_scheduled",
-            user_id=user_id,
-            trace_id=trace_id,
-            source_event_id=source_event_id,
-            email=normalized_email,
-            existing_user_ids=conflicting_user_ids,
         )
         return
 

@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.config import Settings
 from app.consumers.create_user import CreateConsumerDeps, handle
@@ -30,11 +31,24 @@ def _payload(user_id: int = 10, email: str = "user@example.com") -> dict[str, ob
     }
 
 
+class _FakeUniqueViolation(Exception):
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__(constraint_name)
+        self.constraint_name = constraint_name
+
+
+def _email_unique_violation() -> IntegrityError:
+    return IntegrityError(
+        "INSERT ...",
+        {},
+        _FakeUniqueViolation("uq_users_email_lower_trim"),
+    )
+
+
 @dataclass(slots=True)
 class _Mocks:
     users_repo: AsyncMock
     listmonk_repo: AsyncMock
-    email_repair_repo: AsyncMock
     outbox_repo: AsyncMock
     merge_repo: AsyncMock
     old_db_repo: AsyncMock
@@ -44,16 +58,15 @@ def _deps() -> tuple[CreateConsumerDeps, _Mocks]:
     mocks = _Mocks(
         users_repo=AsyncMock(),
         listmonk_repo=AsyncMock(),
-        email_repair_repo=AsyncMock(),
         outbox_repo=AsyncMock(),
         merge_repo=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
     deps = CreateConsumerDeps(
         settings=cast(Settings, SimpleNamespace(listmonk_list_ids="1,2")),
+        session=AsyncMock(),
         users_repo=mocks.users_repo,
         listmonk_repo=mocks.listmonk_repo,
-        email_repair_repo=mocks.email_repair_repo,
         outbox_repo=mocks.outbox_repo,
         merge_repo=mocks.merge_repo,
         old_db_repo=mocks.old_db_repo,
@@ -67,7 +80,6 @@ async def test_create_without_old_data_enqueues_only_listmonk_sync() -> None:
     mocks.merge_repo.exists.return_value = False
     mocks.old_db_repo.get_user_data.return_value = None
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps)
 
@@ -93,7 +105,6 @@ async def test_create_with_old_data_and_existing_subscriber_enqueues_merge_final
         check_summ=5,
     )
     mocks.listmonk_repo.get_by_user_id.return_value = SimpleNamespace(subscriber_id=777)
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
     mocks.outbox_repo.enqueue_once.return_value = True
 
     await handle(_payload(), deps=deps)
@@ -114,7 +125,6 @@ async def test_create_skips_merge_if_merge_log_appears_after_old_db_prefetch() -
     mocks.merge_repo.exists.side_effect = [False, True]
     mocks.old_db_repo.get_user_data.return_value = OldUserData(bonus=55.0, summ=10)
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps)
 
@@ -128,7 +138,6 @@ async def test_create_skips_merge_when_merge_already_exists() -> None:
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = True
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps)
 
@@ -146,7 +155,6 @@ async def test_create_invalid_email_enqueues_block_and_skips_listmonk_sync() -> 
 
     await handle(_payload(email="bad.mail@"), deps=deps)
 
-    mocks.listmonk_repo.get_other_user_ids_by_email.assert_not_awaited()
     mocks.outbox_repo.enqueue_once.assert_not_awaited()
     latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
     assert latest_kwargs["operation"] == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL
@@ -158,25 +166,10 @@ async def test_create_retry_waits_for_user_lock() -> None:
     deps, mocks = _deps()
     mocks.merge_repo.exists.return_value = True
     mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = []
 
     await handle(_payload(), deps=deps, wait_for_lock=True)
 
     mocks.users_repo.lock_user.assert_awaited_once_with(user_id=10, wait=True)
-
-
-@pytest.mark.asyncio
-async def test_create_duplicate_email_schedules_repair_and_stops() -> None:
-    deps, mocks = _deps()
-    mocks.merge_repo.exists.return_value = True
-    mocks.listmonk_repo.get_by_user_id.return_value = None
-    mocks.listmonk_repo.get_other_user_ids_by_email.return_value = [77, 88]
-
-    await handle(_payload(email="duplicate@example.com"), deps=deps)
-
-    assert mocks.email_repair_repo.create_pending.await_count == 2
-    mocks.outbox_repo.enqueue_latest.assert_not_awaited()
-    mocks.outbox_repo.enqueue_once.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -190,3 +183,60 @@ async def test_create_invalid_email_keeps_existing_mapping_for_worker_follow_up(
     latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
     assert latest_kwargs["operation"] == OUTBOX_OP_TEYCA_BLOCK_INVALID_EMAIL
     assert latest_kwargs["queue_name"] == QUEUE_CREATE
+
+
+@pytest.mark.asyncio
+async def test_create_email_race_won_proceeds_to_listmonk_sync() -> None:
+    """teyca-sync-eh8: users.upsert raising the unique-email constraint is
+    resolved in-process via the Р5/Р6 policy, not scheduled for a
+    never-run worker. Winning the race continues normally."""
+    deps, mocks = _deps()
+    mocks.merge_repo.exists.return_value = False
+    mocks.old_db_repo.get_user_data.return_value = None
+    mocks.listmonk_repo.get_by_user_id.return_value = None
+    mocks.users_repo.upsert.side_effect = [_email_unique_violation(), None]
+
+    with patch(
+        "app.consumers.create_user.resolve_users_email_conflict",
+        new=AsyncMock(return_value=True),
+    ) as resolver:
+        await handle(_payload(email="duplicate@example.com"), deps=deps)
+
+    resolver.assert_awaited_once()
+    resolver_await_args = resolver.await_args
+    assert resolver_await_args is not None
+    assert resolver_await_args.kwargs["user_id"] == 10
+    mocks.outbox_repo.enqueue_latest.assert_awaited_once()
+    latest_kwargs = mocks.outbox_repo.enqueue_latest.await_args.kwargs
+    assert latest_kwargs["operation"] == OUTBOX_OP_LISTMONK_UPSERT
+
+
+@pytest.mark.asyncio
+async def test_create_email_race_lost_stops_without_listmonk_sync() -> None:
+    deps, mocks = _deps()
+    mocks.merge_repo.exists.return_value = False
+    mocks.old_db_repo.get_user_data.return_value = None
+    mocks.users_repo.upsert.side_effect = _email_unique_violation()
+
+    with patch(
+        "app.consumers.create_user.resolve_users_email_conflict",
+        new=AsyncMock(return_value=False),
+    ) as resolver:
+        await handle(_payload(email="duplicate@example.com"), deps=deps)
+
+    resolver.assert_awaited_once()
+    mocks.outbox_repo.enqueue_latest.assert_not_awaited()
+    mocks.listmonk_repo.get_by_user_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_non_email_integrity_error_propagates() -> None:
+    deps, mocks = _deps()
+    mocks.merge_repo.exists.return_value = False
+    mocks.old_db_repo.get_user_data.return_value = None
+    mocks.users_repo.upsert.side_effect = IntegrityError(
+        "INSERT ...", {}, _FakeUniqueViolation("some_other_constraint")
+    )
+
+    with pytest.raises(IntegrityError):
+        await handle(_payload(), deps=deps)
