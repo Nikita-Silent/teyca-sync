@@ -1,0 +1,95 @@
+# Grafana Alerting provisioning file for teyca-sync-5tg.
+#
+# Р6: manual_review means only a technical failure of an external call.
+# Before teyca-sync-eh8, that state lived in email_repair_log.status =
+# 'manual_review', set by email_repair_worker.py after 3 failed retries.
+# That worker was never scheduled and has been removed (teyca-sync-eh8);
+# email_conflict.py resolves duplicate-email conflicts synchronously and
+# hands Teyca delivery to external_call_outbox (operation
+# teyca_email_repair_sync), processed by external_dispatcher_worker.py.
+# The equivalent "stuck, needs a human" state in the current
+# architecture is external_call_outbox.status = 'dead' for that
+# operation, reached after external_dispatcher_max_retries (25) failed
+# attempts — logged as event=external_dispatcher_job_retry_scheduled or
+# event=external_dispatcher_job_rate_limit_deferred with status="dead".
+#
+# HOW TO APPLY (not automated by this repo — no Grafana provisioning
+# pipeline exists here, same as teyca-sync-overview-dashboard.json):
+#   1. Replace REPLACE_WITH_LOKI_DATASOURCE_UID below with the actual
+#      Loki datasource UID from your Grafana instance (Connections ->
+#      Data sources -> Loki -> UID in the URL or Settings tab).
+#   2. Copy this file into Grafana's alerting provisioning directory
+#      (commonly /etc/grafana/provisioning/alerting/) and restart
+#      Grafana, OR paste the `rules` block into Alerting -> Alert rules
+#      -> New alert rule -> Import via the "code" / YAML view.
+#   3. Point the contact point / notification policy for the
+#      "teyca-sync" folder at wherever alerts should land (Slack,
+#      email, etc.) — not defined here since that's environment-specific.
+#
+# VERIFICATION (acceptance criteria: "проверено искусственным сбоем"):
+#   Force a claim to dead deterministically — e.g. temporarily set
+#   external_dispatcher_max_retries=1 (or seed a teyca_email_repair_sync
+#   outbox row with attempts already at 25) so the very next dispatcher
+#   run marks it dead, then confirm the alert fires within one
+#   evaluation interval (5m). Revert the max_retries override afterward.
+#   This step needs a real Grafana/Loki instance and was not run from
+#   this session — do it once the rule is provisioned.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: teyca-sync-email-conflict-dead
+    folder: teyca-sync
+    interval: 5m
+    rules:
+      - uid: teyca-sync-eh8-dead-email-repair-sync
+        title: "teyca-sync: email conflict resolution stuck (outbox dead)"
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            datasourceUid: REPLACE_WITH_LOKI_DATASOURCE_UID
+            model:
+              editorMode: code
+              expr: >-
+                sum(count_over_time(
+                  {service="teyca-sync"}
+                  | json
+                  | operation="teyca_email_repair_sync"
+                  | status="dead"
+                  [24h]
+                )) or vector(0)
+              instant: true
+              queryType: instant
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+              refId: C
+        labels:
+          severity: warning
+          component: email-repair-sync
+        annotations:
+          summary: >-
+            teyca_email_repair_sync outbox job(s) went dead in the last 24h —
+            duplicate-email conflict(s) could not be delivered to Teyca after
+            25 attempts and need manual review.
+          runbook: >-
+            SELECT id, user_id, attempts, last_error, created_at FROM
+            external_call_outbox WHERE operation='teyca_email_repair_sync'
+            AND status='dead' ORDER BY created_at;
