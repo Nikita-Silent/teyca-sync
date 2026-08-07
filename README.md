@@ -176,7 +176,7 @@ make test
 - `listmonk_users.subscriber_id` теперь защищён unique constraint на уровне БД.
 - До финального constraint rollout текущие дубли очищаются отдельным repair-worker:
   ```bash
-  docker compose run --rm app python -m app.workers.run_listmonk_duplicate_subscriber
+  docker compose run --rm app python -m service_workers.run_listmonk_duplicate_subscriber
   ```
 - Worker:
   - находит `subscriber_id` с несколькими строками в `listmonk_users`,

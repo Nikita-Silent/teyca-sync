@@ -7,7 +7,7 @@ triggers, both keyed by the same `email_consent:{user_id}` idempotency row in
 - the live path: a successful CRM-driven listmonk_upsert (teyca-sync-4ue,
   Р4а), in app.workers.external_dispatcher_worker._accrue_consent_bonus_if_needed
 - the one-time backdated backfill (teyca-sync-io3), in
-  app.workers.consent_bonus_backfill, run once for the 106 clients missed by
+  service_workers.consent_bonus_backfill, run once for the 106 clients missed by
   the confirmed-status bug (С2) before it was fixed
 
 These tests assert the architectural invariant at the module level: reconcile
@@ -24,7 +24,7 @@ import ast
 from pathlib import Path
 
 import app.workers.listmonk_reconcile_worker as reconcile_module
-import app.workers.listmonk_refresh_subscriber_ids as refresh_module
+import service_workers.listmonk_refresh_subscriber_ids as refresh_module
 
 _FORBIDDEN_NAMES = {
     "BonusAccrualRepository",
@@ -74,7 +74,7 @@ def test_consent_bonus_backfill_is_the_one_time_bonus_trigger() -> None:
     """Contrast case: the one-time backdated backfill (teyca-sync-io3) shares
     the same email_consent:{user_id} idempotency key as the live path, so it
     can never double-pay a user the live path already paid."""
-    import app.workers.consent_bonus_backfill as backfill_module
+    import service_workers.consent_bonus_backfill as backfill_module
 
     module_path = Path(backfill_module.__file__)
     assert "BonusAccrualRepository" in _referenced_names(module_path)

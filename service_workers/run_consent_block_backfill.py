@@ -14,7 +14,7 @@ import asyncio
 import structlog
 
 from app.logging_config import configure_logging, shutdown_logging
-from app.workers.consent_block_backfill import build_consent_block_backfill
+from service_workers.consent_block_backfill import build_consent_block_backfill
 
 logger = structlog.get_logger()
 

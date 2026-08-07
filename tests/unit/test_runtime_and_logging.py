@@ -201,7 +201,9 @@ def test_get_mq_publisher_and_main_guards() -> None:
     )
     assert get_mq_publisher(request) == "publisher"
 
-    worker_dir = Path(__file__).resolve().parents[2] / "app" / "workers"
+    repo_root = Path(__file__).resolve().parents[2]
+    worker_dir = repo_root / "app" / "workers"
+    service_worker_dir = repo_root / "service_workers"
 
     def _close_coro(coro: object) -> None:
         closeable = cast(Any, coro)
@@ -213,7 +215,7 @@ def test_get_mq_publisher_and_main_guards() -> None:
         runpy.run_path(str(worker_dir / "run_consent_sync.py"), run_name="__main__")
     with patch("asyncio.run", side_effect=_close_coro):
         runpy.run_path(
-            str(worker_dir / "run_listmonk_duplicate_subscriber.py"), run_name="__main__"
+            str(service_worker_dir / "run_listmonk_duplicate_subscriber.py"), run_name="__main__"
         )
     with patch("asyncio.run", side_effect=_close_coro):
         runpy.run_path(str(worker_dir / "run_listmonk_reconcile.py"), run_name="__main__")
@@ -225,8 +227,6 @@ def test_get_mq_publisher_and_main_guards() -> None:
 async def test_consumers_runner_core_paths() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
 
@@ -263,8 +263,6 @@ async def test_consumers_runner_core_paths() -> None:
 async def test_consumers_runner_callback_ack_and_reject() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
 
@@ -323,8 +321,6 @@ async def test_consumers_runner_callback_ack_and_reject() -> None:
 async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
 
@@ -370,8 +366,6 @@ async def test_consumers_runner_callback_dead_letters_after_lock_retry_limit() -
 async def test_consumers_runner_callback_requeues_teyca_rate_limit_with_delay() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
 
@@ -424,8 +418,6 @@ async def test_consumers_runner_callback_requeues_teyca_rate_limit_with_delay() 
 async def test_consumers_runner_callback_dead_letters_teyca_rate_limit_after_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
 
@@ -483,8 +475,6 @@ async def test_consumers_runner_callback_uses_configured_retry_limits() -> None:
             rabbitmq_teyca_rate_limit_retry_max_delay_ms=12_000,
             rabbitmq_teyca_rate_limit_retry_max_retries=1,
         ),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
 
@@ -544,8 +534,6 @@ async def test_consumers_runner_callback_uses_configured_retry_limits() -> None:
 async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
     message = AsyncMock()
@@ -577,8 +565,6 @@ async def test_consumers_runner_process_waits_for_lock_after_retry_header() -> N
 async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
         _process_semaphore=asyncio.Semaphore(1),
     )
@@ -623,8 +609,6 @@ async def test_consumers_runner_callback_respects_semaphore_limit() -> None:
 async def test_consumers_runner_consume_commit_and_rollback_paths() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
     session = AsyncMock()
@@ -716,8 +700,6 @@ async def test_consumers_runner_consume_commit_and_rollback_paths() -> None:
 async def test_consumers_runner_run_and_entrypoints() -> None:
     runner = run_queue_consumers.ConsumersRunner(
         settings=_runner_settings(),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
     queue_obj = AsyncMock()
@@ -757,8 +739,6 @@ async def test_consumers_runner_run_and_entrypoints() -> None:
                 export_db_request_timeout_seconds=12.5,
             ),
         ),
-        patch("app.workers.run_queue_consumers.ListmonkSDKClient"),
-        patch("app.workers.run_queue_consumers.build_teyca_client"),
         patch("app.workers.run_queue_consumers.OldDBRepository") as old_db_repo_cls,
         patch("app.workers.run_queue_consumers.configure_logging"),
         patch("app.workers.run_queue_consumers.shutdown_logging"),
@@ -783,8 +763,6 @@ async def test_consumers_runner_run_clamps_concurrency_to_db_capacity() -> None:
             database_pool_size=2,
             database_pool_max_overflow=0,
         ),
-        listmonk_client=AsyncMock(),
-        teyca_client=AsyncMock(),
         old_db_repo=AsyncMock(),
     )
     queue_obj = AsyncMock()

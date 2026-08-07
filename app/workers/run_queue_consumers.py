@@ -13,8 +13,7 @@ import structlog
 from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
 from structlog import contextvars as log_contextvars
 
-from app.clients.listmonk import ListmonkSDKClient
-from app.clients.teyca import TeycaAPIError, build_teyca_client
+from app.clients.teyca import TeycaAPIError
 from app.config import Settings, get_settings
 from app.consumers.create_user import CreateConsumerDeps
 from app.consumers.create_user import handle as handle_create
@@ -66,8 +65,6 @@ class ConsumersRunner:
 
     settings: Settings
     old_db_repo: OldDBRepository
-    listmonk_client: object | None = None
-    teyca_client: object | None = None
     _process_semaphore: asyncio.Semaphore | None = None
     _channel: AbstractChannel | None = None
 
@@ -418,13 +415,7 @@ class ConsumersRunner:
         )
 
         def _main_queue_args(dead_queue: str) -> dict[str, Any] | None:
-            if max_delivery_count <= 0:
-                return None
-            return {
-                "x-dead-letter-exchange": "",
-                "x-dead-letter-routing-key": dead_queue,
-                "x-max-delivery-count": max_delivery_count,
-            }
+            return build_main_queue_args(max_delivery_count, dead_queue)
 
         queue_create = await channel.declare_queue(
             QUEUE_CREATE, durable=True, arguments=_main_queue_args(QUEUE_CREATE_DEAD)
@@ -485,6 +476,17 @@ class ConsumersRunner:
             await self.old_db_repo.close()
             await connection.close()
             self._channel = None
+
+
+def build_main_queue_args(max_delivery_count: int, dead_queue: str) -> dict[str, Any] | None:
+    """Queue arguments enabling DLX after `max_delivery_count` deliveries, or None to disable."""
+    if max_delivery_count <= 0:
+        return None
+    return {
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": dead_queue,
+        "x-max-delivery-count": max_delivery_count,
+    }
 
 
 def _extract_user_id(payload: dict[str, Any]) -> int | None:
@@ -569,8 +571,6 @@ async def _run() -> None:
     )
     runner = ConsumersRunner(
         settings=settings,
-        listmonk_client=ListmonkSDKClient(settings),
-        teyca_client=build_teyca_client(settings, session_factory=SessionLocal),
         old_db_repo=OldDBRepository(
             settings.export_db_url,
             request_timeout_seconds=settings.export_db_request_timeout_seconds,

@@ -7,7 +7,7 @@ import pytest
 
 from app.clients.listmonk import SubscriberProfile
 from app.config import Settings
-from app.workers.listmonk_duplicate_subscriber_worker import (
+from service_workers.listmonk_duplicate_subscriber_worker import (
     ListmonkDuplicateSubscriberWorker,
     _extract_authoritative_user_id,
     build_listmonk_duplicate_subscriber_worker,
@@ -59,10 +59,10 @@ async def test_run_once_repairs_duplicate_subscriber_and_archives_losers() -> No
 
     with (
         patch(
-            "app.workers.listmonk_duplicate_subscriber_worker.ListmonkUsersRepository"
+            "service_workers.listmonk_duplicate_subscriber_worker.ListmonkUsersRepository"
         ) as listmonk_repo_cls,
         patch(
-            "app.workers.listmonk_duplicate_subscriber_worker.ListmonkUserArchiveRepository"
+            "service_workers.listmonk_duplicate_subscriber_worker.ListmonkUserArchiveRepository"
         ) as archive_repo_cls,
     ):
         listmonk_repo = AsyncMock()
@@ -105,10 +105,10 @@ async def test_run_once_marks_manual_review_when_authoritative_user_missing() ->
 
     with (
         patch(
-            "app.workers.listmonk_duplicate_subscriber_worker.ListmonkUsersRepository"
+            "service_workers.listmonk_duplicate_subscriber_worker.ListmonkUsersRepository"
         ) as listmonk_repo_cls,
         patch(
-            "app.workers.listmonk_duplicate_subscriber_worker.ListmonkUserArchiveRepository"
+            "service_workers.listmonk_duplicate_subscriber_worker.ListmonkUserArchiveRepository"
         ) as archive_repo_cls,
     ):
         listmonk_repo = AsyncMock()
@@ -134,10 +134,10 @@ async def test_run_once_marks_manual_review_when_authoritative_user_missing() ->
 def test_build_and_extract_authoritative_user_id() -> None:
     with (
         patch(
-            "app.workers.listmonk_duplicate_subscriber_worker.get_settings",
+            "service_workers.listmonk_duplicate_subscriber_worker.get_settings",
             return_value=SimpleNamespace(),
         ),
-        patch("app.workers.listmonk_duplicate_subscriber_worker.ListmonkSDKClient"),
+        patch("service_workers.listmonk_duplicate_subscriber_worker.ListmonkSDKClient"),
     ):
         worker = build_listmonk_duplicate_subscriber_worker()
     assert worker is not None

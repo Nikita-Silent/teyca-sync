@@ -47,7 +47,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app*"]
+include = ["app*", "service_workers*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -93,7 +93,7 @@ paths = ["app", "tests"]
 sort_by_size = true
 
 [tool.deptry]
-known_first_party = ["app"]
+known_first_party = ["app", "service_workers"]
 optional_dependencies_dev_groups = ["dev"]
 extend_exclude = [
     "migrations/versions",

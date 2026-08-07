@@ -1,4 +1,4 @@
-.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once external-dispatcher-email-repair-sync-once consumers legacy-import legacy-import-dry-run consent-bonus-backfill consent-bonus-backfill-apply consent-block-backfill consent-block-backfill-apply stale-pending-repair-cleanup stale-pending-repair-cleanup-apply
+.PHONY: up down migrate test test-unit test-integration coverage lint complexity deadcode deps-audit security docs-coverage refurb-check quality quality-report typecheck typecheck-tests consent-sync-once reconcile-once listmonk-refresh-subscriber-ids listmonk-refresh-subscriber-ids-apply external-dispatcher-once external-dispatcher-listmonk-once external-dispatcher-merge-once external-dispatcher-invalid-email-once external-dispatcher-consent-block-once external-dispatcher-email-repair-sync-once consumers consent-bonus-backfill consent-bonus-backfill-apply consent-block-backfill consent-block-backfill-apply stale-pending-repair-cleanup stale-pending-repair-cleanup-apply
 
 PYTHON ?= ./.venv/bin/python
 PYTEST ?= ./.venv/bin/pytest
@@ -103,10 +103,10 @@ reconcile-once:
 	docker compose run --rm app python -m app.workers.run_listmonk_reconcile
 
 listmonk-refresh-subscriber-ids:
-	docker compose run --rm --build app python -m app.workers.run_listmonk_refresh_subscriber_ids --batch-size "$${BATCH_SIZE:-100}" --concurrency "$${CONCURRENCY:-10}"
+	docker compose run --rm --build app python -m service_workers.run_listmonk_refresh_subscriber_ids --batch-size "$${BATCH_SIZE:-100}" --concurrency "$${CONCURRENCY:-10}"
 
 listmonk-refresh-subscriber-ids-apply:
-	docker compose run --rm --build app python -m app.workers.run_listmonk_refresh_subscriber_ids --apply --batch-size "$${BATCH_SIZE:-100}" --concurrency "$${CONCURRENCY:-10}"
+	docker compose run --rm --build app python -m service_workers.run_listmonk_refresh_subscriber_ids --apply --batch-size "$${BATCH_SIZE:-100}" --concurrency "$${CONCURRENCY:-10}"
 
 external-dispatcher-once:
 	docker compose run --rm app python -m app.workers.run_external_dispatcher
@@ -129,26 +129,20 @@ external-dispatcher-email-repair-sync-once:
 consumers:
 	docker compose run --rm app python -m app.workers.run_queue_consumers
 
-legacy-import:
-	docker compose run --rm --build app python -m app.workers.run_legacy_snapshot_import --source-db-url "$$SOURCE_DB_URL" --batch-size "$${BATCH_SIZE:-500}"
-
-legacy-import-dry-run:
-	docker compose run --rm --build app python -m app.workers.run_legacy_snapshot_import --source-db-url "$$SOURCE_DB_URL" --dry-run --batch-size "$${BATCH_SIZE:-500}"
-
 consent-bonus-backfill:
-	docker compose run --rm --build app python -m app.workers.run_consent_bonus_backfill
+	docker compose run --rm --build app python -m service_workers.run_consent_bonus_backfill
 
 consent-bonus-backfill-apply:
-	docker compose run --rm --build app python -m app.workers.run_consent_bonus_backfill --apply
+	docker compose run --rm --build app python -m service_workers.run_consent_bonus_backfill --apply
 
 consent-block-backfill:
-	docker compose run --rm --build app python -m app.workers.run_consent_block_backfill
+	docker compose run --rm --build app python -m service_workers.run_consent_block_backfill
 
 consent-block-backfill-apply:
-	docker compose run --rm --build app python -m app.workers.run_consent_block_backfill --apply
+	docker compose run --rm --build app python -m service_workers.run_consent_block_backfill --apply
 
 stale-pending-repair-cleanup:
-	docker compose run --rm --build app python -m app.workers.run_stale_pending_repair_cleanup
+	docker compose run --rm --build app python -m service_workers.run_stale_pending_repair_cleanup
 
 stale-pending-repair-cleanup-apply:
-	docker compose run --rm --build app python -m app.workers.run_stale_pending_repair_cleanup --apply
+	docker compose run --rm --build app python -m service_workers.run_stale_pending_repair_cleanup --apply

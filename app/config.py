@@ -23,8 +23,9 @@ class Settings(BaseSettings):
     rabbitmq_lock_busy_retry_base_delay_ms: int = 1_000
     rabbitmq_lock_busy_retry_max_delay_ms: int = 30_000
     rabbitmq_lock_busy_retry_max_retries: int = 5
-    # Set > 0 to enable DLX on main queues (requires manual queue deletion first).
-    rabbitmq_main_queue_max_delivery_count: int = 0
+    # Set > 0 to enable DLX on main queues (requires manual queue deletion first
+    # if the queue already exists with different arguments).
+    rabbitmq_main_queue_max_delivery_count: int = 10
     rabbitmq_teyca_rate_limit_retry_base_delay_ms: int = 60_000
     rabbitmq_teyca_rate_limit_retry_max_delay_ms: int = 15 * 60_000
     rabbitmq_teyca_rate_limit_retry_max_retries: int = 10

@@ -121,10 +121,6 @@ flowchart LR
 | `consent-sync` | цикл 60 c | чтение+запись | — | да | да | — |
 | `reconcile` | цикл 300 c | чтение+запись | — | да | — | — |
 
-¹ `consumers` создаёт клиентов Listmonk и Teyca (`run_queue_consumers.py:573-574`) и передаёт их
-в `ConsumersRunner`, но поля `listmonk_client` / `teyca_client` нигде не читаются (`:70-71`) —
-мёртвая зависимость от прежней архитектуры.
-
 Прочее:
 
 - Периодичность задана не планировщиком, а shell-циклом в команде контейнера:
@@ -281,12 +277,14 @@ flowchart LR
 |---|---|---|
 | `UserLockNotAcquiredError` (другой процесс держит lock) | в `-retry` с экспоненциальным backoff, после лимита — в `-dead` | `RABBITMQ_LOCK_BUSY_RETRY_MAX_RETRIES` = 5 |
 | `TeycaAPIError` со статусом 429 | то же, но с большими задержками (база 60 с) | `RABBITMQ_TEYCA_RATE_LIMIT_RETRY_MAX_RETRIES` = 10 |
-| Любая другая ошибка | `reject(requeue=true)` — немедленный возврат в ту же очередь | ограничения нет² |
+| Любая другая ошибка | `reject(requeue=true)` — немедленный возврат в ту же очередь | ограничитель² |
 
-² Единственный ограничитель — аргумент очереди `x-max-delivery-count`, а он выставляется
-только при `RABBITMQ_MAIN_QUEUE_MAX_DELIVERY_COUNT > 0`; **по умолчанию 0**
-(`app/config.py:27`, применение — `run_queue_consumers.py:416-428`). То есть битое сообщение
-крутится в очереди бесконечно, нагружая БД и логи.
+² Ограничитель — аргумент очереди `x-max-delivery-count`, включается при
+`RABBITMQ_MAIN_QUEUE_MAX_DELIVERY_COUNT > 0`; **по умолчанию 10**
+(`app/config.py:27`, применение — `run_queue_consumers.py:415-428`). После превышения лимита
+сообщение уходит в `-dead` вместо бесконечного `requeue`. Т.к. `x-max-delivery-count` — аргумент
+очереди, а не политика, изменение значения не применится к уже существующим очередям без их
+удаления (RabbitMQ вернёт `PRECONDITION_FAILED` при рассинхроне аргументов).
 
 Ещё по транспорту:
 
@@ -294,8 +292,6 @@ flowchart LR
   пула БД (`run_queue_consumers.py:400-413`) — семафор не даёт исчерпать пул соединений.
 - Класс 429 в consumer'е сейчас недостижим на практике: consumer больше не вызывает Teyca.
   Ветка осталась от прежней архитектуры.
-- Константа `QUEUE_MERGE = "queue-request-to-merge"` объявлена (`app/mq/queues.py:6`), но
-  никем не публикуется и не читается — мёртвая сущность.
 
 ---
 
@@ -428,11 +424,15 @@ email остаются не синхронизированными до ручн
 | Модуль | Как запускается | Что делает |
 |---|---|---|
 | `run_email_repair.py` | **нигде** | разбор дубликатов email, см. 7.3 |
-| `run_email_repair_backfill.py` | вручную | разовый backfill дубликатов |
-| `run_listmonk_duplicate_subscriber.py` | вручную, `README.md:179` | чистка дублей `subscriber_id` |
-| `run_listmonk_refresh_subscriber_ids.py` | `make listmonk-refresh-subscriber-ids[-apply]` | пересчёт `subscriber_id` по email |
-| `run_legacy_snapshot_import.py` | `make legacy-import[-dry-run]` | импорт снапшота старой БД |
+| `service_workers/run_email_repair_backfill.py` | вручную | разовый backfill дубликатов |
+| `service_workers/run_listmonk_duplicate_subscriber.py` | вручную, `README.md:179` | чистка дублей `subscriber_id` |
+| `service_workers/run_listmonk_refresh_subscriber_ids.py` | `make listmonk-refresh-subscriber-ids[-apply]` | пересчёт `subscriber_id` по email |
 | `run_external_dispatcher.py` | `make external-dispatcher-once` | все операции outbox сразу (в compose разбит на три) |
+
+Разовые/лечебные воркеры (`service_workers/`) вынесены из `app/`, чтобы не тянуть за собой
+app-scoped quality-гейты (coverage, complexity, docstring coverage, dead-code, security) —
+они не работают в проде на постоянной основе. `legacy_snapshot_importer.py` и его раннер
+удалены совсем: импорт снапшота старой БД выполнен (teyca-sync-x3g).
 
 ---
 
@@ -442,8 +442,8 @@ email остаются не синхронизированными до ручн
 
 1. **Потеря события на входе.** Сбой RabbitMQ на `publish` = 500 клиенту, событие не
    сохранено нигде (`webhook.py:149`). Inbox-таблицы нет.
-2. **Бесконечный requeue.** Любая ошибка, кроме lock-busy и 429, возвращает сообщение в
-   очередь без задержки, а `x-max-delivery-count` по умолчанию выключен (`config.py:27`).
+2. ~~**Бесконечный requeue.**~~ Исправлено (teyca-sync-9lv): `x-max-delivery-count` включён
+   по умолчанию (`config.py:27`), битые сообщения уходят в `-dead`.
 3. **`email_repair_log` без обработчика** — см. 7.3.
 4. **Зависшие claim'ы в outbox.** Непойманное исключение оставляет строку в `processing`
    на 5 минут; вернуть её может только reaper (`external_dispatcher_worker.py:159-168`).
@@ -453,8 +453,9 @@ email остаются не синхронизированными до ручн
 7. **Обрыв consistency scan** по `break` при первой ошибке Listmonk.
 8. **Три копии одной формулы backoff**: `run_queue_consumers.py:548`, `:554`,
    `external_call_outbox.py:341`.
-9. **Мёртвые сущности:** `QUEUE_MERGE`, клиенты Listmonk/Teyca в `ConsumersRunner`,
-   недостижимая ветка 429 в consumer'е.
+9. **Недостижимая ветка 429 в consumer'е** — осталась от прежней архитектуры, когда consumer
+   ещё вызывал Teyca напрямую. `QUEUE_MERGE` и мёртвые клиенты Listmonk/Teyca в
+   `ConsumersRunner` удалены (teyca-sync-d6d).
 10. **Heartbeat в файловой системе контейнера** — снаружи о живости воркера судить нечем,
     кроме healthcheck'а самого контейнера.
 

@@ -8,7 +8,7 @@ import pytest
 
 from app.clients.teyca import TeycaAPIError, TeycaRateLimitBusyError
 from app.config import Settings
-from app.workers.consent_bonus_backfill import (
+from service_workers.consent_bonus_backfill import (
     BACKFILL_STATUSES,
     ConsentBonusBackfill,
     ConsentBonusBackfillError,
@@ -71,11 +71,11 @@ async def test_collect_candidates_filters_invalid_duplicate_done_and_failed() ->
 
     with (
         patch(
-            "app.workers.consent_bonus_backfill.ListmonkUsersRepository",
+            "service_workers.consent_bonus_backfill.ListmonkUsersRepository",
             return_value=listmonk_repo,
         ),
         patch(
-            "app.workers.consent_bonus_backfill.BonusAccrualRepository",
+            "service_workers.consent_bonus_backfill.BonusAccrualRepository",
             return_value=accrual_repo,
         ),
         patch.object(
@@ -166,7 +166,7 @@ async def test_accrue_one_runs_both_steps_and_marks_done() -> None:
 
     with (
         patch(
-            "app.workers.consent_bonus_backfill.BonusAccrualRepository",
+            "service_workers.consent_bonus_backfill.BonusAccrualRepository",
             return_value=accrual_repo,
         ),
         patch.object(
@@ -197,7 +197,7 @@ async def test_accrue_one_resumes_only_remaining_step() -> None:
 
     with (
         patch(
-            "app.workers.consent_bonus_backfill.BonusAccrualRepository",
+            "service_workers.consent_bonus_backfill.BonusAccrualRepository",
             return_value=accrual_repo,
         ),
         patch.object(
@@ -228,7 +228,7 @@ async def test_accrue_one_marks_failed_on_permanent_teyca_error() -> None:
 
     with (
         patch(
-            "app.workers.consent_bonus_backfill.BonusAccrualRepository",
+            "service_workers.consent_bonus_backfill.BonusAccrualRepository",
             return_value=accrual_repo,
         ),
         patch.object(
@@ -262,7 +262,7 @@ async def test_accrue_one_does_not_mark_failed_on_transient_rate_limit() -> None
 
     with (
         patch(
-            "app.workers.consent_bonus_backfill.BonusAccrualRepository",
+            "service_workers.consent_bonus_backfill.BonusAccrualRepository",
             return_value=accrual_repo,
         ),
         patch.object(
@@ -286,7 +286,7 @@ async def test_accrue_one_raises_when_reserve_row_missing() -> None:
 
     with (
         patch(
-            "app.workers.consent_bonus_backfill.BonusAccrualRepository",
+            "service_workers.consent_bonus_backfill.BonusAccrualRepository",
             return_value=accrual_repo,
         ),
         patch.object(
@@ -300,7 +300,7 @@ async def test_accrue_one_raises_when_reserve_row_missing() -> None:
 
 
 def test_to_optional_int_and_str_helpers() -> None:
-    from app.workers.consent_bonus_backfill import _to_optional_int, _to_optional_str
+    from service_workers.consent_bonus_backfill import _to_optional_int, _to_optional_str
 
     assert _to_optional_int(True) is None
     assert _to_optional_int(5) == 5
@@ -312,14 +312,14 @@ def test_to_optional_int_and_str_helpers() -> None:
 
 
 def test_build_consent_bonus_backfill() -> None:
-    from app.workers.consent_bonus_backfill import build_consent_bonus_backfill
+    from service_workers.consent_bonus_backfill import build_consent_bonus_backfill
 
     with (
         patch(
-            "app.workers.consent_bonus_backfill.get_settings",
+            "service_workers.consent_bonus_backfill.get_settings",
             return_value=SimpleNamespace(),
         ),
-        patch("app.workers.consent_bonus_backfill.build_teyca_client"),
+        patch("service_workers.consent_bonus_backfill.build_teyca_client"),
     ):
         backfill = build_consent_bonus_backfill()
     assert backfill is not None

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.config import Settings
-from app.workers.consent_block_backfill import (
+from service_workers.consent_block_backfill import (
     BLOCKED_STATUSES,
     ConsentBlockBackfill,
     ConsentBlockCandidate,
@@ -36,7 +36,7 @@ async def test_collect_candidates_returns_every_blocked_user() -> None:
 
     with (
         patch(
-            "app.workers.consent_block_backfill.ListmonkUsersRepository",
+            "service_workers.consent_block_backfill.ListmonkUsersRepository",
             return_value=listmonk_repo,
         ),
         patch.object(
@@ -77,7 +77,7 @@ async def test_enqueue_one_uses_dedupe_key_and_payload() -> None:
 
     with (
         patch(
-            "app.workers.consent_block_backfill.ExternalCallOutboxRepository",
+            "service_workers.consent_block_backfill.ExternalCallOutboxRepository",
             return_value=outbox_repo,
         ),
         patch.object(
@@ -101,10 +101,10 @@ async def test_enqueue_one_uses_dedupe_key_and_payload() -> None:
 
 
 def test_build_consent_block_backfill() -> None:
-    from app.workers.consent_block_backfill import build_consent_block_backfill
+    from service_workers.consent_block_backfill import build_consent_block_backfill
 
     with patch(
-        "app.workers.consent_block_backfill.get_settings",
+        "service_workers.consent_block_backfill.get_settings",
         return_value=SimpleNamespace(),
     ):
         backfill = build_consent_block_backfill()

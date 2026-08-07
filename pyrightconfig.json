@@ -4,6 +4,6 @@
   "pythonVersion": "3.14",
   "typeCheckingMode": "basic",
   "extraPaths": ["."],
-  "include": ["app", "migrations"],
+  "include": ["app", "migrations", "service_workers"],
   "exclude": ["tests"],
 }

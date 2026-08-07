@@ -8,7 +8,7 @@ import pytest
 
 from app.clients.listmonk import ListmonkClientError, SubscriberProfile
 from app.config import Settings
-from app.workers.listmonk_refresh_subscriber_ids import (
+from service_workers.listmonk_refresh_subscriber_ids import (
     ListmonkSubscriberIdRefreshWorker,
     RefreshMetrics,
     RefreshRow,

@@ -8,6 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY pyproject.toml .
 COPY README.md .
 COPY app/ app/
+COPY service_workers/ service_workers/
 RUN pip install --no-cache-dir -e ".[dev]"
 
 COPY alembic.ini .

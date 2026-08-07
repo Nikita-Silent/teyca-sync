@@ -13,7 +13,7 @@ import structlog
 
 from app.config import get_settings
 from app.logging_config import configure_logging, shutdown_logging
-from app.workers.stale_pending_repair_cleanup import build_stale_pending_repair_cleanup
+from service_workers.stale_pending_repair_cleanup import build_stale_pending_repair_cleanup
 
 logger = structlog.get_logger()
 

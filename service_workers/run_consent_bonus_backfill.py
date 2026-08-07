@@ -12,7 +12,7 @@ import asyncio
 import structlog
 
 from app.logging_config import configure_logging, shutdown_logging
-from app.workers.consent_bonus_backfill import (
+from service_workers.consent_bonus_backfill import (
     ConsentBonusBackfillError,
     build_consent_bonus_backfill,
 )

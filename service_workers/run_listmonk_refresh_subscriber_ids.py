@@ -9,7 +9,7 @@ import structlog
 
 from app.config import get_settings
 from app.logging_config import configure_logging, shutdown_logging
-from app.workers.listmonk_refresh_subscriber_ids import (
+from service_workers.listmonk_refresh_subscriber_ids import (
     RefreshMetrics,
     build_listmonk_subscriber_id_refresh_worker,
 )

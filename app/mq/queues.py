@@ -3,7 +3,6 @@
 QUEUE_CREATE = "queue-create"
 QUEUE_UPDATE = "queue-update"
 QUEUE_DELETE = "queue-delete"
-QUEUE_MERGE = "queue-request-to-merge"
 QUEUE_CREATE_RETRY = f"{QUEUE_CREATE}-retry"
 QUEUE_UPDATE_RETRY = f"{QUEUE_UPDATE}-retry"
 QUEUE_DELETE_RETRY = f"{QUEUE_DELETE}-retry"

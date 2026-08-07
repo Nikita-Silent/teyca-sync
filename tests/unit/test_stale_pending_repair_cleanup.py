@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.workers.stale_pending_repair_cleanup import (
+from service_workers.stale_pending_repair_cleanup import (
     StalePendingCandidate,
     StalePendingRepairCleanup,
     build_stale_pending_repair_cleanup,
@@ -42,7 +42,7 @@ async def test_collect_maps_stale_rows_to_candidates() -> None:
     ]
 
     with patch(
-        "app.workers.stale_pending_repair_cleanup.EmailRepairLogRepository",
+        "service_workers.stale_pending_repair_cleanup.EmailRepairLogRepository",
         return_value=repair_repo,
     ):
         candidates = await cleanup.collect(batch_size=200)
@@ -77,7 +77,7 @@ async def test_apply_marks_every_candidate_stale_and_commits() -> None:
     ]
 
     with patch(
-        "app.workers.stale_pending_repair_cleanup.EmailRepairLogRepository",
+        "service_workers.stale_pending_repair_cleanup.EmailRepairLogRepository",
         return_value=repair_repo,
     ):
         summary = await cleanup.apply(candidates=candidates)
@@ -104,7 +104,7 @@ async def test_apply_with_no_candidates_is_a_noop() -> None:
     session_factory.return_value = session_cm
 
     with patch(
-        "app.workers.stale_pending_repair_cleanup.EmailRepairLogRepository",
+        "service_workers.stale_pending_repair_cleanup.EmailRepairLogRepository",
         return_value=AsyncMock(),
     ):
         summary = await cleanup.apply(candidates=[])

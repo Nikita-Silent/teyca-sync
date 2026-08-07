@@ -9,7 +9,7 @@ from app.clients.listmonk import ListmonkClientError
 from app.config import get_settings
 from app.logging_config import configure_logging, shutdown_logging
 from app.service_health import write_heartbeat
-from app.workers.listmonk_duplicate_subscriber_worker import (
+from service_workers.listmonk_duplicate_subscriber_worker import (
     build_listmonk_duplicate_subscriber_worker,
 )
 

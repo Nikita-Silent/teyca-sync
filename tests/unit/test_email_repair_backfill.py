@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.config import Settings
-from app.workers.email_repair_backfill import (
+from service_workers.email_repair_backfill import (
     DuplicateEmailBackfill,
     DuplicateEmailBackfillError,
     DuplicateEmailBackfillIssue,
@@ -53,7 +53,7 @@ async def test_collect_plans_resolves_winner_via_listmonk_truth() -> None:
     mocks.listmonk_client.get_subscriber_by_email.return_value = SimpleNamespace(subscriber_id=777)
 
     with patch(
-        "app.workers.email_repair_backfill.ListmonkUsersRepository", return_value=listmonk_repo
+        "service_workers.email_repair_backfill.ListmonkUsersRepository", return_value=listmonk_repo
     ):
         plans, issues = await backfill.collect_plans()
 
@@ -85,7 +85,7 @@ async def test_collect_plans_reports_unresolved_groups() -> None:
     mocks.listmonk_client.get_subscriber_by_email.return_value = None
 
     with patch(
-        "app.workers.email_repair_backfill.ListmonkUsersRepository", return_value=listmonk_repo
+        "service_workers.email_repair_backfill.ListmonkUsersRepository", return_value=listmonk_repo
     ):
         plans, issues = await backfill.collect_plans()
 
@@ -127,7 +127,7 @@ async def test_collect_plans_via_policy_uses_37z_phone_date_rules() -> None:
         ),
     ]
 
-    with patch("app.workers.email_repair_backfill.UsersRepository", return_value=users_repo):
+    with patch("service_workers.email_repair_backfill.UsersRepository", return_value=users_repo):
         plans, issues = await backfill.collect_plans_via_policy()
 
     assert issues == []
@@ -168,12 +168,14 @@ async def test_apply_clears_loser_emails_and_persists_db_applied_rows() -> None:
     )
 
     with (
-        patch("app.workers.email_repair_backfill.UsersRepository", return_value=users_repo),
+        patch("service_workers.email_repair_backfill.UsersRepository", return_value=users_repo),
         patch(
-            "app.workers.email_repair_backfill.ListmonkUsersRepository", return_value=listmonk_repo
+            "service_workers.email_repair_backfill.ListmonkUsersRepository",
+            return_value=listmonk_repo,
         ),
         patch(
-            "app.workers.email_repair_backfill.EmailRepairLogRepository", return_value=repair_repo
+            "service_workers.email_repair_backfill.EmailRepairLogRepository",
+            return_value=repair_repo,
         ),
     ):
         summary = await backfill.apply(plans=[plan], issues=[])
@@ -206,12 +208,14 @@ async def test_apply_threads_mark_bad_email_flag_into_repair_log() -> None:
     )
 
     with (
-        patch("app.workers.email_repair_backfill.UsersRepository", return_value=AsyncMock()),
+        patch("service_workers.email_repair_backfill.UsersRepository", return_value=AsyncMock()),
         patch(
-            "app.workers.email_repair_backfill.ListmonkUsersRepository", return_value=AsyncMock()
+            "service_workers.email_repair_backfill.ListmonkUsersRepository",
+            return_value=AsyncMock(),
         ),
         patch(
-            "app.workers.email_repair_backfill.EmailRepairLogRepository", return_value=repair_repo
+            "service_workers.email_repair_backfill.EmailRepairLogRepository",
+            return_value=repair_repo,
         ),
     ):
         await backfill.apply(plans=[plan], issues=[])
@@ -288,7 +292,7 @@ async def test_sync_teyca_enqueues_outbox_task_per_row() -> None:
             DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
         ),
         patch(
-            "app.workers.email_repair_backfill.ExternalCallOutboxRepository",
+            "service_workers.email_repair_backfill.ExternalCallOutboxRepository",
             return_value=outbox_repo,
         ),
     ):
@@ -358,7 +362,7 @@ async def test_sync_teyca_is_idempotent_on_repeated_enqueue() -> None:
             DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
         ),
         patch(
-            "app.workers.email_repair_backfill.ExternalCallOutboxRepository",
+            "service_workers.email_repair_backfill.ExternalCallOutboxRepository",
             return_value=outbox_repo,
         ),
     ):
@@ -394,7 +398,7 @@ async def test_sync_teyca_rejects_rows_missing_winner_metadata() -> None:
             DuplicateEmailBackfill, "_load_db_applied_rows", new=AsyncMock(return_value=rows)
         ),
         patch(
-            "app.workers.email_repair_backfill.ExternalCallOutboxRepository",
+            "service_workers.email_repair_backfill.ExternalCallOutboxRepository",
             return_value=AsyncMock(),
         ),
         pytest.raises(DuplicateEmailBackfillError),
