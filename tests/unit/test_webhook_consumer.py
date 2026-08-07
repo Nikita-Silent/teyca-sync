@@ -1,32 +1,32 @@
-"""Unit tests: webhook routing by type and static token auth."""
+"""Unit tests: webhook routing by type, static token auth, inbox persistence."""
 
 import os
 from collections.abc import Generator
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.api.webhook import get_mq_publisher
 from app.main import app
-from app.mq.publisher import MQPublisher
 
 AUTH_TOKEN = "36545925e92437d467ec8bef30b07bb2"
 
 
 @pytest.fixture
-def mock_publisher() -> AsyncMock:
-    return AsyncMock(spec=MQPublisher)
-
-
-@pytest.fixture(autouse=True)
-def _override_publisher(mock_publisher: AsyncMock) -> Generator[None]:
-    async def override_publisher() -> AsyncMock:
-        return mock_publisher
-
-    app.dependency_overrides[get_mq_publisher] = override_publisher
-    yield
-    app.dependency_overrides.pop(get_mq_publisher, None)
+def mock_inbox_repo() -> Generator[AsyncMock]:
+    """Patch WebhookInboxRepository so webhook() never touches a real DB."""
+    repo_instance = AsyncMock()
+    repo_instance.enqueue.return_value = True
+    repo_cls = MagicMock(return_value=repo_instance)
+    session = AsyncMock()
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session
+    session_cm.__aexit__.return_value = False
+    with (
+        patch("app.api.webhook.WebhookInboxRepository", repo_cls),
+        patch("app.api.webhook.SessionLocal", return_value=session_cm),
+    ):
+        yield repo_instance
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +45,7 @@ def _restore_webhook_auth_env() -> Generator[None]:
 
 
 @pytest.mark.asyncio
-async def test_webhook_routes_create_to_queue_create(mock_publisher: AsyncMock) -> None:
+async def test_webhook_persists_create_event_to_inbox(mock_inbox_repo: AsyncMock) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
     payload = {"type": "CREATE", "pass": {"user_id": 1}}
@@ -56,15 +56,15 @@ async def test_webhook_routes_create_to_queue_create(mock_publisher: AsyncMock) 
             headers={"Authorization": AUTH_TOKEN},
         )
     assert resp.status_code == 200
-    mock_publisher.publish_webhook.assert_called_once()
-    call_args = mock_publisher.publish_webhook.call_args
-    assert call_args[0][0] == "CREATE"
-    assert call_args[0][1]["type"] == "CREATE"
-    assert call_args[0][1]["pass"]["user_id"] == 1
+    mock_inbox_repo.enqueue.assert_awaited_once()
+    call_kwargs = mock_inbox_repo.enqueue.call_args.kwargs
+    assert call_kwargs["event_type"] == "CREATE"
+    assert call_kwargs["payload"]["type"] == "CREATE"
+    assert call_kwargs["payload"]["pass"]["user_id"] == 1
 
 
 @pytest.mark.asyncio
-async def test_webhook_accepts_bearer_prefix(mock_publisher: AsyncMock) -> None:
+async def test_webhook_accepts_bearer_prefix(mock_inbox_repo: AsyncMock) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
     payload = {"type": "UPDATE", "pass": {"user_id": 2}}
@@ -75,14 +75,14 @@ async def test_webhook_accepts_bearer_prefix(mock_publisher: AsyncMock) -> None:
             headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
         )
     assert resp.status_code == 200
-    mock_publisher.publish_webhook.assert_called_once()
-    call_args = mock_publisher.publish_webhook.call_args
-    assert call_args[0][0] == "UPDATE"
-    assert call_args[0][1]["pass"]["user_id"] == 2
+    mock_inbox_repo.enqueue.assert_awaited_once()
+    call_kwargs = mock_inbox_repo.enqueue.call_args.kwargs
+    assert call_kwargs["event_type"] == "UPDATE"
+    assert call_kwargs["payload"]["pass"]["user_id"] == 2
 
 
 @pytest.mark.asyncio
-async def test_webhook_propagates_trace_headers_to_payload(mock_publisher: AsyncMock) -> None:
+async def test_webhook_propagates_trace_headers_to_payload(mock_inbox_repo: AsyncMock) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
     payload = {"type": "CREATE", "pass": {"user_id": 4}}
@@ -97,13 +97,15 @@ async def test_webhook_propagates_trace_headers_to_payload(mock_publisher: Async
             },
         )
     assert resp.status_code == 200
-    call_args = mock_publisher.publish_webhook.call_args
-    assert call_args[0][1]["trace_id"] == "trace-123"
-    assert call_args[0][1]["source_event_id"] == "event-123"
+    call_kwargs = mock_inbox_repo.enqueue.call_args.kwargs
+    assert call_kwargs["trace_id"] == "trace-123"
+    assert call_kwargs["source_event_id"] == "event-123"
+    assert call_kwargs["payload"]["trace_id"] == "trace-123"
+    assert call_kwargs["payload"]["source_event_id"] == "event-123"
 
 
 @pytest.mark.asyncio
-async def test_webhook_routes_delete_to_queue_delete(mock_publisher: AsyncMock) -> None:
+async def test_webhook_routes_delete_event(mock_inbox_repo: AsyncMock) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
     payload = {"type": "DELETE", "pass": {"user_id": 3}}
@@ -114,25 +116,25 @@ async def test_webhook_routes_delete_to_queue_delete(mock_publisher: AsyncMock) 
             headers={"Authorization": AUTH_TOKEN},
         )
     assert resp.status_code == 200
-    mock_publisher.publish_webhook.assert_called_once()
-    call_args = mock_publisher.publish_webhook.call_args
-    assert call_args[0][0] == "DELETE"
-    assert call_args[0][1]["pass"]["user_id"] == 3
+    mock_inbox_repo.enqueue.assert_awaited_once()
+    call_kwargs = mock_inbox_repo.enqueue.call_args.kwargs
+    assert call_kwargs["event_type"] == "DELETE"
+    assert call_kwargs["payload"]["pass"]["user_id"] == 3
 
 
 @pytest.mark.asyncio
-async def test_webhook_rejects_missing_auth(mock_publisher: AsyncMock) -> None:
+async def test_webhook_rejects_missing_auth(mock_inbox_repo: AsyncMock) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
     payload = {"type": "CREATE", "pass": {"user_id": 1}}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         resp = await ac.post("/webhook", json=payload)
     assert resp.status_code == 401
-    mock_publisher.publish_webhook.assert_not_called()
+    mock_inbox_repo.enqueue.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_webhook_rejects_invalid_token(mock_publisher: AsyncMock) -> None:
+async def test_webhook_rejects_invalid_token(mock_inbox_repo: AsyncMock) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
     payload = {"type": "CREATE", "pass": {"user_id": 1}}
@@ -143,11 +145,11 @@ async def test_webhook_rejects_invalid_token(mock_publisher: AsyncMock) -> None:
             headers={"Authorization": "wrong-token"},
         )
     assert resp.status_code == 403
-    mock_publisher.publish_webhook.assert_not_called()
+    mock_inbox_repo.enqueue.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_webhook_rejects_invalid_json_body(mock_publisher: AsyncMock) -> None:
+async def test_webhook_rejects_invalid_json_body(mock_inbox_repo: AsyncMock) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -161,11 +163,13 @@ async def test_webhook_rejects_invalid_json_body(mock_publisher: AsyncMock) -> N
         )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "Invalid JSON body"
-    mock_publisher.publish_webhook.assert_not_called()
+    mock_inbox_repo.enqueue.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_webhook_allows_request_without_auth_when_disabled(mock_publisher: AsyncMock) -> None:
+async def test_webhook_allows_request_without_auth_when_disabled(
+    mock_inbox_repo: AsyncMock,
+) -> None:
     os.environ["WEBHOOK_AUTH_ENABLED"] = "false"
     os.environ.pop("WEBHOOK_AUTH_TOKEN", None)
     payload = {"type": "CREATE", "pass": {"user_id": 7}}
@@ -173,15 +177,15 @@ async def test_webhook_allows_request_without_auth_when_disabled(mock_publisher:
         resp = await ac.post("/webhook", json=payload)
 
     assert resp.status_code == 200
-    mock_publisher.publish_webhook.assert_called_once()
-    call_args = mock_publisher.publish_webhook.call_args
-    assert call_args[0][0] == "CREATE"
-    assert call_args[0][1]["pass"]["user_id"] == 7
+    mock_inbox_repo.enqueue.assert_awaited_once()
+    call_kwargs = mock_inbox_repo.enqueue.call_args.kwargs
+    assert call_kwargs["event_type"] == "CREATE"
+    assert call_kwargs["payload"]["pass"]["user_id"] == 7
 
 
 @pytest.mark.asyncio
-async def test_webhook_logs_validation_failure_without_publishing(
-    mock_publisher: AsyncMock,
+async def test_webhook_logs_validation_failure_without_persisting(
+    mock_inbox_repo: AsyncMock,
 ) -> None:
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
@@ -196,9 +200,30 @@ async def test_webhook_logs_validation_failure_without_publishing(
 
     assert resp.status_code == 422
     assert resp.json()["detail"] == "Invalid webhook payload"
-    mock_publisher.publish_webhook.assert_not_called()
+    mock_inbox_repo.enqueue.assert_not_awaited()
     logger.error.assert_called_once()
     call = logger.error.call_args
     assert call.args[0] == "webhook_validation_failed"
     assert call.kwargs["user_id"] == 5757993
     assert "pass.tags" in call.kwargs["invalid_fields"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_redelivery_with_same_event_id_is_idempotent(
+    mock_inbox_repo: AsyncMock,
+) -> None:
+    """A redelivered webhook (same x-event-id) hits enqueue() again but the
+    repository's ON CONFLICT DO NOTHING makes it a no-op; the endpoint still
+    replies 200 either way."""
+    os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
+    os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
+    mock_inbox_repo.enqueue.return_value = False
+    payload = {"type": "CREATE", "pass": {"user_id": 9}}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post(
+            "/webhook",
+            json=payload,
+            headers={"Authorization": AUTH_TOKEN, "X-Event-Id": "dup-event"},
+        )
+    assert resp.status_code == 200
+    mock_inbox_repo.enqueue.assert_awaited_once()

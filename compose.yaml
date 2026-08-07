@@ -2,7 +2,6 @@ services:
   migrate:
     build: .
     environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       LOG_COMPONENT: migrate
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
@@ -14,13 +13,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       LOG_COMPONENT: app
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
-      rabbitmq:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
@@ -39,16 +35,13 @@ services:
   consumers:
     build: .
     environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       LOG_COMPONENT: consumers
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
-      rabbitmq:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    command: python -m app.workers.run_queue_consumers
+    command: python -m app.workers.run_webhook_inbox_consumer
     restart: unless-stopped
     healthcheck:
       test:
@@ -174,13 +167,10 @@ services:
   consent-sync:
     build: .
     environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       LOG_COMPONENT: consent-sync
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
-      rabbitmq:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: /bin/sh -c 'while true; do python -m app.workers.run_consent_sync; sleep 3600; done'
@@ -199,13 +189,10 @@ services:
   reconcile:
     build: .
     environment:
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       LOG_COMPONENT: reconcile
     env_file:
       - ${COMPOSE_ENV_FILE:-.env}
     depends_on:
-      rabbitmq:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: /bin/sh -c 'while true; do python -m app.workers.run_listmonk_reconcile; sleep 300; done'
@@ -220,21 +207,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-
-  rabbitmq:
-    image: rabbitmq:4-management-alpine
-    restart: unless-stopped
-    volumes:
-      - rabbitmq-data:/var/lib/rabbitmq
-    ports:
-      - "127.0.0.1:5672:5672"
-      - "127.0.0.1:15672:15672"
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  rabbitmq-data:
-    name: ${RABBITMQ_VOLUME_NAME:-teyca-sync_rabbitmq-data}

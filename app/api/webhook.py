@@ -1,4 +1,4 @@
-"""Webhook endpoint: static token auth, parse body, publish to RabbitMQ by type."""
+"""Webhook endpoint: static token auth, parse body, persist to the Postgres inbox."""
 
 import json
 from datetime import UTC, datetime
@@ -6,9 +6,7 @@ from json import JSONDecodeError
 from typing import Any
 from uuid import uuid4
 
-import aio_pika
 import structlog
-from aio_pika.exceptions import CONNECTION_EXCEPTIONS
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -16,9 +14,8 @@ from sqlalchemy import text
 from starlette.requests import ClientDisconnect
 
 from app.api.auth import verify_webhook_token
-from app.config import get_settings
 from app.db.session import SessionLocal
-from app.mq.publisher import MQPublisher
+from app.repositories.webhook_inbox import WebhookInboxRepository
 from app.schemas.webhook import WebhookPayload
 from app.service_health import heartbeat_status
 
@@ -26,10 +23,6 @@ logger = structlog.get_logger()
 
 router = APIRouter(prefix="", tags=["webhook"])
 health_router = APIRouter(prefix="", tags=["health"])
-
-
-def get_mq_publisher(request: Request) -> MQPublisher:
-    return request.app.state.mq_publisher
 
 
 @health_router.get("/live")
@@ -53,15 +46,12 @@ async def live() -> JSONResponse:
 
 @health_router.get("/ready")
 async def ready() -> JSONResponse:
-    settings = get_settings()
     database_error = await _check_database_health()
-    rabbitmq_error = await _check_rabbitmq_health(settings.rabbitmq_url)
 
     checks: dict[str, dict[str, Any]] = {
         "database": _build_check_payload("database", database_error),
-        "rabbitmq": _build_check_payload("rabbitmq", rabbitmq_error),
     }
-    is_healthy = database_error is None and rabbitmq_error is None
+    is_healthy = database_error is None
 
     return JSONResponse(
         status_code=200 if is_healthy else 503,
@@ -97,10 +87,9 @@ async def health() -> JSONResponse:
 @router.post("")
 async def webhook(
     request: Request,
-    publisher: MQPublisher = Depends(get_mq_publisher),
     _auth: None = Depends(verify_webhook_token),
 ) -> dict:
-    """Accept webhook, validate body, and route event payload to the proper queue."""
+    """Accept webhook, validate body, and persist event payload to the inbox."""
     trace_id = _extract_trace_id(request)
     source_event_id = _extract_source_event_id(request)
     try:
@@ -146,7 +135,21 @@ async def webhook(
         type=payload.type,
         user_id=payload.pass_data.user_id,
     )
-    await publisher.publish_webhook(payload.type, message)
+    async with SessionLocal() as session:
+        repo = WebhookInboxRepository(session)
+        inserted = await repo.enqueue(
+            source_event_id=source_event_id,
+            event_type=payload.type,
+            payload=message,
+            trace_id=trace_id,
+        )
+        await session.commit()
+    if not inserted:
+        logger.info(
+            "webhook_duplicate_event",
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+        )
     return {"ok": True}
 
 
@@ -192,16 +195,6 @@ async def _check_database_health() -> str | None:
             await session.execute(text("SELECT 1"))
     except Exception as exc:
         return str(exc)
-    return None
-
-
-async def _check_rabbitmq_health(rabbitmq_url: str) -> str | None:
-    try:
-        connection = await aio_pika.connect_robust(rabbitmq_url, timeout=5.0)
-    except CONNECTION_EXCEPTIONS as exc:
-        return str(exc)
-
-    await connection.close()
     return None
 
 

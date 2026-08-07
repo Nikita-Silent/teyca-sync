@@ -28,16 +28,6 @@ async def test_health_returns_ok_when_dependencies_are_available() -> None:
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "app.api.webhook._check_rabbitmq_health",
-            new=AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.api.webhook.get_settings",
-            return_value=type(
-                "Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"}
-            )(),
-        ),
-        patch(
             "app.api.webhook.heartbeat_status",
             new=AsyncMock(return_value={"status": "ok", "fresh": True, "service": "app"}),
         ),
@@ -49,7 +39,6 @@ async def test_health_returns_ok_when_dependencies_are_available() -> None:
     assert resp.json()["status"] == "ok"
     assert resp.json()["checks"]["app"] == {"status": "ok", "fresh": True, "service": "app"}
     assert resp.json()["checks"]["database"] == {"status": "ok"}
-    assert resp.json()["checks"]["rabbitmq"] == {"status": "ok"}
 
 
 @pytest.mark.asyncio
@@ -58,16 +47,6 @@ async def test_health_returns_503_when_dependency_fails() -> None:
         patch(
             "app.api.webhook._check_database_health",
             new=AsyncMock(return_value="db is down"),
-        ),
-        patch(
-            "app.api.webhook._check_rabbitmq_health",
-            new=AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.api.webhook.get_settings",
-            return_value=type(
-                "Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"}
-            )(),
         ),
         patch(
             "app.api.webhook.heartbeat_status",
@@ -80,7 +59,6 @@ async def test_health_returns_503_when_dependency_fails() -> None:
     assert resp.status_code == 503
     assert resp.json()["status"] == "error"
     assert resp.json()["checks"]["database"] == {"status": "error", "error": "internal error"}
-    assert resp.json()["checks"]["rabbitmq"] == {"status": "ok"}
 
 
 @pytest.mark.asyncio
@@ -89,16 +67,6 @@ async def test_live_and_ready_routes_are_split() -> None:
         patch(
             "app.api.webhook._check_database_health",
             new=AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.api.webhook._check_rabbitmq_health",
-            new=AsyncMock(return_value="rabbit down"),
-        ),
-        patch(
-            "app.api.webhook.get_settings",
-            return_value=type(
-                "Settings", (), {"rabbitmq_url": "amqp://guest:guest@rabbitmq:5672/"}
-            )(),
         ),
         patch(
             "app.api.webhook.heartbeat_status",
@@ -111,11 +79,8 @@ async def test_live_and_ready_routes_are_split() -> None:
 
     assert live_resp.status_code == 200
     assert live_resp.json()["checks"] == {"app": {"status": "ok", "fresh": True, "service": "app"}}
-    assert ready_resp.status_code == 503
-    assert ready_resp.json()["checks"] == {
-        "database": {"status": "ok"},
-        "rabbitmq": {"status": "error", "error": "internal error"},
-    }
+    assert ready_resp.status_code == 200
+    assert ready_resp.json()["checks"] == {"database": {"status": "ok"}}
 
 
 @pytest.mark.asyncio

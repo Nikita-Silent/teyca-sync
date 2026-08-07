@@ -16,6 +16,12 @@ INT_FIELDS: tuple[str, ...] = ("visits", "visits_all")
 EMAIL_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 MERGE_TZ = timezone(timedelta(hours=7))
 
+# Labels stored in external_call_outbox.queue_name for tracing which webhook
+# event type produced the outbox row (formerly the RabbitMQ queue name).
+QUEUE_CREATE = "queue-create"
+QUEUE_UPDATE = "queue-update"
+QUEUE_DELETE = "queue-delete"
+
 
 @dataclass(slots=True)
 class MergeResult:

@@ -16,20 +16,21 @@ class Settings(BaseSettings):
     database_pool_max_overflow: int = 10
     database_pool_timeout_seconds: float = 30.0
 
-    # RabbitMQ
-    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
-    rabbitmq_consumer_prefetch_count: int = 4
-    rabbitmq_consumer_max_concurrency: int = 4
-    rabbitmq_consumer_shutdown_drain_timeout_seconds: float = 30.0
-    rabbitmq_lock_busy_retry_base_delay_ms: int = 1_000
-    rabbitmq_lock_busy_retry_max_delay_ms: int = 30_000
-    rabbitmq_lock_busy_retry_max_retries: int = 5
-    # Set > 0 to enable DLX on main queues (requires manual queue deletion first
-    # if the queue already exists with different arguments).
-    rabbitmq_main_queue_max_delivery_count: int = 10
-    rabbitmq_teyca_rate_limit_retry_base_delay_ms: int = 60_000
-    rabbitmq_teyca_rate_limit_retry_max_delay_ms: int = 15 * 60_000
-    rabbitmq_teyca_rate_limit_retry_max_retries: int = 10
+    # Webhook inbox (Postgres queue, replaces RabbitMQ, teyca-sync-8ib)
+    webhook_inbox_batch_size: int = 100
+    webhook_inbox_poll_interval_seconds: float = 1.0
+    webhook_inbox_max_concurrency: int = 4
+    webhook_inbox_shutdown_drain_timeout_seconds: float = 30.0
+    webhook_inbox_stale_claim_seconds: float = 300.0
+    webhook_inbox_retry_base_delay_ms: int = 1_000
+    webhook_inbox_retry_max_delay_ms: int = 15 * 60_000
+    webhook_inbox_max_retries: int = 25
+    webhook_inbox_lock_busy_retry_base_delay_ms: int = 1_000
+    webhook_inbox_lock_busy_retry_max_delay_ms: int = 30_000
+    webhook_inbox_lock_busy_retry_max_retries: int = 5
+    webhook_inbox_teyca_rate_limit_retry_base_delay_ms: int = 60_000
+    webhook_inbox_teyca_rate_limit_retry_max_delay_ms: int = 15 * 60_000
+    webhook_inbox_teyca_rate_limit_retry_max_retries: int = 10
     external_dispatcher_batch_size: int = 100
     external_dispatcher_retry_base_delay_ms: int = 1_000
     external_dispatcher_retry_max_delay_ms: int = 15 * 60_000

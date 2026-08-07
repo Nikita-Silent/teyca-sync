@@ -7,7 +7,7 @@ from typing import Any
 
 import structlog
 
-from app.mq.queues import QUEUE_DELETE
+from app.consumers.common import QUEUE_DELETE
 from app.repositories.bonus_accrual import BonusAccrualRepository
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_DELETE,

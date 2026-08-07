@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.consumers.common import QUEUE_DELETE
 from app.consumers.delete_user import DeleteConsumerDeps, handle
-from app.mq.queues import QUEUE_DELETE
 from app.repositories.external_call_outbox import OUTBOX_OP_LISTMONK_DELETE
 
 

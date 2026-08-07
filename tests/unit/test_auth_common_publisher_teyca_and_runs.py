@@ -33,7 +33,6 @@ from app.consumers.common import (
     is_valid_email,
     merge_profile_with_old_data,
 )
-from app.mq.publisher import MQPublisher
 from app.repositories.old_db import OldUserData
 from app.schemas.webhook import PassData
 from app.workers import run_consent_sync, run_listmonk_reconcile
@@ -76,64 +75,6 @@ async def test_verify_webhook_token_all_branches() -> None:
         return_value=SimpleNamespace(webhook_auth_enabled=True, webhook_auth_token="secret"),
     ):
         assert await verify_webhook_token("Bearer secret") is None
-
-
-@pytest.mark.asyncio
-async def test_mq_publisher_publish_and_route() -> None:
-    connection = AsyncMock()
-    channel = AsyncMock()
-    channel.is_closed = False
-    channel.default_exchange = AsyncMock()
-    connection.channel.return_value = channel
-
-    publisher = MQPublisher(connection)
-    await publisher.publish("queue-x", {"x": 1})
-
-    channel.declare_queue.assert_awaited_once_with("queue-x", durable=True)
-    channel.default_exchange.publish.assert_awaited_once()
-
-    with patch.object(publisher, "publish", new_callable=AsyncMock) as publish_mock:
-        await publisher.publish_webhook("CREATE", {"a": 1})
-        await publisher.publish_webhook("UPDATE", {"a": 1})
-        await publisher.publish_webhook("DELETE", {"a": 1})
-        with pytest.raises(ValueError):
-            await publisher.publish_webhook("OTHER", {"a": 1})
-
-    assert publish_mock.await_count == 3
-
-
-@pytest.mark.asyncio
-async def test_mq_publisher_reopens_closed_channel() -> None:
-    connection = AsyncMock()
-    closed_channel = AsyncMock()
-    closed_channel.is_closed = True
-    open_channel = AsyncMock()
-    open_channel.is_closed = False
-    open_channel.default_exchange = AsyncMock()
-    connection.channel.side_effect = [closed_channel, open_channel]
-
-    publisher = MQPublisher(connection)
-    publisher._channel = closed_channel
-
-    await publisher.publish("queue-x", {"x": 1})
-
-    assert connection.channel.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_mq_publisher_declares_queue_once_per_channel() -> None:
-    connection = AsyncMock()
-    channel = AsyncMock()
-    channel.is_closed = False
-    channel.default_exchange = AsyncMock()
-    connection.channel.return_value = channel
-
-    publisher = MQPublisher(connection)
-    await publisher.publish("queue-x", {"x": 1})
-    await publisher.publish("queue-x", {"x": 2})
-
-    channel.declare_queue.assert_awaited_once_with("queue-x", durable=True)
-    assert channel.default_exchange.publish.await_count == 2
 
 
 def test_common_helpers_cover_numeric_and_merge_paths() -> None:

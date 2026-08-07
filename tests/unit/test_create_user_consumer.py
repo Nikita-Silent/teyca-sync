@@ -7,8 +7,8 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.config import Settings
+from app.consumers.common import QUEUE_CREATE
 from app.consumers.create_user import CreateConsumerDeps, handle
-from app.mq.queues import QUEUE_CREATE
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_UPSERT,
     OUTBOX_OP_MERGE_FINALIZE,

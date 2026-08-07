@@ -1,14 +1,10 @@
-"""Pytest fixtures. TESTING=1 so app lifespan uses mock publisher (no RabbitMQ)."""
+"""Pytest fixtures."""
 
-import os
 from collections.abc import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-
-# Ensure app uses test lifespan (mock MQ)
-os.environ["TESTING"] = "1"
 
 
 @pytest.fixture

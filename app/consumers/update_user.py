@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.consumers.common import (
+    QUEUE_UPDATE,
     build_listmonk_attributes,
     build_merge_key2_value,
     build_profile_from_pass,
@@ -18,7 +19,6 @@ from app.consumers.common import (
     merge_profile_with_old_data,
 )
 from app.consumers.email_conflict import is_email_unique_violation, resolve_users_email_conflict
-from app.mq.queues import QUEUE_UPDATE
 from app.repositories.external_call_outbox import (
     OUTBOX_OP_LISTMONK_UPSERT,
     OUTBOX_OP_MERGE_FINALIZE,

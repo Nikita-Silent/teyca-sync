@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ExternalCallOutbox
+from app.retry_backoff import compute_retry_delay_ms
 
 OUTBOX_STATUS_PENDING = "pending"
 OUTBOX_STATUS_PROCESSING = "processing"
@@ -272,7 +273,7 @@ class ExternalCallOutboxRepository:
         """Schedule retry or move the job to dead state."""
         status = OUTBOX_STATUS_FAILED
         next_retry_at = datetime.now(UTC) + timedelta(
-            milliseconds=_compute_retry_delay_ms(
+            milliseconds=compute_retry_delay_ms(
                 retry_count=attempts,
                 base_delay_ms=base_delay_ms,
                 max_delay_ms=max_delay_ms,
@@ -388,9 +389,3 @@ class ExternalCallOutboxRepository:
         )
         result = await self._session.execute(stmt)
         return {str(status): int(count) for status, count in result.all()}
-
-
-def _compute_retry_delay_ms(*, retry_count: int, base_delay_ms: int, max_delay_ms: int) -> int:
-    bounded_retry_count = max(1, retry_count)
-    delay_ms = max(1, base_delay_ms) * (2 ** (bounded_retry_count - 1))
-    return min(delay_ms, max(1, max_delay_ms))
