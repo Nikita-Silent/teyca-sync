@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,6 +16,17 @@ from app.config import Settings
 
 logger = structlog.get_logger()
 T = TypeVar("T")
+
+_TIMEOUT_PARAM_SUPPORTED: dict[Callable[..., Any], bool] = {}
+
+
+def _supports_timeout_config(func: Callable[..., Any]) -> bool:
+    """Check (and cache) whether an SDK function accepts a timeout_config kwarg."""
+    supported = _TIMEOUT_PARAM_SUPPORTED.get(func)
+    if supported is None:
+        supported = "timeout_config" in inspect.signature(func).parameters
+        _TIMEOUT_PARAM_SUPPORTED[func] = supported
+    return supported
 
 
 class ListmonkClientError(Exception):
@@ -117,6 +129,19 @@ class ListmonkSDKClient:
         self._settings = settings
         self._logged_in = False
 
+    def _build_timeout_config(self) -> object | None:
+        """Build an httpx2.Timeout from settings, or None if httpx2 is unavailable."""
+        try:
+            import httpx2  # type: ignore
+        except ModuleNotFoundError:
+            return None
+        return httpx2.Timeout(
+            connect=float(getattr(self._settings, "listmonk_connect_timeout_seconds", 5.0)),
+            read=float(getattr(self._settings, "listmonk_read_timeout_seconds", 15.0)),
+            write=float(getattr(self._settings, "listmonk_write_timeout_seconds", 15.0)),
+            pool=float(getattr(self._settings, "listmonk_pool_timeout_seconds", 5.0)),
+        )
+
     async def _sdk_call(
         self,
         func: Callable[..., T],
@@ -134,6 +159,10 @@ class ListmonkSDKClient:
             0.0,
             float(getattr(self._settings, "listmonk_request_retry_backoff_seconds", 0.5)),
         )
+        if "timeout_config" not in kwargs and _supports_timeout_config(func):
+            timeout_config = self._build_timeout_config()
+            if timeout_config is not None:
+                kwargs["timeout_config"] = timeout_config
 
         attempt = 0
         while True:

@@ -154,7 +154,26 @@ class TeycaClient:
     ) -> None:
         self._settings = settings
         self._client = http_client
+        self._owns_client = http_client is None
         self._rate_limiter = rate_limiter
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Lazily create and reuse a client with connect/read/write/pool timeouts."""
+        if self._client is None:
+            timeout = httpx.Timeout(
+                connect=float(getattr(self._settings, "teyca_connect_timeout_seconds", 5.0)),
+                read=float(getattr(self._settings, "teyca_read_timeout_seconds", 15.0)),
+                write=float(getattr(self._settings, "teyca_write_timeout_seconds", 15.0)),
+                pool=float(getattr(self._settings, "teyca_pool_timeout_seconds", 5.0)),
+            )
+            self._client = httpx.AsyncClient(timeout=timeout)
+        return self._client
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client if this instance created it."""
+        if self._owns_client and self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def _execute(
         self,
@@ -174,11 +193,8 @@ class TeycaClient:
         attempt = 0
         while True:
             try:
-                if self._client is None:
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        response = await getattr(client, method)(url, json=json, headers=headers)
-                else:
-                    response = await getattr(self._client, method)(url, json=json, headers=headers)
+                client = self._get_client()
+                response = await getattr(client, method)(url, json=json, headers=headers)
             except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
                 if attempt >= max_retries:
                     raise

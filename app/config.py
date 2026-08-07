@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     teyca_rate_limit_per_day: int = 5000
     teyca_request_max_retries: int = 2
     teyca_request_retry_backoff_seconds: float = 1.0
+    teyca_connect_timeout_seconds: float = 5.0
+    teyca_read_timeout_seconds: float = 15.0
+    teyca_write_timeout_seconds: float = 15.0
+    teyca_pool_timeout_seconds: float = 5.0
 
     # Old DB (read-only, merge)
     export_db_url: str = ""
@@ -67,6 +71,10 @@ class Settings(BaseSettings):
     listmonk_request_timeout_seconds: float = 15.0
     listmonk_request_max_retries: int = 2
     listmonk_request_retry_backoff_seconds: float = 0.5
+    listmonk_connect_timeout_seconds: float = 5.0
+    listmonk_read_timeout_seconds: float = 15.0
+    listmonk_write_timeout_seconds: float = 15.0
+    listmonk_pool_timeout_seconds: float = 5.0
     consent_bonus_amount: Decimal = Decimal("100.0")
     consent_bonus_ttl_days: int = 30
     consent_sync_batch_size: int = 500

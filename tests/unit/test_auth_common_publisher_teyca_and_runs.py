@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -329,16 +330,19 @@ async def test_teyca_client_uses_internal_httpx_client_when_not_injected() -> No
     httpx_client = AsyncMock()
     httpx_client.post.return_value = SimpleNamespace(status_code=200, text="ok")
     httpx_client.put.return_value = SimpleNamespace(status_code=200, text="ok")
-    cm = AsyncMock()
-    cm.__aenter__.return_value = httpx_client
-    cm.__aexit__.return_value = False
 
-    with patch("app.clients.teyca.httpx.AsyncClient", return_value=cm):
+    with patch(
+        "app.clients.teyca.httpx.AsyncClient", return_value=httpx_client
+    ) as async_client_cls:
         await client.accrue_bonuses(user_id=1, bonuses=[BonusOperation.one_shot(value="1")])
         await client.update_pass_fields(user_id=1, fields={"key1": "confirmed"})
 
     assert httpx_client.post.await_count == 1
     assert httpx_client.put.await_count == 1
+    # The client is created once and reused across calls, not per-request.
+    assert async_client_cls.call_count == 1
+    timeout = async_client_cls.call_args.kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
 
 
 @pytest.mark.asyncio

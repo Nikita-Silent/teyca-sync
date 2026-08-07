@@ -250,6 +250,29 @@ async def test_ensure_login_and_get_subscriber_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ensure_login_injects_timeout_config_from_settings() -> None:
+    import httpx2  # type: ignore
+
+    def real_login(user_name: str, pw: str, timeout_config: httpx2.Timeout | None = None) -> bool:
+        real_login.seen_timeout_config = timeout_config  # type: ignore[attr-defined]
+        return True
+
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = real_login
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
+    ):
+        client = ListmonkSDKClient(_settings())
+        await client._ensure_login()
+
+    seen = real_login.seen_timeout_config  # type: ignore[attr-defined]
+    assert isinstance(seen, httpx2.Timeout)
+
+
+@pytest.mark.asyncio
 async def test_get_subscriber_state_returns_none_for_empty_payload_or_status() -> None:
     fake = SimpleNamespace()
     fake.set_url_base = MagicMock()
