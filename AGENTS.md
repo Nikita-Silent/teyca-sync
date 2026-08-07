@@ -10,7 +10,8 @@
 После написания кода: убедись что `make test` зелёный.
 Перед коммитом: обязательно прогони `make typecheck` и `./.venv/bin/ruff check .`.
 Стиль кода: async/await везде, type hints везде, без bare except.
-Именование очередей — только через константы из app/mq/queues.py, никогда строками напрямую.
+Имена outbox-операций — только через константы из app/repositories/external_call_outbox.py
+(OUTBOX_OP_*), никогда строками напрямую.
 Listmonk — только через Python SDK; прямые HTTP-вызовы к Listmonk API не использовать.
 Если задача не входит в текущий срез — зафиксируй в TODO-комментарии и не реализуй.
 ```
@@ -23,7 +24,7 @@ Listmonk — только через Python SDK; прямые HTTP-вызовы 
 
 **Зона ответственности:**
 - `tests/unit/` — изолированные тесты бизнес-логики
-- `tests/integration/` — end-to-end тесты с реальными Postgres и RabbitMQ
+- `tests/integration/` — end-to-end тесты с реальным Postgres
 - `tests/conftest.py` — общие fixtures
 
 **Инструменты:**
@@ -35,33 +36,40 @@ Listmonk — только через Python SDK; прямые HTTP-вызовы 
 **Стек тестирования:**
 - `pytest` + `pytest-asyncio` (asyncio_mode = "auto")
 - `respx` — мок HTTP к Teyca; Listmonk — мок SDK-клиента (не HTTP)
-- `unittest.mock.AsyncMock` — мок репозиториев и publisher
-- `testcontainers` — реальный Postgres и RabbitMQ в integration-тестах
+- `unittest.mock.AsyncMock` — мок репозиториев
+- Реальный Postgres в integration-тестах — одноразовый docker-контейнер,
+  управляемый напрямую через `docker` CLI (`tests/integration/conftest.py`),
+  не `testcontainers`
 
 **Чего не делать:**
 - Не мокировать репозитории в integration-тестах — там работает реальная БД
 - Не писать тесты, которые проверяют моки, а не поведение
 - Не пропускать граничные случаи — каждая ветка `if` в consumer должна иметь тест
 
-**Шаблон unit-теста для consumer:**
+**Шаблон unit-теста для consumer** (см. `tests/unit/test_create_user_consumer.py`
+для полного примера):
 ```python
 # tests/unit/test_<name>_consumer.py
 import pytest
-from unittest.mock import AsyncMock, patch
-from app.consumers.<name> import handle
+from unittest.mock import AsyncMock
+from app.consumers.<name> import <Name>ConsumerDeps, handle
 
 @pytest.mark.asyncio
 async def test_<сценарий>():
     # Arrange
-    mock_repo = AsyncMock()
-    mock_publisher = AsyncMock()
+    deps = <Name>ConsumerDeps(
+        users_repo=AsyncMock(),
+        listmonk_repo=AsyncMock(),
+        outbox_repo=AsyncMock(),
+        merge_repo=AsyncMock(),
+    )
     payload = {...}  # минимальный валидный payload
 
     # Act
-    await handle(payload, repo=mock_repo, publisher=mock_publisher)
+    await handle(payload, deps=deps)
 
     # Assert
-    mock_publisher.assert_called_once_with("<queue-name>", {...})
+    deps.outbox_repo.enqueue_once.assert_called_once_with(...)
 ```
 
 **System prompt:**
@@ -81,7 +89,9 @@ async def test_<сценарий>():
 **Роль:** Управляет инфраструктурой: Docker, Alembic-миграции, конфигурация, Makefile.
 
 **Зона ответственности:**
-- `docker-compose.yml`
+- `compose.yaml` — 3 сервиса: `migrate` (одноразовый `alembic upgrade head`),
+  `app` (FastAPI), `worker` (все фоновые задачи одним процессом,
+  `app/workers/run_worker.py`)
 - `Dockerfile`
 - `Makefile`
 - `migrations/` — Alembic env и версии
@@ -109,7 +119,7 @@ async def test_<сценарий>():
 ```
 Ты — infra агент проекта teyca-sync.
 Твоя задача — поддерживать инфраструктуру в рабочем состоянии.
-Перед изменением docker-compose.yml: убедись что make up проходит после изменения.
+Перед изменением compose.yaml: убедись что make up проходит после изменения.
 Перед созданием миграции: убедись что модели в app/db/models.py уже обновлены.
 После создания миграции: запусти alembic upgrade head и убедись что нет ошибок.
 Версии пакетов зафиксированы в AGENTS.md — не повышай их без явного указания.
@@ -119,16 +129,21 @@ async def test_<сценарий>():
 
 ## Критические правила для всех агентов
 
-### Очереди RabbitMQ
-Имена очередей — **только через константы** из `app/mq/queues.py`. Никогда не пиши строку напрямую.
+### Postgres-очереди (webhook_inbox, external_call_outbox)
+Транспорта на брокере сообщений в проекте нет — входящие webhook-события и
+исходящие side effect'ы идут через Postgres-таблицы (`webhook_inbox`,
+`external_call_outbox`), вычитываемые `FOR UPDATE SKIP LOCKED` из
+`app/workers/run_worker.py`. Имена outbox-операций — **только через
+константы** из `app/repositories/external_call_outbox.py`
+(`OUTBOX_OP_*`). Никогда не пиши строку напрямую.
 
 ```python
 # ❌ Никогда так
-await publisher.publish("quue-request-to-merge", payload)
+await outbox_repo.enqueue_once(operation="merge_finalize", ...)
 
 # ✅ Всегда так
-from app.mq.queues import QUEUE_MERGE
-await publisher.publish(QUEUE_MERGE, payload)
+from app.repositories.external_call_outbox import OUTBOX_OP_MERGE_FINALIZE
+await outbox_repo.enqueue_once(operation=OUTBOX_OP_MERGE_FINALIZE, ...)
 ```
 
 ### Async везде
@@ -192,7 +207,7 @@ logger.error("listmonk_add_failed", user_id=user_id, status_code=resp.status_cod
 ## Как запускать проект
 
 ```bash
-# Поднять инфраструктуру (Postgres, RabbitMQ, сервис)
+# Поднять сервис (app + worker + migrate; Postgres — внешняя БД, DATABASE_URL)
 make up
 
 # Применить миграции
@@ -215,16 +230,25 @@ make test-unit
 
 ## Как дебажить
 
-**Consumer не обрабатывает сообщения:**
-1. Проверь что RabbitMQ запущен: `docker compose ps`
-2. Проверь что очередь существует: открой RabbitMQ Management UI на `localhost:15672`
-3. Проверь логи в Loki по `service="teyca-sync"` и нужному `component`
-4. Убедись что имя очереди совпадает с константой в `app/mq/queues.py`
+**Событие не обрабатывается:**
+1. Проверь что `worker` запущен и healthcheck зелёный: `docker compose ps`
+2. Проверь heartbeat нужной задачи — файл `<task>.json` в volume
+   `heartbeat-data` (смонтирован в `/var/run/teyca-sync` у `app` и
+   `worker`), читается с хоста без `docker exec`
+3. Проверь строку в `webhook_inbox`/`external_call_outbox` — `status`,
+   `attempts`, `last_error`, `next_retry_at`
+4. Проверь логи в Loki по `service="teyca-sync"` и нужному `component`
+   (`app` или `worker`)
+5. Убедись что имя outbox-операции совпадает с константой
+   `OUTBOX_OP_*` в `app/repositories/external_call_outbox.py`
 
 **Ошибка подключения к БД:**
-1. Проверь `DATABASE_URL` в `.env`
-2. Проверь что Postgres запущен: `docker compose ps postgres`
-3. Проверь что миграции применены: `make migrate`
+1. Проверь `DATABASE_URL` в `.env` (внешняя Postgres, локально в compose
+   не поднимается)
+2. Проверь что миграции применены: `make migrate`
+3. Проверь, что circuit breaker не открыт из-за серии ошибок к Teyca/Listmonk
+   (см. `docs/current-runtime-flow.md`) — это не относится к БД напрямую,
+   но частая смежная причина «ничего не обрабатывается»
 
 **Тест падает с `RuntimeError: no running event loop`:**
 - Убедись что в `pyproject.toml` есть `asyncio_mode = "auto"` в секции `[tool.pytest.ini_options]`
@@ -240,16 +264,20 @@ make test-unit
 
 ```
 app/
-  api/webhook.py          # POST /webhook — точка входа
-  consumers/              # обработчики очередей RabbitMQ
-  repositories/           # SQL через SQLAlchemy (только здесь)
-  clients/                # HTTP-клиенты (Teyca и др.); Listmonk — только через SDK
-  mq/queues.py            # ← константы очередей, читать перед любой работой с MQ
-  db/models.py            # ← ORM-модели, читать перед любой работой с БД
-  schemas/webhook.py      # ← Pydantic-схемы входящих данных
+  api/webhook.py                       # POST /webhook — точка входа, пишет в webhook_inbox
+  consumers/                           # обработчики CREATE/UPDATE/DELETE, вызываются из webhook_inbox_worker
+  workers/run_worker.py                # единственный долгоживущий процесс (compose-сервис worker)
+  workers/scheduled_task.py            # общий раннер периодических задач внутри run_worker
+  repositories/webhook_inbox.py        # ← очередь входящих webhook (Postgres, FOR UPDATE SKIP LOCKED)
+  repositories/external_call_outbox.py # ← константы OUTBOX_OP_*, очередь исходящих side effect'ов
+  repositories/                        # SQL через SQLAlchemy (только здесь)
+  clients/                             # HTTP-клиенты (Teyca и др.); Listmonk — только через SDK
+  circuit_breaker.py                   # ← общий CircuitBreaker для клиентов Teyca/Listmonk
+  db/models.py                         # ← ORM-модели, читать перед любой работой с БД
+  schemas/webhook.py                   # ← Pydantic-схемы входящих данных
 tests/
   unit/                   # моки всего внешнего
-  integration/            # реальная инфра, моки только HTTP
+  integration/            # реальный Postgres, моки только HTTP/SDK
 docs/
   roadmap.md              # детальный план по срезам
   teyca-api.md            # выжимка API Teyca (исходник: teyca-api.json)

@@ -14,6 +14,12 @@
 - `email_repair_log`
 - `listmonk_user_archive`
 - `sync_state` (используется в инкрементальном consent sync как watermark)
+- `webhook_inbox` — очередь входящих webhook-событий (заменяет RabbitMQ, см.
+  `docs/current-runtime-flow.md`, раздел 5); не описана подробно в этом
+  документе, т.к. используется только транзитно между приёмом webhook и
+  записью в таблицы ниже
+- `external_call_outbox` — очередь исходящих вызовов к Listmonk/Teyca (см.
+  `docs/current-runtime-flow.md`, раздел 6)
 
 ## 2) Таблицы и их назначение
 
@@ -59,7 +65,7 @@
   - `attempts`
   - `next_retry_at`
   - `error_text`
-- Сюда смотреть, если email "пропал" у loser-пользователя или если duplicate-email больше не ретраится через RabbitMQ.
+- Сюда смотреть, если email "пропал" у loser-пользователя или если duplicate-email больше не ретраится через `external-dispatcher-email-repair-sync` задачу `worker`.
 
 7. `listmonk_user_archive`
 - Архив loser-строк из duplicate-subscriber remediation.
@@ -74,7 +80,7 @@
 
 ## 3) Flow по событиям (что меняется в БД)
 
-## CREATE (`queue-create`)
+## CREATE
 
 1. lock по `user_id`
 2. `users`: `upsert`
@@ -92,13 +98,13 @@
 3. `email_repair_log`: insert `status='pending'`
 4. `listmonk_users`: не обновляется этим сообщением
 5. Listmonk этим сообщением не мутируется
-6. consumer завершает обработку без `requeue`
+6. обработка завершается, строка webhook_inbox помечается done без повторов
 
 Если локальный duplicate `subscriber_id`:
 1. `users`: upsert уже выполнен
 2. перед записью в `listmonk_users` берётся advisory lock по `subscriber_id`
 3. если этот `subscriber_id` уже связан с другим `user_id`, `listmonk_users` не обновляется
-4. consumer логирует конфликт и завершает обработку без `requeue`
+4. конфликт логируется, строка webhook_inbox помечается done без повторов
 
 Куда смотреть:
 1. `users` (профиль)
@@ -107,7 +113,7 @@
 4. `email_repair_log` (если sync в Listmonk не прошёл из-за duplicate email)
 5. логи `*_duplicate_subscriber_id` (если sync не дошёл до `listmonk_users` из-за duplicate subscriber mapping)
 
-## UPDATE (`queue-update`)
+## UPDATE
 
 1. lock по `user_id`
 2. проверка `merge_log`
@@ -118,9 +124,9 @@
 
 Если `merge_log` отсутствует, merge выполняется и логируется в `merge_log`.
 При успешном merge дополнительно обновляется `key2` в Teyca.
-Если локальный email-дубликат, вместо бесконечного retry создаётся запись в `email_repair_log`, а сообщение ack-ается.
+Если локальный email-дубликат, вместо бесконечного retry создаётся запись в `email_repair_log`, а строка webhook_inbox помечается done.
 Локальный duplicate pre-check выполняется до `listmonk_client.upsert_subscriber(...)`, поэтому сам Listmonk в этом сценарии не успевает обновиться.
-Если локальный duplicate `subscriber_id`, вместо повторных попыток логируется конфликтная привязка и сообщение ack-ается.
+Если локальный duplicate `subscriber_id`, вместо повторных попыток логируется конфликтная привязка и строка webhook_inbox помечается done.
 
 Куда смотреть:
 1. `users.updated_at`
@@ -129,7 +135,7 @@
 4. `email_repair_log` (если update "не дошёл" до `listmonk_users` из-за duplicate email)
 5. логи `update_consumer_duplicate_subscriber_id` / `create_consumer_duplicate_subscriber_id`
 
-## DELETE (`queue-delete`)
+## DELETE
 
 В транзакции:
 1. `listmonk_users`: delete
@@ -174,8 +180,8 @@
 - issue: `teyca-sync-b7j`
 
 Транзакционность и повторная доставка:
-- consumers работают в модели at-least-once: `ack` отправляется только после успешного завершения handler и commit локальной БД
-- если consumer/process/RabbitMQ connection падает после внешнего вызова, но до `ack`, сообщение может быть доставлено повторно
+- обработка `webhook_inbox` работает в модели at-least-once: строка помечается `done` только после успешного завершения handler и commit локальной БД
+- если процесс `worker` падает после внешнего вызова, но до `mark_done`, событие может быть обработано повторно (строка остаётся в `processing`, потом её вернёт reaper — `release_stale_processing_claims`)
 - `consent` бонусы частично защищены журналом `bonus_accrual_log` через `idempotency_key` и payload-шаги `bonus_done/key1_done`
 - но есть окно между внешним `POST /bonuses` и записью `bonus_done=true`; в этом окне crash приводит к риску повторного начисления
 - `merge` бонусы в CREATE/UPDATE отдельным журналом идемпотентности пока не защищены, поэтому повторная доставка после успешного вызова Teyca может начислить бонус повторно

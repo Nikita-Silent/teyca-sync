@@ -42,18 +42,24 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 При работе с Teyca API в `teyca-sync` применяются лимиты:
 
 - `5` запросов в секунду
-- `150` запросов в минуту
-- `1000` запросов в час
+- `50` запросов в минуту
+- `500` запросов в час
 - `5000` запросов в день
 
-Лимиты применяются в клиенте как скользящие окна. В production они координируются через Redis, чтобы `consumers`, `consent-sync` и другие процессы делили один общий бюджет запросов к Teyca. При достижении лимита запрос ожидает свободное окно и выполняется позже.
+Лимиты применяются в клиенте как скользящие окна, посчитанные через Postgres-таблицу
+`teyca_call_budget` (`PostgresCallBudgetLimiter`), чтобы webhook-обработка, `consent-sync`
+и dispatcher-задачи внутри `worker` делили один общий бюджет запросов к Teyca. При
+достижении лимита запрос не падает, а откладывается до освобождения окна.
 
 ### Что происходит при ошибке запроса в Teyca
 
 - Если Teyca возвращает `4xx/5xx`, клиент выбрасывает `TeycaAPIError`.
-- Для `CREATE/UPDATE/DELETE` consumers это приводит к rollback транзакции и `reject(requeue=true)` в RabbitMQ.
+- Для `CREATE/UPDATE/DELETE` это приводит к rollback транзакции и `mark_retry` строки
+  `webhook_inbox` с экспоненциальным backoff (см. `docs/current-runtime-flow.md`, раздел 5).
 - Для `consent-sync` это приводит к сохранению `consent_pending=true` и повторной попытке на следующем запуске worker.
-- Для `email-repair` это не возвращает исходное webhook-сообщение в RabbitMQ; ошибка сохраняется в `email_repair_log` с bounded retry.
+- Для `email-repair` (`app/consumers/email_conflict.py` + dispatcher-задача
+  `external-dispatcher-email-repair-sync`) это не возвращает исходное событие в обработку заново;
+  ошибка сохраняется в `email_repair_log` с bounded retry.
 
 ### Карты (passes)
 
@@ -74,7 +80,7 @@ Teyca шлёт webhook на наш URL (POST). В теле запроса:
 
 В сервисе (FastAPI) бонусы участвуют так:
 
-1. **Входящий webhook** — Teyca присылает POST на наш путь из `WEBHOOK` (по умолчанию `/webhook`) с телом `{ "type": "CREATE"|"UPDATE"|"DELETE", "pass": { ... } }`. В `pass.bonus` приходит **уже актуальный баланс** бонусов по карте (Teyca сама начисляет/списывает при покупках и т.д.). Сервис парсит payload, проверяет Authorization, публикует сообщение в RabbitMQ в очередь по `type` (CREATE/UPDATE/DELETE). Consumers сохраняют данные в Postgres и синхронизируют Listmonk; поле `bonus` хранится в таблице `users` как часть профиля.
+1. **Входящий webhook** — Teyca присылает POST на наш путь из `WEBHOOK` (по умолчанию `/webhook`) с телом `{ "type": "CREATE"|"UPDATE"|"DELETE", "pass": { ... } }`. В `pass.bonus` приходит **уже актуальный баланс** бонусов по карте (Teyca сама начисляет/списывает при покупках и т.д.). Сервис парсит payload, проверяет Authorization, пишет событие в Postgres-таблицу `webhook_inbox` по `type` (CREATE/UPDATE/DELETE). Фоновая задача `worker` вычитывает `webhook_inbox`, сохраняет данные в Postgres и синхронизирует Listmonk; поле `bonus` хранится в таблице `users` как часть профиля.
 
 2. **Когда нужно начислить бонусы из нашего сервиса** (например при merge с кассовой БД или по внутреннему правилу) — вызываем **API Teyca**, а не выставляем число через PUT карты:
    - **POST** `https://api.teyca.ru/v1/{token}/passes/{user_id}/bonuses`  

@@ -1,6 +1,8 @@
 # Как работает teyca-sync
 
-**Факт на 2026-07-30**, коммит `5541ba8`. Источник — код `app/` и `compose.yaml`.
+**Факт на 2026-08-07**, после teyca-sync-8ib (RabbitMQ → Postgres inbox) и
+teyca-sync-2g7 (восемь процессов → один `worker`). Источник — код `app/` и
+`compose.yaml`.
 
 Документ рассчитан на чтение с нуля. Порядок: сначала «зачем это всё» и словарь терминов,
 потом путь одного события целиком, потом каждый шаг подробно. Ссылки вида
@@ -44,6 +46,7 @@
 | merge | разовое слияние истории из старой БД в профиль клиента; факт слияния — строка в `merge_log` |
 | consent | согласие клиента на email-рассылку; источник истины — статус подписчика в Listmonk, не CRM |
 | subscriber | подписчик в Listmonk; связь `user_id ↔ subscriber_id` хранится в `listmonk_users` |
+| inbox | таблица `webhook_inbox`: очередь входящих webhook-событий в Postgres, заменяет RabbitMQ |
 | outbox | таблица `external_call_outbox`: очередь внешних вызовов, которые надо сделать после коммита в БД |
 | watermark | закладка «до какого места дочитали» в `sync_state` для инкрементальных сверок |
 | dedupe_key | ключ идемпотентности строки outbox, например `merge-finalize:12345` |
@@ -53,48 +56,59 @@
 
 ## 1) Из каких процессов состоит
 
-Три схемы по путям данных вместо одной общей. Логи (все процессы пишут в Loki) и Redis
-(rate limiter Teyca) на схемах не показаны — они в таблице 1.4.
+Всего три compose-сервиса: `migrate` (одноразовый), `app` (FastAPI), `worker`
+(все фоновые задачи одним процессом). Логи (оба сервиса пишут в Loki) на
+схемах не показаны — см. раздел 11.
 
 ### 1.1 Приём события и запись в БД
 
 ```mermaid
 flowchart TB
     CRM["Teyca CRM"] -->|"POST ${WEBHOOK}"| APP["app<br/>uvicorn :8000"]
-    APP -->|"publish"| RMQ["rabbitmq:4<br/>queue-create/update/delete"]
-    RMQ -->|"consume"| CONS["consumers<br/>run_queue_consumers"]
-    CONS -->|"retry / dead-letter"| RMQ
-    CONS -->|"read: история по phone"| ODB[("Старая БД<br/>read-only")]
-    CONS -->|"write: users, listmonk_users,<br/>email_repair_log, outbox"| PG[("Postgres")]
+    APP -->|"INSERT ... ON CONFLICT DO NOTHING"| INBOX[("Postgres<br/>webhook_inbox")]
+    INBOX -->|"claim FOR UPDATE SKIP LOCKED"| WRK["worker<br/>webhook_inbox_worker task"]
+    WRK -->|"retry / dead"| INBOX
+    WRK -->|"read: история по phone"| ODB[("Старая БД<br/>read-only")]
+    WRK -->|"write: users, listmonk_users,<br/>email_repair_log, outbox"| PG[("Postgres")]
 ```
 
-Внешних вызовов на этом пути нет: consumer только пишет в Postgres.
+Внешних вызовов на этом пути нет: `app` только пишет в `webhook_inbox`,
+обработчики (`app/consumers/*`) только пишут в Postgres.
 
 ### 1.2 Выполнение внешних вызовов из outbox
 
 ```mermaid
 flowchart LR
     PG[("Postgres<br/>external_call_outbox")]
-    PG -->|"claim listmonk_upsert,<br/>listmonk_delete"| DLM["external-dispatcher-listmonk<br/>каждые 5 c"]
-    PG -->|"claim merge_finalize"| DMG["external-dispatcher-merge<br/>каждые 5 c"]
-    PG -->|"claim teyca_block_invalid_email"| DIE["external-dispatcher-invalid-email<br/>каждые 5 c"]
+    PG -->|"claim listmonk_upsert,<br/>listmonk_delete"| DLM["worker: external-dispatcher-listmonk<br/>каждые 5 c, если очередь пуста"]
+    PG -->|"claim merge_finalize"| DMG["worker: external-dispatcher-merge<br/>каждые 5 c"]
+    PG -->|"claim teyca_block_invalid_email"| DIE["worker: external-dispatcher-invalid-email<br/>каждые 5 c"]
+    PG -->|"claim teyca_block_consent"| DCB["worker: external-dispatcher-consent-block<br/>каждые 5 c"]
+    PG -->|"claim teyca_email_repair_sync"| DER["worker: external-dispatcher-email-repair-sync<br/>каждые 5 c"]
     DLM --> LM["Listmonk<br/>Python SDK"]
     DMG --> TY["Teyca API"]
     DIE --> TY
+    DCB --> TY
+    DER --> TY
     DLM -->|"status done/failed/dead"| PG
     DMG -->|"status + merge_log"| PG
     DIE -->|"status + listmonk_users"| PG
 ```
 
-Три контейнера — **один и тот же код** с разным набором операций
-(`run_external_dispatcher_listmonk.py:10`, `_merge.py:10`, `_invalid_email.py:10`).
+Пять веток claim'а — **один и тот же код** с разным набором операций
+(`app/workers/run_worker.py`: пять вызовов `build_external_dispatcher_worker`
+с разными `operations`). До teyca-sync-2g7 это было три отдельных
+контейнера; сейчас — пять `ScheduledTask` внутри одного `worker`-процесса,
+каждая крутит `ExternalDispatcherWorker.run_once()` в busy-loop, пока есть
+работа, и засыпает на `external_dispatcher_poll_interval_seconds` (по
+умолчанию 5с), когда очередь пуста.
 
 ### 1.3 Периодические сверки
 
 ```mermaid
 flowchart LR
-    CSY["consent-sync<br/>каждые 60 c"]
-    REC["reconcile<br/>каждые 300 c"]
+    CSY["worker: consent-sync<br/>каждые 3600 c"]
+    REC["worker: reconcile<br/>каждые 300 c"]
     PG[("Postgres")]
     LM["Listmonk"]
     TY["Teyca API"]
@@ -106,30 +120,49 @@ flowchart LR
     REC <-->|"sync_state, listmonk_users,<br/>listmonk_user_archive"| PG
 ```
 
-Эти воркеры **не используют outbox** — вызывают Listmonk и Teyca напрямую.
+Эти задачи **не используют outbox** — вызывают Listmonk и Teyca напрямую.
+Интервалы — `consent_sync_interval_seconds` (3600 с) и
+`listmonk_reconcile_interval_seconds` (300 с), настраиваются через `Settings`.
 
-### 1.4 Зависимости процессов
+### 1.4 Восемь задач внутри одного процесса `worker`
 
-| Процесс | Расписание | Postgres | RabbitMQ | Listmonk | Teyca | Старая БД |
-|---|---|---|---|---|---|---|
-| `migrate` | one-shot при старте | запись схемы | — | — | — | — |
-| `app` | постоянно | только `/ready` | publish | — | — | — |
-| `consumers` | постоянно | чтение+запись | consume+retry | — | — | чтение |
-| `external-dispatcher-listmonk` | цикл 5 c | чтение+запись | — | да | — | — |
-| `external-dispatcher-merge` | цикл 5 c | чтение+запись | — | — | да | — |
-| `external-dispatcher-invalid-email` | цикл 5 c | чтение+запись | — | — | да | — |
-| `consent-sync` | цикл 60 c | чтение+запись | — | да | да | — |
-| `reconcile` | цикл 300 c | чтение+запись | — | да | — | — |
+| Задача (heartbeat-имя) | Интервал (пусто = busy-loop) | Postgres | Listmonk | Teyca | Старая БД |
+|---|---|---|---|---|---|
+| `consumers` (webhook_inbox) | `webhook_inbox_poll_interval_seconds` (1 с) | чтение+запись | — | — | чтение |
+| `external-dispatcher-listmonk` | `external_dispatcher_poll_interval_seconds` (5 с) | чтение+запись | да | — | — |
+| `external-dispatcher-merge` | 5 с | чтение+запись | — | да | — |
+| `external-dispatcher-invalid-email` | 5 с | чтение+запись | — | да | — |
+| `external-dispatcher-consent-block` | 5 с | чтение+запись | — | да | — |
+| `external-dispatcher-email-repair-sync` | 5 с | чтение+запись | — | да | — |
+| `consent-sync` | 3600 с | чтение+запись | да | да | — |
+| `reconcile` | 300 с | чтение+запись | да | — | — |
+
+Каждая задача — `ScheduledTask` (`app/workers/scheduled_task.py`), выполняется
+`run_scheduled_task`: если `run_once()` вернул `processed > 0`, следующая
+итерация запускается сразу (без сна); если `0` — задача спит до
+`interval_seconds` или до `SIGTERM`. Все восемь задач запускаются
+`asyncio.gather` в одном event loop (`app/workers/run_worker.py`); одна
+задача, упавшая с исключением, не убивает остальные семь — исключение
+логируется, heartbeat помечается `stage=failed`, следующая итерация той же
+задачи выполняется по обычному расписанию (единственное сознательное
+отличие от версии до teyca-sync-2g7).
 
 Прочее:
 
-- Периодичность задана не планировщиком, а shell-циклом в команде контейнера:
-  `while true; do python -m ...; sleep N; done` (`compose.yaml:79`, `:101`, `:123`, `:145`, `:170`).
-- Redis больше не используется (teyca-sync-3al): лимит исходящих вызовов Teyca — бюджетная
-  таблица `teyca_call_budget` в Postgres (`app/clients/teyca.py` — `PostgresCallBudgetLimiter`).
-- Healthcheck: у `app` — HTTP `/live`, у остальных — свежесть файлового heartbeat
-  (`app/service_health.py:14`). Heartbeat лежит в ФС контейнера, снаружи не виден.
-- Postgres и старая БД внешние, в `compose.yaml` их нет.
+- `app` и `migrate` не входят в список `ScheduledTask` — `app` обслуживает
+  HTTP, `migrate` одноразовый и завершается до старта `worker`
+  (`depends_on: migrate: condition: service_completed_successfully`).
+- Healthcheck: у `app` — HTTP `/live`; у `worker` — агрегирующая проверка
+  `app.service_health.all_worker_heartbeats_fresh()`, проверяющая свежесть
+  всех восьми heartbeat-файлов из таблицы 1.4 с индивидуальными порогами
+  (60с / 90с×5 / 4500с / 600с).
+- Heartbeat-файлы (`<task>.json`) лежат в volume `heartbeat-data`,
+  смонтированном в `/var/run/teyca-sync` у `app` и `worker` — читаются с
+  хоста напрямую (`docker volume inspect heartbeat-data`), без
+  `docker exec`.
+- Postgres и старая БД — внешние, в `compose.yaml` их нет.
+- Rate limit исходящих вызовов Teyca — бюджетная таблица `teyca_call_budget`
+  в Postgres, без Redis (`app/clients/teyca.py` — `PostgresCallBudgetLimiter`).
 
 ---
 
@@ -140,21 +173,24 @@ flowchart LR
 ```mermaid
 flowchart TB
     A["1. CRM<br/>POST webhook"] --> B["2. app<br/>проверка токена,<br/>валидация, trace_id"]
-    B --> C["3. RabbitMQ<br/>очередь по типу события"]
-    C --> D["4. consumer<br/>lock, merge, запись<br/>в users + outbox"]
-    D --> E["5. dispatcher<br/>берёт задачу из outbox"]
+    B --> C["3. webhook_inbox<br/>строка в Postgres по типу события"]
+    C --> D["4. worker: webhook_inbox task<br/>lock, merge, запись<br/>в users + outbox"]
+    D --> E["5. worker: dispatcher task<br/>берёт задачу из outbox"]
     E --> F["6. Listmonk / Teyca<br/>внешний вызов"]
     F --> G["7. запись результата<br/>в БД, задача done"]
 ```
 
-Ключевая идея архитектуры: **шаги 1–4 не делают внешних вызовов**. Consumer коммитит в
+Ключевая идея архитектуры: **шаги 1–4 не делают внешних вызовов**. Обработчик коммитит в
 Postgres и профиль клиента, и список внешних вызовов, которые нужно сделать. Поэтому
 падение Listmonk или Teyca не ломает обработку события — задача просто ждёт в outbox.
+Падение самого `worker`-процесса тоже не теряет события: `webhook_inbox` и
+`external_call_outbox` — обычные таблицы, `pending`/`failed`/`processing`-строки
+дожидаются перезапуска процесса.
 
-Обратная сторона: между шагами 4 и 6 есть задержка (цикл dispatcher'а — 5 секунд), и
+Обратная сторона: между шагами 4 и 6 есть задержка (цикл dispatcher'а — до 5 секунд), и
 внешние системы обновляются не в момент webhook'а, а асинхронно.
 
-Отдельно от этого пути работают периодические сверки (раздел 6): они нужны там, где
+Отдельно от этого пути работают периодические сверки (раздел 7): они нужны там, где
 инициатива не у CRM, а у Listmonk (клиент подтвердил подписку) или где надо починить
 расхождение.
 
@@ -163,11 +199,11 @@ Postgres и профиль клиента, и список внешних выз
 ## 3) Шаг 2: приём webhook
 
 Что делает `app`: проверяет токен, валидирует тело, присваивает событию `trace_id` и
-кладёт в очередь по типу. В БД на этом шаге ничего не пишется.
+записывает строку в `webhook_inbox`. Больше в БД на этом шаге ничего не пишется.
 
 ```mermaid
 flowchart TB
-    IN["POST ${WEBHOOK}"] --> AUTH["токен"] --> VAL["JSON + схема"] --> PUB["publish в очередь"] --> OK["200 ok"]
+    IN["POST ${WEBHOOK}"] --> AUTH["токен"] --> VAL["JSON + схема"] --> INS["INSERT в webhook_inbox<br/>ON CONFLICT (source_event_id) DO NOTHING"] --> OK["200 ok"]
 ```
 
 Ответы:
@@ -178,46 +214,51 @@ flowchart TB
 | `WEBHOOK_AUTH_TOKEN` не задан в конфиге | **503** «Webhook auth not configured» | `app/api/auth.py:16` |
 | заголовок `Authorization` отсутствует | 401 | `app/api/auth.py:18` |
 | токен не совпадает | 403 | `app/api/auth.py:22` |
-| тело не парсится как JSON | 400 | `webhook.py:122` |
-| клиент отвалился, не догрузив тело | 200 `{"ok": true}` | `webhook.py:108` |
-| тело не проходит схему `WebhookPayload` | 422 | `webhook.py:136` |
-| всё хорошо | 200 `{"ok": true}` после publish | `webhook.py:149` |
-| RabbitMQ недоступен | 500, **событие потеряно** | там же |
+| тело не парсится как JSON | 400 | `webhook.py` |
+| клиент отвалился, не догрузив тело | 200 `{"ok": true}` | `webhook.py` |
+| тело не проходит схему `WebhookPayload` | 422 | `webhook.py` |
+| всё хорошо, новое событие | 200 `{"ok": true}` после `INSERT` | `webhook.py` |
+| повторная доставка того же `source_event_id` | 200 `{"ok": true}`, строка не дублируется | `webhook.py` |
+| Postgres недоступен | 500 (redeливери на стороне Teyca) — событие действительно не сохранилось, но других способов сохранить его тоже нет: если недоступна БД, недоступно вообще всё | `webhook.py` |
 
-Маршрутизация: `CREATE → queue-create`, `UPDATE → queue-update`, `DELETE → queue-delete`
-(`app/mq/publisher.py:74`). Имена очередей — только из констант `app/mq/queues.py`.
+Маршрутизация по типу: `event_type` (`CREATE`/`UPDATE`/`DELETE`) сохраняется в
+строке `webhook_inbox`, обработчик `worker`-задачи `consumers` решает, какой
+из `app/consumers/{create,update,delete}_user.py` вызвать.
 
 Что ещё важно:
 
 - `trace_id` берётся из заголовка `X-Trace-Id` или генерируется; `source_event_id` — из
-  `X-Event-Id` или генерируется (`webhook.py:153-160`). Оба попадают в тело сообщения, в
-  `correlation_id` / `message_id` сообщения RabbitMQ и дальше в outbox и логи.
-- Очередь объявляется лениво при первой публикации; при ошибке канала кэш объявлений
-  сбрасывается, чтобы не работать с мёртвым каналом (`publisher.py:52-55`).
-- Буфера на входе нет: если брокер недоступен, событие не сохраняется нигде.
-- Три эндпоинта здоровья отдают 503 при неготовности: `/live` (свежесть heartbeat),
-  `/ready` (Postgres + RabbitMQ), `/health` (оба вместе) — `webhook.py:35-94`.
+  `X-Event-Id` или генерируется. Оба сохраняются в строке `webhook_inbox`
+  (`trace_id` колонкой, `source_event_id` — ключом идемпотентности) и дальше
+  попадают в outbox и логи.
+- Идемпотентность на входе: `source_event_id` — `UNIQUE` в `webhook_inbox`.
+  Повторная доставка того же события — не ошибка, а no-op (`ON CONFLICT DO
+  NOTHING`), ответ всё равно 200.
+- Три эндпоинта здоровья отдают 503 при неготовности: `/live` (свежесть heartbeat
+  `app`), `/ready` (доступность Postgres), `/health` (оба вместе).
 
 ---
 
-## 4) Шаг 4: consumer
+## 4) Шаг 4: обработка события из webhook_inbox
 
-Три consumer'а (CREATE, UPDATE, DELETE) работают по одной канве. CREATE и UPDATE почти
-идентичны, DELETE — отдельный короткий сценарий.
+Три обработчика (CREATE, UPDATE, DELETE) работают по одной канве. CREATE и UPDATE почти
+идентичны, DELETE — отдельный короткий сценарий. Их вызывает
+`webhook_inbox_worker.py` внутри задачи `consumers`, роутинг — по
+`event_type` строки `webhook_inbox`.
 
 ### 4.1 CREATE и UPDATE
 
 ```mermaid
 flowchart TB
-    M["сообщение"] --> L["advisory lock<br/>по user_id"] --> H["история из старой БД<br/>если merge не было"] --> U["users.upsert<br/>суммы сложены"] --> D["решение по email"] --> C["commit + ack"]
+    M["строка webhook_inbox"] --> L["advisory lock<br/>по user_id"] --> H["история из старой БД<br/>если merge не было"] --> U["users.upsert<br/>суммы сложены"] --> D["решение по email"] --> C["commit + mark_done"]
 ```
 
 Решение по email — единственное ветвление, и от него зависит, что попадёт в outbox:
 
-| Условие | Что делает consumer | Что потом |
+| Условие | Что делает обработчик | Что потом |
 |---|---|---|
 | email невалиден | `outbox: teyca_block_invalid_email` | dispatcher поставит `key1 = blocked` в Teyca |
-| email валиден, но занят другим `user_id` | строка `email_repair_log(pending)` | ждёт email-repair воркера — **он не запущен**, см. 6.3 |
+| email валиден, но занят другим `user_id` (гонка на уникальном индексе `users.email`) | `IntegrityError` перехватывается в той же транзакции, `app/consumers/email_conflict.py` разрешает конфликт по детерминированной Р5/Р6-политике и ставит `outbox: teyca_email_repair_sync` | dispatcher синхронизирует победителя/проигравшего с Teyca (см. 6.1) |
 | email валиден и свободен | `outbox: listmonk_upsert` | dispatcher создаст/обновит подписчика |
 
 Независимо от email, если история из старой БД есть и `merge_log` пуст, добавляется
@@ -229,69 +270,69 @@ flowchart TB
   **складываются** с историческими значениями.
 - Признак «merge уже был» — наличие строки в `merge_log`. Проверяется дважды: до взятия
   блокировки (чтобы решить, читать ли старую БД) и после.
-- В `merge_log` пишет **не consumer**, а dispatcher — только после успешных вызовов Teyca.
+- В `merge_log` пишет **не обработчик**, а dispatcher — только после успешных вызовов Teyca.
 
 Отличия UPDATE от CREATE: если в payload не пришло поле `tags`, текущие теги сохраняются
-из БД (`update_user.py:126`). Всё остальное совпадает.
+из БД. Всё остальное совпадает.
 
 ### 4.2 DELETE
 
 ```mermaid
 flowchart TB
-    M["сообщение"] --> L["advisory lock"] --> Q["outbox:<br/>listmonk_delete"] --> R["удалить 4 записи:<br/>listmonk_users, merge_log,<br/>bonus_accrual_log, users"] --> C["commit + ack"]
+    M["строка webhook_inbox"] --> L["advisory lock"] --> Q["outbox:<br/>listmonk_delete"] --> R["удалить 4 записи:<br/>listmonk_users, merge_log,<br/>bonus_accrual_log, users"] --> C["commit + mark_done"]
 ```
 
 Задача на удаление подписчика ставится **до** удаления строк, в той же транзакции, и несёт
 `subscriber_id` в payload — поэтому dispatcher сможет её выполнить, когда пользователя уже
 не будет в БД.
 
-### 4.3 Что гарантирует consumer
+### 4.3 Что гарантирует обработка
 
 - Профиль клиента и список внешних вызовов коммитятся одной транзакцией: side effect не
   может «потеряться» при падении до коммита.
 - Параллельная обработка одного `user_id` исключена advisory lock'ом; занятый lock — не
-  ошибка, а повод отложить сообщение (раздел 5).
-- Обработка **at-least-once**: `ack` только после успешного `handle` и коммита
-  (`run_queue_consumers.py:319-334`). Повторная доставка возможна, поэтому идемпотентность
-  держится на `dedupe_key` в outbox и на `merge_log`.
+  ошибка, а повод отложить строку (раздел 5).
+- Обработка **at-least-once**: строка помечается `done` только после успешного `handle` и
+  коммита. Повторная обработка возможна (после падения процесса — см. `release_stale_processing_claims`),
+  поэтому идемпотентность держится на `dedupe_key` в outbox и на `merge_log`.
 
 ---
 
-## 5) Транспорт: повторы и dead-letter
+## 5) Retry и dead: webhook_inbox
 
-У каждой основной очереди есть пара `-retry` и `-dead` (`app/mq/queues.py:7-12`).
-Механика задержки: сообщение публикуется в `-retry` с TTL, по истечении TTL брокер
-дедлеттерит его обратно в основную очередь (`run_queue_consumers.py:439-465`).
+Место RabbitMQ-очередей с парами `-retry`/`-dead` занимает состояние строки
+`webhook_inbox` (`app/repositories/webhook_inbox.py`), тот же приём, что и у
+`external_call_outbox` (раздел 6).
 
 ```mermaid
-flowchart LR
-    Q["queue-update"] -->|"успех"| ACK["ack"]
-    Q -->|"lock занят / Teyca 429"| R["queue-update-retry<br/>TTL = backoff"]
-    R -->|"TTL истёк"| Q
-    Q -->|"попыток больше лимита"| DEAD["queue-update-dead"]
-    Q -->|"любая другая ошибка"| RQ["reject(requeue=true)<br/>сразу назад в очередь"]
-    RQ --> Q
+stateDiagram-v2
+    [*] --> pending: app записал событие
+    pending --> processing: worker захватил (SKIP LOCKED)
+    processing --> done: успех
+    processing --> failed: ошибка, есть попытки
+    failed --> pending: после next_retry_at
+    processing --> dead: попыток больше лимита
+    processing --> pending: зависший claim (reaper, 300 c)
 ```
 
 | Класс ошибки | Что происходит | Лимит |
 |---|---|---|
-| `UserLockNotAcquiredError` (другой процесс держит lock) | в `-retry` с экспоненциальным backoff, после лимита — в `-dead` | `RABBITMQ_LOCK_BUSY_RETRY_MAX_RETRIES` = 5 |
-| `TeycaAPIError` со статусом 429 | то же, но с большими задержками (база 60 с) | `RABBITMQ_TEYCA_RATE_LIMIT_RETRY_MAX_RETRIES` = 10 |
-| Любая другая ошибка | `reject(requeue=true)` — немедленный возврат в ту же очередь | ограничитель² |
+| `UserLockNotAcquiredError` (другой процесс держит lock) | `mark_retry` с backoff по `webhook_inbox_lock_busy_retry_*` | `webhook_inbox_lock_busy_retry_max_retries` = 5 |
+| `TeycaAPIError` со статусом 429 | `mark_retry` с backoff по `webhook_inbox_teyca_rate_limit_retry_*` (база 60 с) | `webhook_inbox_teyca_rate_limit_retry_max_retries` = 10 |
+| Любая другая ошибка | `mark_retry` с общим backoff `webhook_inbox_retry_*` | `webhook_inbox_max_retries` = 25 |
 
-² Ограничитель — аргумент очереди `x-max-delivery-count`, включается при
-`RABBITMQ_MAIN_QUEUE_MAX_DELIVERY_COUNT > 0`; **по умолчанию 10**
-(`app/config.py:27`, применение — `run_queue_consumers.py:415-428`). После превышения лимита
-сообщение уходит в `-dead` вместо бесконечного `requeue`. Т.к. `x-max-delivery-count` — аргумент
-очереди, а не политика, изменение значения не применится к уже существующим очередям без их
-удаления (RabbitMQ вернёт `PRECONDITION_FAILED` при рассинхроне аргументов).
+Формула backoff — общая для `webhook_inbox` и `external_call_outbox`
+(`app/retry_backoff.py`, `base * 2^(n-1)`, capped at `max_delay_ms`), больше
+не дублируется по коду (до teyca-sync-8ib было три независимые копии).
 
-Ещё по транспорту:
+Ещё по обработке:
 
-- Параллелизм = минимум из `prefetch_count`, `RABBITMQ_CONSUMER_MAX_CONCURRENCY` и ёмкости
-  пула БД (`run_queue_consumers.py:400-413`) — семафор не даёт исчерпать пул соединений.
-- Класс 429 в consumer'е сейчас недостижим на практике: consumer больше не вызывает Teyca.
-  Ветка осталась от прежней архитектуры.
+- Параллелизм ограничен `webhook_inbox_max_concurrency` и ёмкостью пула БД —
+  семафор не даёт исчерпать пул соединений.
+- `wait_for_lock`: если строка уже была в работе (`attempts > 0`), повторная
+  попытка ждёт advisory lock вместо мгновенного отказа — семантика
+  сохранена с версии на RabbitMQ, только вместо заголовка сообщения
+  используется счётчик `attempts` строки.
 
 ---
 
@@ -300,7 +341,7 @@ flowchart LR
 ### 6.1 Что лежит в outbox
 
 Таблица `external_call_outbox`, одна строка на пару «операция + клиент», уникальность по
-`dedupe_key` (`app/db/models.py:208`).
+`dedupe_key` (`app/db/models.py`).
 
 | Операция | Кто ставит | Что делает dispatcher | Семантика |
 |---|---|---|---|
@@ -308,9 +349,13 @@ flowchart LR
 | `listmonk_delete` | DELETE | удалить подписчика по `subscriber_id` из payload | «один раз» (`enqueue_once`) |
 | `teyca_block_invalid_email` | CREATE / UPDATE при невалидном email | `PUT /passes/{user_id} {key1: "blocked"}`, пометить `listmonk_users` | «последнее желаемое состояние» |
 | `merge_finalize` | CREATE / UPDATE при первом merge | начислить старые бонусы, поставить `key2 = merge <дата>`, записать `merge_log` | «один раз» |
+| `teyca_block_consent` | consent-sync при отзыве подписки | `PUT /passes/{user_id} {key1: "blocked"}` | «последнее желаемое состояние» |
+| `teyca_email_repair_sync` | `app/consumers/email_conflict.py` при гонке на `users.email` | синхронизировать победителя/проигравшего с Teyca, разобрать дубликат | «последнее желаемое состояние» |
 
-`dedupe_key` — это `listmonk-sync:{user_id}`, `listmonk-delete:{user_id}`,
-`invalid-email-block:{user_id}`, `merge-finalize:{user_id}` (`external_call_outbox.py:27-40`).
+`dedupe_key` строится хелперами `dedupe_key_for_*` в
+`app/repositories/external_call_outbox.py`, например
+`listmonk-sync:{user_id}`, `merge-finalize:{user_id}`,
+`email-repair-sync:{repair_id}`.
 
 ### 6.2 Как dispatcher обрабатывает задачу
 
@@ -323,7 +368,7 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: consumer поставил задачу
+    [*] --> pending: событие поставило задачу
     pending --> processing: dispatcher захватил
     processing --> done: успех
     processing --> failed: ошибка, есть попытки
@@ -333,20 +378,20 @@ stateDiagram-v2
     done --> pending: новое событие с тем же dedupe_key
 ```
 
-Обработка ошибок (`external_dispatcher_worker.py:234-267`):
+Обработка ошибок (`external_dispatcher_worker.py`):
 
 | Ошибка | Действие | Расход попытки |
 |---|---|---|
 | `TeycaRateLimitBusyError` | `defer`: `next_retry_at = now + wait_seconds` | нет |
 | `ListmonkClientError`, `TeycaAPIError`, `httpx.HTTPError`, `RuntimeError` | `mark_retry` с экспоненциальным backoff; при 25 попытках → `dead` | да |
-| Любая другая | **не перехватывается**, вылетает из `run_once`; строка висит в `processing` до reaper'а (300 с) | нет |
+| Любая другая | **не перехватывается**, вылетает из `run_once`; строка висит в `processing` до reaper'а (300 с). В отличие от версии до teyca-sync-2g7, само это исключение больше не убивает процесс — только эту итерацию текущей задачи внутри `run_worker` | нет |
 
 Многошаговая операция `merge_finalize` защищена от повторов внутри себя: после каждого
-успешного вызова Teyca прогресс сохраняется флагами `bonus_done` / `key2_done` в payload
-(`:444-460`). При повторе выполнится только незавершённый шаг.
+успешного вызова Teyca прогресс сохраняется флагами `bonus_done` / `key2_done` в payload.
+При повторе выполнится только незавершённый шаг.
 
 Отдельная особенность: если при записи `listmonk_users` обнаружен дубликат
-`subscriber_id` или email, ошибка перехватывается внутри (`:331-357`), задача всё равно
+`subscriber_id` или email, ошибка перехватывается внутри, задача всё равно
 закрывается как `done`, но маппинг не обновлён — расхождение с Listmonk остаётся до
 reconcile или ручного воркера.
 
@@ -354,7 +399,7 @@ reconcile или ручного воркера.
 
 ## 7) Периодические сверки
 
-### 7.1 consent-sync (каждые 60 с) — бонус за согласие
+### 7.1 consent-sync (каждые 3600 с) — бонус за согласие
 
 Зачем: CRM не знает, подтвердил ли клиент подписку. Источник истины — Listmonk, а webhook
 от Listmonk сознательно не используется, вместо него опрос по закладке.
@@ -371,12 +416,12 @@ flowchart TB
 | `confirmed` / `active` | начислить бонус (`POST /bonuses`), поставить `key1 = confirmed`, снять `consent_pending`, записать `consent_confirmed_at` |
 
 Идемпотентность начисления — таблица `bonus_accrual_log`: ключ
-`email_consent:{user_id}` плюс пошаговые флаги `bonus_done` / `key1_done`
-(`consent_sync_worker.py:268`, `:404`, `:418`). Остаточный риск двойного начисления — падение
-процесса между вызовом Teyca и сохранением флага.
+`email_consent:{user_id}` плюс пошаговые флаги `bonus_done` / `key1_done`.
+Остаточный риск двойного начисления — падение процесса между вызовом Teyca и сохранением
+флага.
 
-Важная деталь: воркер обрабатывает **все** маппинги из дельт, без фильтра по
-`consent_pending` (`consent_sync_worker.py:100-112`).
+Важная деталь: задача обрабатывает **все** маппинги из дельт, без фильтра по
+`consent_pending`.
 
 ### 7.2 reconcile (каждые 300 с) — восстановление связи с Listmonk
 
@@ -391,43 +436,37 @@ flowchart TB
 | по email | email даёт **единственное** совпадение в `users` |
 | не связывать | иначе — лог `unmapped` / `ambiguous` |
 
-**Фаза 2 — consistency scan** (`listmonk_reconcile_worker.py:252-329`): круговой обход
+**Фаза 2 — consistency scan** (`listmonk_reconcile_worker.py`): круговой обход
 `listmonk_users`, проверка, что подписчик всё ещё существует в Listmonk. Если исчез —
 `restore_subscriber` создаёт нового, старая строка уходит в `listmonk_user_archive`.
 Ошибка Listmonk внутри фазы делает `break`: остаток батча ждёт следующего тика.
 
-### 7.3 email-repair — разбор дубликатов email (не запущен)
+### 7.3 Разбор дубликатов email — в реальном времени, не отдельный воркер
 
-Зачем: два разных `user_id` пришли с одним email. Listmonk не даёт двух подписчиков на один
-адрес, поэтому consumer не трогает Listmonk, а создаёт строку `email_repair_log(pending)`.
+До teyca-sync-4wh/eh8 конфликт email между двумя `user_id` разбирался
+отдельным (не запущенным нигде) `email_repair_worker.py`. Сейчас
+`users.email` защищён уникальным индексом на уровне БД; конфликт ловится
+как `IntegrityError` прямо в CREATE/UPDATE-обработчике
+(`app/consumers/email_conflict.py`) и разрешается той же транзакцией: тот
+же детерминированный Р5/Р6-порядок победителя/проигравшего, что раньше
+использовался для одноразовой чистки, но теперь применяется на лету и
+ставит `outbox: teyca_email_repair_sync` — драйнится задачей
+`external-dispatcher-email-repair-sync` (раздел 6.1).
 
-Как воркер её разбирает (`email_repair_worker.py:172-285`):
-
-```mermaid
-flowchart TB
-    P["строка pending/failed"] --> S["найти подписчика<br/>по email в Listmonk"] --> WN["его user_id = победитель"] --> LS["второй = проигравший"] --> T["Teyca: email=null,<br/>key1=bad email"] --> CL["очистить email в users<br/>и listmonk_users"]
-```
-
-Если победителя не удалось определить однозначно (подписчика нет, маппинга нет, победитель
-вне пары) — попытка засчитывается, строка уходит в `failed`, а после исчерпания попыток —
-в `manual_review`.
-
-**Этот воркер не запускается нигде**: ни в `compose.yaml`, ни в `Makefile`. Строки
-`email_repair_log` создаются в трёх местах кода (`create_user.py:123`, `update_user.py:216`,
-`external_dispatcher_worker.py:342`) и копятся без обработчика. Клиенты с дублирующимся
-email остаются не синхронизированными до ручного запуска.
+`email_repair_log` при этом остаётся: пишется как журнал уже разрешённых
+конфликтов, а не как очередь ожидающих обработки строк.
 
 ---
 
-## 8) Воркеры, которые есть в коде, но не в расписании
+## 8) Воркеры, которые есть в коде, но не в расписании `worker`
 
 | Модуль | Как запускается | Что делает |
 |---|---|---|
-| `run_email_repair.py` | **нигде** | разбор дубликатов email, см. 7.3 |
-| `service_workers/run_email_repair_backfill.py` | вручную | разовый backfill дубликатов |
-| `service_workers/run_listmonk_duplicate_subscriber.py` | вручную, `README.md:179` | чистка дублей `subscriber_id` |
+| `service_workers/run_email_repair_backfill.py` | вручную | разовый backfill дубликатов, оставшихся с до-`email_conflict.py` времён |
+| `service_workers/run_listmonk_duplicate_subscriber.py` | вручную, `README.md` | чистка дублей `subscriber_id` |
 | `service_workers/run_listmonk_refresh_subscriber_ids.py` | `make listmonk-refresh-subscriber-ids[-apply]` | пересчёт `subscriber_id` по email |
-| `run_external_dispatcher.py` | `make external-dispatcher-once` | все операции outbox сразу (в compose разбит на три) |
+| `app/workers/run_external_dispatcher.py` | `make external-dispatcher-once` | все операции outbox сразу, для ручной прогонки/отладки (в `worker` разбит на пять параллельных задач) |
+| `app/workers/run_webhook_inbox_consumer.py`, `run_consent_sync.py`, `run_listmonk_reconcile.py`, пять `run_external_dispatcher_*.py` | `make consumers` / `make consent-sync-once` / `make reconcile-once` / `make external-dispatcher-*-once` | однократные (или самозацикленные — `run_webhook_inbox_consumer.py`) entrypoint'ы той же бизнес-логики, для ручного запуска/отладки одной задачи в изоляции; `worker` их не вызывает, использует `build_*_worker()` напрямую |
 
 Разовые/лечебные воркеры (`service_workers/`) вынесены из `app/`, чтобы не тянуть за собой
 app-scoped quality-гейты (coverage, complexity, docstring coverage, dead-code, security) —
@@ -440,24 +479,24 @@ app-scoped quality-гейты (coverage, complexity, docstring coverage, dead-co
 
 Собрано по коду, без предположений о продакшене:
 
-1. **Потеря события на входе.** Сбой RabbitMQ на `publish` = 500 клиенту, событие не
-   сохранено нигде (`webhook.py:149`). Inbox-таблицы нет.
-2. ~~**Бесконечный requeue.**~~ Исправлено (teyca-sync-9lv): `x-max-delivery-count` включён
-   по умолчанию (`config.py:27`), битые сообщения уходят в `-dead`.
-3. **`email_repair_log` без обработчика** — см. 7.3.
-4. **Зависшие claim'ы в outbox.** Непойманное исключение оставляет строку в `processing`
-   на 5 минут; вернуть её может только reaper (`external_dispatcher_worker.py:159-168`).
-5. **Дубликаты закрываются как `done`** без обновления маппинга (`:331-357`).
-6. **Двойное начисление в узком окне.** И `merge_finalize`, и consent-бонус защищены
+1. ~~**Потеря события на входе.**~~ Исправлено (teyca-sync-8ib): событие
+   пишется в Postgres (`webhook_inbox`) в том же запросе, что и валидация;
+   независимого брокера, который мог бы упасть отдельно от БД, больше нет.
+2. ~~**Бесконечный requeue / нет лимита попыток.**~~ Исправлено
+   (teyca-sync-9lv, унаследовано `webhook_inbox`): `webhook_inbox_max_retries`
+   переводит строку в `dead` вместо бесконечных повторов.
+3. **Зависшие claim'ы в outbox/inbox.** Непойманное исключение оставляет строку в `processing`
+   на 5 минут; вернуть её может только reaper (`release_stale_processing_claims`).
+4. **Дубликаты закрываются как `done`** без обновления маппинга (Listmonk upsert).
+5. **Двойное начисление в узком окне.** И `merge_finalize`, и consent-бонус защищены
    пошаговыми флагами, но падение между вызовом Teyca и сохранением флага не покрыто.
-7. **Обрыв consistency scan** по `break` при первой ошибке Listmonk.
-8. **Три копии одной формулы backoff**: `run_queue_consumers.py:548`, `:554`,
-   `external_call_outbox.py:341`.
-9. **Недостижимая ветка 429 в consumer'е** — осталась от прежней архитектуры, когда consumer
-   ещё вызывал Teyca напрямую. `QUEUE_MERGE` и мёртвые клиенты Listmonk/Teyca в
-   `ConsumersRunner` удалены (teyca-sync-d6d).
-10. **Heartbeat в файловой системе контейнера** — снаружи о живости воркера судить нечем,
-    кроме healthcheck'а самого контейнера.
+6. **Обрыв consistency scan** по `break` при первой ошибке Listmonk (reconcile, фаза 2).
+7. ~~**Три копии формулы backoff.**~~ Исправлено (teyca-sync-8ib): общая
+   `app/retry_backoff.py`, переиспользуется `webhook_inbox` и
+   `external_call_outbox`.
+8. ~~**Heartbeat виден только внутри контейнера.**~~ Исправлено
+   (teyca-sync-2g7): именованный volume `heartbeat-data`, читается с хоста
+   без `docker exec`.
 
 ---
 
@@ -469,58 +508,74 @@ app-scoped quality-гейты (coverage, complexity, docstring coverage, dead-co
   `user_id=5722735`: `PUT {"key6":"put-check"}` изменил только `key6`, остальное сохранилось.
 - `POST /v1/{token}/passes/{user_id}/bonuses` — начисление операциями; используется и для
   merge-бонусов, и для consent-бонуса. Через `PUT` бонусы не начисляются.
-- Клиент повторяет транзиентные ошибки и 5xx (`teyca_request_max_retries` = 2), таймаут HTTP
-  жёстко зашит 15 с (`app/clients/teyca.py:299`).
+- Клиент повторяет транзиентные ошибки и 5xx (`teyca_request_max_retries` = 2), таймауты
+  задаются `teyca_connect/read/write/pool_timeout_seconds`.
 - 429 поднимается как `TeycaAPIError.is_rate_limited`; в dispatcher'е это `defer`, в
-  consumer'е — retry-очередь.
-- Свой rate limiter: бюджетная таблица `teyca_call_budget` в Postgres (второй/минута/час/сутки),
-  реальные лимиты 5/50/500/5000 (`teyca-sync-3al`). Исчерпание не блокирует воркер — вызов
+  `webhook_inbox`-обработке — `mark_retry` с большими задержками (раздел 5).
+- Свой rate limiter: бюджетная таблица `teyca_call_budget` в Postgres (секунда/минута/час/сутки),
+  реальные лимиты 5/50/500/5000. Исчерпание не блокирует воркер — вызов
   сразу падает `TeycaRateLimitBusyError`, claim откладывается (`defer`, с потолком попыток).
+- Circuit breaker (`app/circuit_breaker.py`): после `teyca_circuit_breaker_failure_threshold`
+  (5) подряд неудач вызовы отклоняются без реального HTTP-запроса на
+  `teyca_circuit_breaker_cooldown_seconds` (30 с), затем один пробный вызов
+  решает, закрыть breaker или снова открыть. Проверено
+  `tests/integration/test_teyca_fault_injection.py`.
 
 **Listmonk (только через Python SDK, прямые HTTP-вызовы запрещены):**
 
 - `upsert_subscriber` без `subscriber_id` создаёт подписчика; при конфликте `409` /
-  `subscribers_email_key` переключается на обновление по email (`listmonk.py:543-571`).
-- Если сохранённый `subscriber_id` больше не существует, подписчик пересоздаётся по email
-  (`:439-450`).
-- При обновлении текущий статус подписчика передаётся явно (`:458-468`). Прежний риск
+  `subscribers_email_key` переключается на обновление по email.
+- Если сохранённый `subscriber_id` больше не существует, подписчик пересоздаётся по email.
+- При обновлении текущий статус подписчика передаётся явно. Прежний риск
   авто-подтверждения подписки через `preconfirm_subscriptions=true` (issue `teyca-sync-b7j`)
   относится к внутренностям SDK и требует перепроверки на текущей версии.
 - `list_id` берётся из `LISTMONK_LIST_IDS`, а не из CRM.
+- Тот же circuit breaker, свои пороги: `listmonk_circuit_breaker_failure_threshold`
+  (5), `listmonk_circuit_breaker_cooldown_seconds` (30 с). Проверено
+  `tests/integration/test_listmonk_fault_injection.py`.
+
+**Postgres:**
+
+- Единственная общая точка отказа для входящего пути (`webhook_inbox`) и
+  всех фоновых задач `worker`. Проверено
+  `tests/integration/test_postgres_unavailable.py`: операция с БД падает
+  быстро (connection refused, не зависает до таймаута), а `ScheduledTask`
+  переживает разрыв соединения — логирует ошибку и продолжает по
+  расписанию, не роняя остальные семь задач в процессе.
 
 ---
 
 ## 11) Логи по компонентам
 
-Во всех логах обработки есть `trace_id`, `source_event_id`, `user_id`: в consumer'ах через
-`bound_contextvars` (`run_queue_consumers.py:145-151`), в dispatcher'е через
-`structlog.contextvars` (`external_dispatcher_worker.py:183-201`). У периодических воркеров
-`trace_id` синтетический, например `consent-sync:{user_id}:{subscriber_id}` — с исходным
-webhook-событием он не связан.
+Во всех логах обработки есть `trace_id`, `source_event_id`, `user_id`:
+через `structlog.contextvars` в `webhook_inbox_worker.py` и
+`external_dispatcher_worker.py`. У периодических задач `trace_id`
+синтетический, например `consent-sync:{user_id}:{subscriber_id}` — с
+исходным webhook-событием он не связан.
 
 | Компонент | События |
 |---|---|
-| Приём | `webhook_received`, `webhook_invalid_json`, `webhook_validation_failed`, `webhook_client_disconnected`, `mq_published` |
-| Consumers | `consumer_message_processing_started`, `consumer_message_acked`, `consumer_message_failed`, `consumer_message_requeued_user_lock_busy`, `consumer_message_dead_lettered_user_lock_busy`, `consumer_message_requeued_teyca_rate_limit`, `create_consumer_*`, `update_consumer_*`, `delete_consumer_processed`, `*_duplicate_email_scheduled` |
-| Dispatcher | `external_dispatcher_metrics`, `external_dispatcher_no_pending_jobs`, `external_dispatcher_stale_claims_released`, `external_dispatcher_job_retry_scheduled`, `external_dispatcher_job_rate_limit_deferred`, `external_dispatcher_listmonk_upsert_done`, `external_dispatcher_listmonk_delete_done`, `external_dispatcher_invalid_email_block_done`, `external_dispatcher_merge_finalize_done`, `external_dispatcher_duplicate_*` |
-| consent-sync | `consent_sync_metrics`, `consent_sync_list_processed`, `consent_sync_subscriber_not_mapped`, `consent_sync_subscriber_not_found` |
-| reconcile | `listmonk_reconcile_metrics`, `listmonk_reconcile_list_processed`, `listmonk_reconcile_mapping_restored`, `listmonk_reconcile_unmapped`, `listmonk_reconcile_subscriber_restored`, `listmonk_reconcile_state_check_failed`, `listmonk_reconcile_restore_failed` |
-| email-repair | `email_repair_metrics`, `email_repair_synced`, `email_repair_failed`, `email_repair_no_pending_rows` |
-| Клиенты | `listmonk_upsert_subscriber_request`, `listmonk_upsert_subscriber_done`, `teyca_request_retry`, `teyca_rate_limiter_redis_failed` |
-| Инфраструктура | `health_check_failed`, `service_heartbeat_write_failed`, `consumers_started` |
+| Приём (`app`) | `webhook_received`, `webhook_invalid_json`, `webhook_validation_failed`, `webhook_client_disconnected`, `webhook_duplicate_event` |
+| `worker`: webhook_inbox | `webhook_inbox_metrics`, `webhook_inbox_stale_claims_released`, `webhook_inbox_user_lock_busy`, `webhook_inbox_teyca_error_retry_scheduled`, `webhook_inbox_job_retry_scheduled` |
+| `worker`: dispatcher | `external_dispatcher_metrics`, `external_dispatcher_no_pending_jobs`, `external_dispatcher_stale_claims_released`, `external_dispatcher_job_retry_scheduled`, `external_dispatcher_job_rate_limit_deferred`, `external_dispatcher_listmonk_upsert_done`, `external_dispatcher_listmonk_delete_done`, `external_dispatcher_invalid_email_block_done`, `external_dispatcher_merge_finalize_done`, `external_dispatcher_duplicate_*` |
+| `worker`: consent-sync | `consent_sync_metrics`, `consent_sync_list_processed`, `consent_sync_subscriber_not_mapped`, `consent_sync_subscriber_not_found` |
+| `worker`: reconcile | `listmonk_reconcile_metrics`, `listmonk_reconcile_list_processed`, `listmonk_reconcile_mapping_restored`, `listmonk_reconcile_unmapped`, `listmonk_reconcile_subscriber_restored`, `listmonk_reconcile_state_check_failed`, `listmonk_reconcile_restore_failed` |
+| Клиенты | `listmonk_upsert_subscriber_request`, `listmonk_upsert_subscriber_done`, `teyca_request_retry`, `teyca_circuit_breaker_open`, `listmonk_circuit_breaker_open` |
+| Инфраструктура | `health_check_failed`, `service_heartbeat_write_failed`, `scheduled_task_run_failed`, `worker_started`, `worker_shutdown_signal_received`, `worker_shutdown_drain_timeout` |
 
 ---
 
-## 12) Что изменилось с версии документа от 2026-03-17
+## 12) Что изменилось с версии документа от 2026-07-30
 
-| Было описано | Есть в коде на 2026-07-30 |
+| Было | Стало |
 |---|---|
-| Consumer сам вызывает Listmonk SDK и Teyca API | Consumer пишет только в Postgres + outbox; внешние вызовы — в dispatcher |
-| `merge_log` пишет consumer | `merge_log` пишет dispatcher после успешных вызовов Teyca |
-| При невалидном email consumer сам ставит `key1=blocked` | Операция `teyca_block_invalid_email` через outbox |
-| DELETE удаляет подписчика после коммита | Операция `listmonk_delete` через outbox |
-| Retry/dead очередей нет | Три пары `-retry` / `-dead` с backoff по lock-busy и 429 |
-| Outbox и dispatcher'ов нет | Таблица `external_call_outbox` + три dispatcher-контейнера на одном коде |
-| Reconcile только по дельтам | Дельты + consistency scan с восстановлением подписчиков |
-| Email-repair — периодический воркер, чистит нескольких проигравших и ставит `key6=bugs` | Не запускается вообще; разбирает пару «победитель/проигравший», ставит проигравшему `email=null`, `key1=bad email` |
-| Merge-бонусы без идемпотентности | `merge_finalize` через `enqueue_once` + пошаговые флаги |
+| Транспорт входящего webhook — RabbitMQ (`queue-create/update/delete` + retry/dead пары) | Postgres-таблица `webhook_inbox`, `FOR UPDATE SKIP LOCKED`, состояние в самой строке |
+| 8 процессов (`app`, `rabbitmq`, `consumers`, три `external-dispatcher-*`, `consent-sync`, `reconcile`) | 3 процесса (`migrate`, `app`, `worker`); внутри `worker` — восемь `ScheduledTask` в одном event loop |
+| Интервалы (5с/60с/300с) заданы shell-циклом в `command:` compose-сервиса | Интервалы — поля `Settings` (`external_dispatcher_poll_interval_seconds` и т.д.), логика — `run_scheduled_task` |
+| Одна упавшая задача может уронить весь свой контейнер, перезапускается shell-циклом или `restart: unless-stopped` | Одна упавшая задача не убивает остальные семь в общем процессе — исключение ловится внутри `run_scheduled_task` |
+| Heartbeat виден только `docker exec` | Heartbeat на volume, читается с хоста |
+| Email-конфликт — отдельная таблица `email_repair_log(pending)`, разбирающий воркер не запущен | Конфликт ловится как `IntegrityError` в реальном времени в CREATE/UPDATE, разрешается `email_conflict.py` в той же транзакции |
+| Три независимые копии формулы backoff | Одна общая `app/retry_backoff.py` |
+
+Более старая история изменений (переход на outbox/dispatcher-архитектуру,
+до RabbitMQ-миграции) — в `docs/roadmap.md` и `docs/reverse-engineering-plan.md`.
