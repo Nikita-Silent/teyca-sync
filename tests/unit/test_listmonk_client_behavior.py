@@ -319,6 +319,56 @@ async def test_circuit_breaker_opens_after_repeated_sdk_failures() -> None:
 
 
 @pytest.mark.asyncio
+async def test_circuit_breaker_opens_on_repeated_login_returning_false() -> None:
+    """teyca-sync-q35 drill: listmonk.login() reports a down server by
+    returning False, not by raising (it swallows the connection error
+    internally in test_user_pw_on_server). A naive _sdk_call wrapper would
+    see "no exception" and record a breaker success on every failed login,
+    so the breaker could never open. Each _ensure_login() attempt must count
+    as one real failure."""
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    login_calls = 0
+
+    def failing_login(user_name: str, pw: str) -> bool:
+        nonlocal login_calls
+        login_calls += 1
+        return False
+
+    fake.login = failing_login
+
+    settings = cast(
+        Settings,
+        SimpleNamespace(
+            listmonk_url="http://listmonk",
+            listmonk_user="u",
+            listmonk_password="p",
+            listmonk_request_max_retries=0,
+            listmonk_circuit_breaker_failure_threshold=2,
+            listmonk_circuit_breaker_cooldown_seconds=30.0,
+        ),
+    )
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
+    ):
+        client = ListmonkSDKClient(settings)
+        with pytest.raises(ListmonkClientError, match="login failed"):
+            await client._ensure_login()
+        with pytest.raises(ListmonkClientError, match="login failed"):
+            await client._ensure_login()
+        assert login_calls == 2
+        assert client._circuit_breaker.state == "open"
+
+        with pytest.raises(ListmonkClientError, match="Circuit breaker"):
+            await client._ensure_login()
+
+    # The breaker rejected the third attempt before calling login() again.
+    assert login_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_get_subscriber_state_returns_none_for_empty_payload_or_status() -> None:
     fake = SimpleNamespace()
     fake.set_url_base = MagicMock()

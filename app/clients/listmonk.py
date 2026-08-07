@@ -244,19 +244,42 @@ class ListmonkSDKClient:
         except ModuleNotFoundError as exc:
             raise ListmonkClientError("listmonk package is not installed") from exc
 
-        await self._sdk_call(
-            listmonk.set_url_base,
-            self._settings.listmonk_url,
-            action="set_url_base",
-        )
-        ok = await self._sdk_call(
-            listmonk.login,
-            self._settings.listmonk_user,
-            self._settings.listmonk_password,
-            action="login",
-        )
+        # set_url_base is a pure in-process global assignment, no network I/O.
+        # Routing it through _sdk_call would make it "succeed" on every
+        # _ensure_login() attempt and reset the circuit breaker's consecutive-
+        # failure count right before the real network call (login) increments
+        # it — the breaker could then never open on a persistently failing
+        # login (found via the teyca-sync-q35 drill against a Postgres backup
+        # with Listmonk pointed at a down mock).
+        listmonk.set_url_base(self._settings.listmonk_url)
+
+        # login() reports an unreachable server by returning False, not by
+        # raising — it catches the connection error itself internally
+        # (test_user_pw_on_server). So it's handled outside the generic
+        # _sdk_call wrapper here: that wrapper only records a breaker failure
+        # on a raised exception, and would otherwise record a "success" on
+        # every call regardless of what `ok` comes back as, so the breaker
+        # could never open on a persistently failing login (found via the
+        # teyca-sync-q35 drill against a Postgres backup with Listmonk
+        # pointed at a down mock).
+        try:
+            await self._circuit_breaker.before_call()
+        except CircuitBreakerOpenError as exc:
+            raise ListmonkClientError(str(exc)) from exc
+        try:
+            ok = await self._sdk_call_with_retries(
+                listmonk.login,
+                self._settings.listmonk_user,
+                self._settings.listmonk_password,
+                action="login",
+            )
+        except Exception:
+            await self._circuit_breaker.record_failure()
+            raise
         if not ok:
+            await self._circuit_breaker.record_failure()
             raise ListmonkClientError("Listmonk SDK login failed")
+        await self._circuit_breaker.record_success()
         self._logged_in = True
 
     async def get_subscriber_state(self, *, subscriber_id: int) -> SubscriberState | None:
