@@ -85,6 +85,31 @@ async def is_heartbeat_fresh(service_name: str, *, max_age_seconds: int) -> bool
     return bool((await heartbeat_status(service_name, max_age_seconds=max_age_seconds))["fresh"])
 
 
+# (service_name, max_age_seconds) for every scheduled task in app/workers/run_worker.py,
+# matching the per-container healthcheck thresholds the compose services had before
+# they were merged into one `worker` service (teyca-sync-2g7).
+WORKER_HEARTBEAT_CHECKS: tuple[tuple[str, int], ...] = (
+    ("consumers", 60),
+    ("external-dispatcher-listmonk", 90),
+    ("external-dispatcher-merge", 90),
+    ("external-dispatcher-invalid-email", 90),
+    ("external-dispatcher-consent-block", 90),
+    ("external-dispatcher-email-repair-sync", 90),
+    ("consent-sync", 4500),
+    ("reconcile", 600),
+)
+
+
+async def all_worker_heartbeats_fresh() -> bool:
+    """True only if every scheduled task in the merged `worker` process has a
+    fresh heartbeat — used by the single compose healthcheck standing in for
+    the per-container checks the pre-merge topology had one each of."""
+    for service_name, max_age_seconds in WORKER_HEARTBEAT_CHECKS:
+        if not await is_heartbeat_fresh(service_name, max_age_seconds=max_age_seconds):
+            return False
+    return True
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     _ensure_directory(path.parent)
     temp_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"

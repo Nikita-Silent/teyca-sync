@@ -170,6 +170,8 @@ def test_worker_entrypoint_main_guards() -> None:
         runpy.run_path(str(worker_dir / "run_listmonk_reconcile.py"), run_name="__main__")
     with patch("asyncio.run", side_effect=_close_coro):
         runpy.run_path(str(worker_dir / "run_webhook_inbox_consumer.py"), run_name="__main__")
+    with patch("asyncio.run", side_effect=_close_coro):
+        runpy.run_path(str(worker_dir / "run_worker.py"), run_name="__main__")
 
 
 @pytest.mark.asyncio

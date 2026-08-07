@@ -127,7 +127,7 @@ external-dispatcher-email-repair-sync-once:
 	docker compose run --rm app python -m app.workers.run_external_dispatcher_email_repair_sync
 
 consumers:
-	docker compose run --rm app python -m app.workers.run_queue_consumers
+	docker compose run --rm app python -m app.workers.run_webhook_inbox_consumer
 
 consent-bonus-backfill:
 	docker compose run --rm --build app python -m service_workers.run_consent_bonus_backfill

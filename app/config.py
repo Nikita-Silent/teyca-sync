@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     external_dispatcher_max_retries: int = 25
     external_dispatcher_teyca_rate_limit_max_wait_seconds: float = 0.0
     external_dispatcher_stale_claim_seconds: float = 300.0
+    external_dispatcher_poll_interval_seconds: float = 5.0
+    consent_sync_interval_seconds: float = 3600.0
+    listmonk_reconcile_interval_seconds: float = 300.0
+    worker_shutdown_drain_timeout_seconds: float = 60.0
 
     # Webhook auth
     webhook_auth_enabled: bool = True
