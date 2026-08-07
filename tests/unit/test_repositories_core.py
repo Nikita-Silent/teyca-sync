@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -465,6 +466,41 @@ async def test_external_call_outbox_repository_paths() -> None:
 
     session.execute.return_value = SimpleNamespace(all=lambda: [("pending", 2), ("dead", 1)])
     assert await repo.count_by_status() == {"pending": 2, "dead": 1}
+
+
+@pytest.mark.asyncio
+async def test_release_stale_processing_claims_resets_rows_past_cutoff() -> None:
+    """teyca-sync-4nr: rows stuck in PROCESSING past stale_after_seconds must be
+    reclaimed back to PENDING, dropping the stale lock, so an unhandled exception
+    in the dispatcher doesn't strand a claim forever."""
+    session = AsyncMock()
+    repo = ExternalCallOutboxRepository(session)
+    session.execute.return_value = SimpleNamespace(rowcount=3)
+
+    before = datetime.now(UTC)
+    released = await repo.release_stale_processing_claims(stale_after_seconds=300.0)
+    after = datetime.now(UTC)
+
+    assert released == 3
+    stmt = session.execute.await_args.args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "external_call_outbox.status = 'processing'" in compiled
+    assert "external_call_outbox.locked_at IS NOT NULL" in compiled
+    params = stmt.compile().params
+    assert params["status"] == "pending"
+    assert params["locked_at"] is None
+    assert params["locked_by"] is None
+    cutoff = stmt._where_criteria[2].right.value  # type: ignore[attr-defined]
+    assert before - timedelta(seconds=300.0) <= cutoff <= after - timedelta(seconds=300.0)
+
+
+@pytest.mark.asyncio
+async def test_release_stale_processing_claims_returns_zero_when_rowcount_missing() -> None:
+    session = AsyncMock()
+    repo = ExternalCallOutboxRepository(session)
+    session.execute.return_value = SimpleNamespace()
+
+    assert await repo.release_stale_processing_claims(stale_after_seconds=60.0) == 0
 
 
 @pytest.mark.asyncio

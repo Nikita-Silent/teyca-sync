@@ -51,15 +51,68 @@ async def _run_operation_directly(operation: Callable[[AsyncSession], Awaitable[
     return await operation(cast(AsyncSession, AsyncMock()))
 
 
-def _worker(*, operations: tuple[str, ...] = DEFAULT_OUTBOX_OPERATIONS) -> ExternalDispatcherWorker:
+def _worker(
+    *,
+    operations: tuple[str, ...] = DEFAULT_OUTBOX_OPERATIONS,
+    settings: Settings | None = None,
+) -> ExternalDispatcherWorker:
     return ExternalDispatcherWorker(
-        settings=_settings(),
+        settings=settings if settings is not None else _settings(),
         session_factory=cast(async_sessionmaker[AsyncSession], AsyncMock()),
         listmonk_client=cast(ListmonkSDKClient, AsyncMock()),
         teyca_client=cast(TeycaClient, AsyncMock()),
         worker_id="worker-1",
         operations=operations,
     )
+
+
+@pytest.mark.asyncio
+async def test_release_stale_claims_uses_configured_threshold() -> None:
+    """teyca-sync-4nr: the reaper threshold must come from settings, not the
+    repository's own default, so ops can tune it without a code change."""
+    worker = _worker(
+        settings=_settings(external_dispatcher_stale_claim_seconds=42.0),
+    )
+    repo = AsyncMock(release_stale_processing_claims=AsyncMock(return_value=2))
+
+    with (
+        patch(
+            "app.workers.external_dispatcher_worker.ExternalCallOutboxRepository",
+            return_value=repo,
+        ),
+        patch.object(
+            ExternalDispatcherWorker,
+            "_run_in_session",
+            new=AsyncMock(side_effect=_run_operation_directly),
+        ),
+    ):
+        count = await worker._release_stale_claims()
+
+    assert count == 2
+    repo.release_stale_processing_claims.assert_awaited_once_with(stale_after_seconds=42.0)
+
+
+@pytest.mark.asyncio
+async def test_run_once_releases_stale_claims_before_claiming_new_work() -> None:
+    """teyca-sync-4nr: the reaper must run every cycle, ahead of claim_batch, so a
+    row stuck in PROCESSING by a crashed worker is freed before the next attempt."""
+    worker = _worker()
+    with (
+        patch.object(
+            ExternalDispatcherWorker,
+            "_release_stale_claims",
+            new=AsyncMock(return_value=5),
+        ) as release_stale,
+        patch.object(
+            ExternalDispatcherWorker, "_teyca_budget_remaining", new=AsyncMock(return_value=100)
+        ),
+        patch.object(ExternalDispatcherWorker, "_claim_batch", new=AsyncMock(return_value=[])),
+        patch("app.workers.external_dispatcher_worker.logger") as logger,
+    ):
+        await worker.run_once()
+
+    release_stale.assert_awaited_once()
+    logger.warning.assert_called_once_with("external_dispatcher_stale_claims_released", count=5)
 
 
 @pytest.mark.asyncio
