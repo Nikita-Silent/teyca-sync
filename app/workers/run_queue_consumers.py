@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+import signal
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
 import aio_pika
 import structlog
-from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
+from aio_pika.abc import AbstractChannel, AbstractIncomingMessage, AbstractQueue
 from structlog import contextvars as log_contextvars
 
 from app.clients.teyca import TeycaAPIError
@@ -67,6 +68,11 @@ class ConsumersRunner:
     old_db_repo: OldDBRepository
     _process_semaphore: asyncio.Semaphore | None = None
     _channel: AbstractChannel | None = None
+    _inflight_count: int = 0
+    _drained_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def __post_init__(self) -> None:
+        self._drained_event.set()
 
     async def _parse_payload(self, message: AbstractIncomingMessage) -> dict[str, Any]:
         try:
@@ -313,6 +319,18 @@ class ConsumersRunner:
             )
 
     async def _callback(self, message: AbstractIncomingMessage, queue_name: str) -> None:
+        """Track in-flight deliveries so graceful shutdown can drain them before
+        closing the connection (teyca-sync-lvc)."""
+        self._inflight_count += 1
+        self._drained_event.clear()
+        try:
+            await self._process_and_ack(message, queue_name)
+        finally:
+            self._inflight_count -= 1
+            if self._inflight_count <= 0:
+                self._drained_event.set()
+
+    async def _process_and_ack(self, message: AbstractIncomingMessage, queue_name: str) -> None:
         try:
             semaphore = self._process_semaphore
             if semaphore is None:
@@ -454,9 +472,9 @@ class ConsumersRunner:
         )
         await channel.declare_queue(QUEUE_DELETE_DEAD, durable=True)
 
-        await queue_create.consume(lambda msg: self._callback(msg, QUEUE_CREATE))
-        await queue_update.consume(lambda msg: self._callback(msg, QUEUE_UPDATE))
-        await queue_delete.consume(lambda msg: self._callback(msg, QUEUE_DELETE))
+        create_tag = await queue_create.consume(lambda msg: self._callback(msg, QUEUE_CREATE))
+        update_tag = await queue_update.consume(lambda msg: self._callback(msg, QUEUE_UPDATE))
+        delete_tag = await queue_delete.consume(lambda msg: self._callback(msg, QUEUE_DELETE))
 
         logger.info(
             "consumers_started",
@@ -465,9 +483,21 @@ class ConsumersRunner:
             max_concurrency=max_concurrency,
             db_capacity=db_capacity,
         )
+
+        shutdown_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, shutdown_event.set)
+
         try:
-            await asyncio.Event().wait()
+            await shutdown_event.wait()
+            logger.info("consumers_shutdown_signal_received", inflight=self._inflight_count)
         finally:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.remove_signal_handler(sig)
+            await self._stop_consuming_and_drain(
+                (queue_create, create_tag), (queue_update, update_tag), (queue_delete, delete_tag)
+            )
             heartbeat_task.cancel()
             try:
                 await heartbeat_task
@@ -476,6 +506,28 @@ class ConsumersRunner:
             await self.old_db_repo.close()
             await connection.close()
             self._channel = None
+
+    async def _stop_consuming_and_drain(
+        self, *queue_and_tag: tuple[AbstractQueue, str]
+    ) -> None:
+        """Stop taking new deliveries, then let in-flight ones finish (bounded by
+        a timeout) before the caller closes the connection (teyca-sync-lvc)."""
+        for queue, tag in queue_and_tag:
+            await queue.cancel(tag)
+        drain_timeout = max(
+            0.0,
+            float(
+                getattr(self.settings, "rabbitmq_consumer_shutdown_drain_timeout_seconds", 30.0)
+            ),
+        )
+        try:
+            await asyncio.wait_for(self._drained_event.wait(), timeout=drain_timeout)
+        except TimeoutError:
+            logger.warning(
+                "consumers_shutdown_drain_timeout",
+                inflight=self._inflight_count,
+                drain_timeout_seconds=drain_timeout,
+            )
 
 
 def build_main_queue_args(max_delivery_count: int, dead_queue: str) -> dict[str, Any] | None:

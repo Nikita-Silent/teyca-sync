@@ -5,6 +5,7 @@ import importlib
 import logging
 import os
 import runpy
+import signal
 from datetime import timedelta
 from pathlib import Path
 from queue import Queue
@@ -794,6 +795,58 @@ async def test_consumers_runner_run_clamps_concurrency_to_db_capacity() -> None:
     assert kwargs["prefetch_count"] == 10
     assert kwargs["db_capacity"] == 2
     assert kwargs["max_concurrency"] == 2
+
+
+@pytest.mark.asyncio
+async def test_consumers_runner_run_drains_inflight_on_sigterm_before_closing() -> None:
+    """teyca-sync-lvc: SIGTERM must stop new deliveries immediately (queue.cancel)
+    but wait for the in-flight callback to finish before closing the connection."""
+    runner = run_queue_consumers.ConsumersRunner(
+        settings=_runner_settings(rabbitmq_consumer_shutdown_drain_timeout_seconds=5.0),
+        old_db_repo=AsyncMock(),
+    )
+    queue_obj = AsyncMock()
+    channel = AsyncMock()
+    channel.declare_queue.return_value = queue_obj
+    connection = AsyncMock()
+    connection.channel.return_value = channel
+    heartbeat_task = DummyAwaitableTask()
+
+    call_order: list[str] = []
+    queue_obj.cancel.side_effect = lambda *a, **k: call_order.append("cancel")
+    connection.close.side_effect = lambda *a, **k: call_order.append("close")
+
+    # Simulate one in-flight callback still running when the signal arrives.
+    runner._inflight_count = 1
+    runner._drained_event.clear()
+
+    async def finish_inflight_shortly() -> None:
+        await asyncio.sleep(0.05)
+        call_order.append("drained")
+        runner._inflight_count = 0
+        runner._drained_event.set()
+
+    with (
+        patch(
+            "app.workers.run_queue_consumers.aio_pika.connect_robust",
+            new=AsyncMock(return_value=connection),
+        ),
+        patch(
+            "app.workers.run_queue_consumers._start_heartbeat_task",
+            return_value=heartbeat_task,
+        ),
+    ):
+        run_task = asyncio.create_task(runner.run())
+        # Let run() reach the signal wait point before delivering the signal.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        drain_task = asyncio.create_task(finish_inflight_shortly())
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(run_task, timeout=5.0)
+        await drain_task
+
+    assert call_order == ["cancel", "cancel", "cancel", "drained", "close"]
+    connection.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     rabbitmq_consumer_prefetch_count: int = 4
     rabbitmq_consumer_max_concurrency: int = 4
+    rabbitmq_consumer_shutdown_drain_timeout_seconds: float = 30.0
     rabbitmq_lock_busy_retry_base_delay_ms: int = 1_000
     rabbitmq_lock_busy_retry_max_delay_ms: int = 30_000
     rabbitmq_lock_busy_retry_max_retries: int = 5
