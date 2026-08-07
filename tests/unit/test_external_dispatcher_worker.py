@@ -468,6 +468,10 @@ async def test_apply_listmonk_upsert_success_returns_duplicate_reason_on_duplica
 @pytest.mark.asyncio
 async def test_accrue_consent_bonus_resumes_only_remaining_step() -> None:
     worker = _worker()
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value=None),
+        set_teyca_key_value=AsyncMock(),
+    )
 
     with (
         patch(
@@ -480,6 +484,10 @@ async def test_accrue_consent_bonus_resumes_only_remaining_step() -> None:
                 save_progress=AsyncMock(),
                 mark_done_with_payload=AsyncMock(),
             ),
+        ),
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
         ),
         patch.object(
             ExternalDispatcherWorker,
@@ -508,11 +516,19 @@ async def test_accrue_consent_bonus_runs_both_steps_and_marks_done() -> None:
         save_progress=AsyncMock(),
         mark_done_with_payload=AsyncMock(),
     )
+    users_repo = AsyncMock(
+        get_teyca_key_value=AsyncMock(return_value=None),
+        set_teyca_key_value=AsyncMock(),
+    )
 
     with (
         patch(
             "app.workers.external_dispatcher_worker.BonusAccrualRepository",
             return_value=accrual_repo,
+        ),
+        patch(
+            "app.workers.external_dispatcher_worker.UsersRepository",
+            return_value=users_repo,
         ),
         patch.object(
             ExternalDispatcherWorker,

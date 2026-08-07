@@ -161,7 +161,8 @@ async def handle(
         source_event_id=source_event_id,
     )
     try:
-        await deps.users_repo.upsert(user_id=user_id, profile=profile)
+        async with deps.session.begin_nested():
+            await deps.users_repo.upsert(user_id=user_id, profile=profile)
     except IntegrityError as exc:
         if not is_email_unique_violation(exc):
             raise

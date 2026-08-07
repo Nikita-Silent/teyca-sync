@@ -62,7 +62,7 @@ async def test_resolve_retries_plain_upsert_when_conflict_already_gone() -> None
             trace_id="trace-1",
         )
 
-    session.rollback.assert_awaited_once()
+    session.rollback.assert_not_awaited()  # savepoint rollback is the caller's job, not ours
     users_repo.upsert.assert_awaited_once_with(
         user_id=10, profile={"email": "dup@example.com", "phone": "+7900"}
     )

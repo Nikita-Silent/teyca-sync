@@ -89,7 +89,8 @@ async def handle(
     profile = build_profile_from_pass(event.pass_data)
     merge_result = merge_profile_with_old_data(profile, old_data)
     try:
-        await deps.users_repo.upsert(user_id=user_id, profile=merge_result.profile)
+        async with deps.session.begin_nested():
+            await deps.users_repo.upsert(user_id=user_id, profile=merge_result.profile)
     except IntegrityError as exc:
         if not is_email_unique_violation(exc):
             raise

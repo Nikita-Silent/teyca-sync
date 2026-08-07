@@ -56,16 +56,20 @@ async def resolve_users_email_conflict(
 ) -> bool:
     """Resolve a live users.email race caught as a DB constraint violation.
 
-    Rolls back the aborted transaction, resolves winner/loser via the
-    Р5/Р6 policy (this event's incoming phone/date_last for `user_id`,
-    current DB state for whoever else holds the email), clears every
-    loser's email, logs each loser in email_repair_log, and enqueues the
-    same outbox job the y1c backfill uses for Teyca sync. Retries
-    `user_id`'s own upsert (email cleared if it lost). Returns True if
-    `user_id` kept the email, False if it lost.
-    """
-    await session.rollback()
+    Callers must run the failed upsert inside `session.begin_nested()`
+    (a SAVEPOINT) so the caught IntegrityError only unwinds that
+    savepoint, not the whole transaction — `lock_user`'s
+    `pg_advisory_xact_lock` is transaction-scoped, and a full
+    `session.rollback()` here would silently drop it (teyca-sync-x1g.1).
 
+    Resolves winner/loser via the Р5/Р6 policy (this event's incoming
+    phone/date_last for `user_id`, current DB state for whoever else
+    holds the email), clears every loser's email, logs each loser in
+    email_repair_log, and enqueues the same outbox job the y1c backfill
+    uses for Teyca sync. Retries `user_id`'s own upsert (email cleared
+    if it lost). Returns True if `user_id` kept the email, False if it
+    lost.
+    """
     users_repo = UsersRepository(session)
     listmonk_repo = ListmonkUsersRepository(session)
     repair_repo = EmailRepairLogRepository(session)

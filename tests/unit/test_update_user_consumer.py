@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import cast
-from unittest.mock import AsyncMock, patch
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -44,6 +44,27 @@ def _email_unique_violation() -> IntegrityError:
     )
 
 
+class _FakeNestedTransaction:
+    """Stand-in for AsyncSession.begin_nested()'s SAVEPOINT context manager.
+
+    Real begin_nested() is a plain (sync) call returning an async context
+    manager (teyca-sync-x1g.1) — AsyncMock would make the call itself a
+    coroutine, breaking `async with`.
+    """
+
+    async def __aenter__(self) -> _FakeNestedTransaction:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        return False
+
+
+def _fake_session() -> MagicMock:
+    session = MagicMock()
+    session.begin_nested = MagicMock(return_value=_FakeNestedTransaction())
+    return session
+
+
 @dataclass(slots=True)
 class _Mocks:
     users_repo: AsyncMock
@@ -63,7 +84,7 @@ def _deps() -> tuple[UpdateConsumerDeps, _Mocks]:
     )
     deps = UpdateConsumerDeps(
         settings=cast(Settings, SimpleNamespace(listmonk_list_ids="3")),
-        session=AsyncMock(),
+        session=_fake_session(),
         users_repo=mocks.users_repo,
         listmonk_repo=mocks.listmonk_repo,
         outbox_repo=mocks.outbox_repo,
