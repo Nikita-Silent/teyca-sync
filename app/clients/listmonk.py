@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 import httpx
 import structlog
 
+from app.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from app.config import Settings
 
 logger = structlog.get_logger()
@@ -128,6 +129,15 @@ class ListmonkSDKClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._logged_in = False
+        self._circuit_breaker = CircuitBreaker(
+            name="listmonk",
+            failure_threshold=max(
+                1, int(getattr(settings, "listmonk_circuit_breaker_failure_threshold", 5))
+            ),
+            cooldown_seconds=max(
+                0.0, float(getattr(settings, "listmonk_circuit_breaker_cooldown_seconds", 30.0))
+            ),
+        )
 
     def _build_timeout_config(self) -> object | None:
         """Build an httpx2.Timeout from settings, or None if httpx2 is unavailable."""
@@ -143,6 +153,32 @@ class ListmonkSDKClient:
         )
 
     async def _sdk_call(
+        self,
+        func: Callable[..., T],
+        *args: object,
+        action: str,
+        retryable: bool = True,
+        **kwargs: object,
+    ) -> T:
+        """Guard _sdk_call_with_retries with a circuit breaker so a persistently
+        failing Listmonk doesn't keep taking real calls per invocation."""
+        try:
+            await self._circuit_breaker.before_call()
+        except CircuitBreakerOpenError as exc:
+            logger.warning("listmonk_circuit_breaker_open", action=action, error=str(exc))
+            raise ListmonkClientError(str(exc)) from exc
+
+        try:
+            result = await self._sdk_call_with_retries(
+                func, *args, action=action, retryable=retryable, **kwargs
+            )
+        except Exception:
+            await self._circuit_breaker.record_failure()
+            raise
+        await self._circuit_breaker.record_success()
+        return result
+
+    async def _sdk_call_with_retries(
         self,
         func: Callable[..., T],
         *args: object,

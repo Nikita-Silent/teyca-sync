@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     teyca_read_timeout_seconds: float = 15.0
     teyca_write_timeout_seconds: float = 15.0
     teyca_pool_timeout_seconds: float = 5.0
+    teyca_circuit_breaker_failure_threshold: int = 5
+    teyca_circuit_breaker_cooldown_seconds: float = 30.0
 
     # Old DB (read-only, merge)
     export_db_url: str = ""
@@ -75,6 +77,8 @@ class Settings(BaseSettings):
     listmonk_read_timeout_seconds: float = 15.0
     listmonk_write_timeout_seconds: float = 15.0
     listmonk_pool_timeout_seconds: float = 5.0
+    listmonk_circuit_breaker_failure_threshold: int = 5
+    listmonk_circuit_breaker_cooldown_seconds: float = 30.0
     consent_bonus_amount: Decimal = Decimal("100.0")
     consent_bonus_ttl_days: int = 30
     consent_sync_batch_size: int = 500

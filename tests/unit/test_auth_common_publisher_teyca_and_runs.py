@@ -292,6 +292,40 @@ async def test_teyca_client_list_operations_raises_on_error_status() -> None:
         await client.list_operations(user_ids=[1])
 
 
+@pytest.mark.asyncio
+async def test_teyca_client_circuit_breaker_opens_after_repeated_5xx() -> None:
+    """teyca-sync-cex: repeated upstream 5xx must trip the breaker so further
+    calls fail fast without another real HTTP round-trip to a struggling Teyca."""
+    settings = SimpleNamespace(
+        teyca_base_url="https://api.example.com/",
+        teyca_api_key="api-key",
+        teyca_token="token-1",
+        teyca_request_max_retries=0,
+        teyca_circuit_breaker_failure_threshold=2,
+        teyca_circuit_breaker_cooldown_seconds=30.0,
+    )
+    http_client = AsyncMock()
+    http_client.post.return_value = SimpleNamespace(status_code=500, text="boom")
+    client = TeycaClient(
+        settings=cast(Settings, settings),
+        http_client=http_client,
+        rate_limiter=AsyncMock(),
+    )
+    op = BonusOperation.one_shot(value="1")
+
+    with pytest.raises(TeycaAPIError):
+        await client.accrue_bonuses(user_id=1, bonuses=[op])
+    with pytest.raises(TeycaAPIError):
+        await client.accrue_bonuses(user_id=1, bonuses=[op])
+    assert http_client.post.await_count == 2
+
+    with pytest.raises(TeycaAPIError, match="Circuit breaker"):
+        await client.accrue_bonuses(user_id=1, bonuses=[op])
+
+    # The breaker rejected the third call before attempting it — no new HTTP call.
+    assert http_client.post.await_count == 2
+
+
 def test_extract_operation_items_handles_wrapped_and_plain_shapes() -> None:
     assert _extract_operation_items([{"user_id": 1}, "bad"]) == [{"user_id": 1}]
     assert _extract_operation_items({"items": [{"user_id": 2}]}) == [{"user_id": 2}]

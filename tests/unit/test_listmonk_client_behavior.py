@@ -273,6 +273,52 @@ async def test_ensure_login_injects_timeout_config_from_settings() -> None:
 
 
 @pytest.mark.asyncio
+async def test_circuit_breaker_opens_after_repeated_sdk_failures() -> None:
+    """teyca-sync-cex: repeated Listmonk SDK failures must trip the breaker so
+    further calls fail fast without another thread-dispatched SDK call."""
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    call_count = 0
+
+    def failing_subscriber_by_id(subscriber_id: int) -> None:
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("boom")
+
+    fake.subscriber_by_id = failing_subscriber_by_id
+
+    settings = cast(
+        Settings,
+        SimpleNamespace(
+            listmonk_url="http://listmonk",
+            listmonk_user="u",
+            listmonk_password="p",
+            listmonk_request_max_retries=0,
+            listmonk_circuit_breaker_failure_threshold=2,
+            listmonk_circuit_breaker_cooldown_seconds=30.0,
+        ),
+    )
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
+    ):
+        client = ListmonkSDKClient(settings)
+        with pytest.raises(RuntimeError):
+            await client.get_subscriber_state(subscriber_id=1)
+        with pytest.raises(RuntimeError):
+            await client.get_subscriber_state(subscriber_id=1)
+        assert call_count == 2
+
+        with pytest.raises(ListmonkClientError, match="Circuit breaker"):
+            await client.get_subscriber_state(subscriber_id=1)
+
+    # The breaker rejected the third call before dispatching it to the SDK.
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_get_subscriber_state_returns_none_for_empty_payload_or_status() -> None:
     fake = SimpleNamespace()
     fake.set_url_base = MagicMock()

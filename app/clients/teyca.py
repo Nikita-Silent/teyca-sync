@@ -12,6 +12,7 @@ from uuid import uuid4
 import httpx
 import structlog
 
+from app.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from app.config import Settings
 from app.repositories.teyca_call_budget import BudgetLimits, TeycaCallBudgetRepository
 
@@ -156,6 +157,15 @@ class TeycaClient:
         self._client = http_client
         self._owns_client = http_client is None
         self._rate_limiter = rate_limiter
+        self._circuit_breaker = CircuitBreaker(
+            name="teyca",
+            failure_threshold=max(
+                1, int(getattr(settings, "teyca_circuit_breaker_failure_threshold", 5))
+            ),
+            cooldown_seconds=max(
+                0.0, float(getattr(settings, "teyca_circuit_breaker_cooldown_seconds", 30.0))
+            ),
+        )
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create and reuse a client with connect/read/write/pool timeouts."""
@@ -176,6 +186,37 @@ class TeycaClient:
             self._client = None
 
     async def _execute(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        action: str,
+    ) -> httpx.Response:
+        """Guard _execute_with_retries with a circuit breaker so a persistently
+        failing Teyca doesn't keep taking real HTTP round-trips per call."""
+        try:
+            await self._circuit_breaker.before_call()
+        except CircuitBreakerOpenError as exc:
+            logger.warning("teyca_circuit_breaker_open", action=action, url=url, error=str(exc))
+            raise TeycaAPIError(str(exc)) from exc
+
+        try:
+            response = await self._execute_with_retries(
+                method, url, json=json, headers=headers, action=action
+            )
+        except Exception:
+            await self._circuit_breaker.record_failure()
+            raise
+
+        if response.status_code >= 500:
+            await self._circuit_breaker.record_failure()
+        else:
+            await self._circuit_breaker.record_success()
+        return response
+
+    async def _execute_with_retries(
         self,
         method: str,
         url: str,
