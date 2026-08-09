@@ -19,6 +19,7 @@ logger = structlog.get_logger()
 T = TypeVar("T")
 
 _TIMEOUT_PARAM_SUPPORTED: dict[Callable[..., Any], bool] = {}
+_HTTPX2_NETWORK_EXCEPTIONS: tuple[type[BaseException], ...] | None = None
 
 
 def _supports_timeout_config(func: Callable[..., Any]) -> bool:
@@ -28,6 +29,29 @@ def _supports_timeout_config(func: Callable[..., Any]) -> bool:
         supported = "timeout_config" in inspect.signature(func).parameters
         _TIMEOUT_PARAM_SUPPORTED[func] = supported
     return supported
+
+
+def httpx2_network_exceptions() -> tuple[type[BaseException], ...]:
+    """The listmonk SDK makes its HTTP calls through a separate, vendored
+    httpx2 rather than the httpx used everywhere else in this codebase, and
+    httpx2's exceptions don't subclass httpx's — so retry/error-handling
+    written against httpx.TimeoutException/NetworkError/TransportError misses
+    them entirely and an httpx2.ReadTimeout crashes the caller instead of
+    retrying (teyca-sync-90i). Cached like _TIMEOUT_PARAM_SUPPORTED; empty
+    tuple if httpx2 isn't installed, so the except clause degrades to a no-op."""
+    global _HTTPX2_NETWORK_EXCEPTIONS
+    if _HTTPX2_NETWORK_EXCEPTIONS is None:
+        try:
+            import httpx2  # type: ignore
+
+            _HTTPX2_NETWORK_EXCEPTIONS = (
+                httpx2.TimeoutException,
+                httpx2.NetworkError,
+                httpx2.TransportError,
+            )
+        except ModuleNotFoundError:
+            _HTTPX2_NETWORK_EXCEPTIONS = ()
+    return _HTTPX2_NETWORK_EXCEPTIONS
 
 
 class ListmonkClientError(Exception):
@@ -221,7 +245,12 @@ class ListmonkSDKClient:
                     error_type="TimeoutError",
                     timeout_seconds=timeout_seconds,
                 )
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+            except (
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.TransportError,
+                *httpx2_network_exceptions(),
+            ) as exc:
                 if not retryable or attempt >= max_retries:
                     raise
                 logger.warning(

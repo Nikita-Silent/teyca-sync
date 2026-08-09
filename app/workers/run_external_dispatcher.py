@@ -8,7 +8,7 @@ from collections.abc import Sequence
 import httpx
 import structlog
 
-from app.clients.listmonk import ListmonkClientError
+from app.clients.listmonk import ListmonkClientError, httpx2_network_exceptions
 from app.clients.teyca import TeycaAPIError
 from app.config import get_settings
 from app.db.session import wait_for_database
@@ -70,7 +70,12 @@ async def _run(
                 processed=processed,
                 service_name=service_name,
             )
-        except (ListmonkClientError, TeycaAPIError, httpx.HTTPError) as exc:
+        except (
+            ListmonkClientError,
+            TeycaAPIError,
+            httpx.HTTPError,
+            *httpx2_network_exceptions(),
+        ) as exc:
             await _safe_write_heartbeat(service_name, {"stage": "failed"})
             logger.error(
                 "external_dispatcher_run_failed",

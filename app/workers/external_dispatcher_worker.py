@@ -12,7 +12,12 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog import contextvars as log_contextvars
 
-from app.clients.listmonk import ListmonkClientError, ListmonkSDKClient, SubscriberState
+from app.clients.listmonk import (
+    ListmonkClientError,
+    ListmonkSDKClient,
+    SubscriberState,
+    httpx2_network_exceptions,
+)
 from app.clients.teyca import (
     BonusOperation,
     TeycaAPIError,
@@ -327,7 +332,13 @@ class ExternalDispatcherWorker:
                 max_wait_seconds=round(exc.max_wait_seconds, 3),
                 backend=exc.backend,
             )
-        except (ListmonkClientError, TeycaAPIError, httpx.HTTPError, RuntimeError) as exc:
+        except (
+            ListmonkClientError,
+            TeycaAPIError,
+            httpx.HTTPError,
+            RuntimeError,
+            *httpx2_network_exceptions(),
+        ) as exc:
             status = await self._mark_retry(
                 outbox_id=claim.id,
                 attempts=claim.attempts + 1,

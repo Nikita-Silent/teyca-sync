@@ -908,6 +908,55 @@ async def test_get_updated_subscribers_retries_on_transient_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_subscriber_retries_on_httpx2_read_timeout() -> None:
+    """The listmonk SDK's HTTP calls go through a separate, vendored httpx2,
+    not the httpx used everywhere else — httpx2 exceptions don't subclass
+    httpx's, so retry logic written only against httpx.TimeoutException/
+    NetworkError/TransportError used to miss them and crash the caller
+    instead of retrying (teyca-sync-90i). This reproduces an httpx2.ReadTimeout
+    during the subscriber_by_id read inside an update and asserts a retry
+    happens rather than an unhandled crash."""
+    import httpx2
+
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.subscriber_by_id = MagicMock(return_value=SimpleNamespace(status="enabled", id=77))
+    fake.update_subscriber = MagicMock(return_value={"status": "enabled"})
+
+    subscriber_by_id_calls = 0
+
+    async def flaky_to_thread(
+        func: Callable[..., object], *args: object, **kwargs: object
+    ) -> object:
+        nonlocal subscriber_by_id_calls
+        if func is fake.subscriber_by_id:
+            subscriber_by_id_calls += 1
+            if subscriber_by_id_calls == 1:
+                raise httpx2.ReadTimeout("timed out")
+        return func(*args, **kwargs)
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=flaky_to_thread)),
+    ):
+        client = ListmonkSDKClient(_settings())
+        state = await client.upsert_subscriber(
+            email="x@y.z",
+            list_ids=[1],
+            attributes={"fio": "X"},
+            subscriber_id=77,
+        )
+
+    assert state.subscriber_id == 77
+    # First subscriber_by_id call hit the httpx2.ReadTimeout and was retried
+    # (subscriber_by_id is called once more afterward, post-update, to build
+    # the returned state — three calls total confirms the retry happened
+    # without the caller ever seeing the raw httpx2 exception).
+    assert subscriber_by_id_calls == 3
+
+
+@pytest.mark.asyncio
 async def test_get_updated_subscribers_wraps_asyncio_timeout_as_client_error() -> None:
     fake = SimpleNamespace()
     fake.set_url_base = MagicMock()
