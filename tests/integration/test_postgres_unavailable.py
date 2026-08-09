@@ -13,9 +13,11 @@ the same pytest session.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import time
 from collections.abc import AsyncGenerator, Generator
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -80,12 +82,28 @@ def _stop_container(container_name: str) -> None:
     subprocess.run(["docker", "stop", "-t", "1", container_name], capture_output=True, check=True)
 
 
-def _start_container(container_name: str) -> None:
+def _start_container(container_name: str, host_port: int) -> None:
     subprocess.run(["docker", "start", container_name], capture_output=True, check=True)
-    # Give the server a moment to accept connections again before the test
-    # continues — no "ready twice" log-marker wait needed here since this is
-    # a restart of an already-initialized data directory, not first boot.
-    time.sleep(2.0)
+    # Wait for readiness instead of sleeping a fixed amount — two independent
+    # things lag behind `docker start` and both varied enough between runs to
+    # make a fixed sleep flaky:
+    #   1. after an abrupt stop the data directory needs crash recovery, and
+    #      connecting mid-recovery fails with CannotConnectNowError;
+    #   2. the published host port is re-forwarded a moment later still, so a
+    #      server that is ready inside the container can be refused from here.
+    # Probing both covers the whole path the test actually uses.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        probe = subprocess.run(
+            ["docker", "exec", container_name, "pg_isready", "-q"],
+            capture_output=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            with suppress(OSError), socket.create_connection(("localhost", host_port), timeout=1.0):
+                return
+        time.sleep(0.2)
+    raise RuntimeError(f"postgres container {container_name} did not become ready in 30s")
 
 
 @pytest.mark.asyncio
@@ -93,6 +111,8 @@ async def test_operation_fails_fast_while_db_is_down_and_recovers_without_data_l
     killable_engine: tuple[AsyncEngine, str],
 ) -> None:
     engine, container_name = killable_engine
+    host_port = engine.url.port
+    assert host_port is not None
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     # Sanity: a normal operation succeeds before anything is killed.
@@ -126,7 +146,7 @@ async def test_operation_fails_fast_while_db_is_down_and_recovers_without_data_l
     # silently swallowing requests for minutes.
     assert failed_after < timedelta(seconds=10)
 
-    _start_container(container_name)
+    _start_container(container_name, host_port)
 
     # Once the database is back, the same operation succeeds and the row
     # that failed to insert during the outage was never partially written —
@@ -161,6 +181,8 @@ async def test_scheduled_task_survives_db_outage_without_crashing_the_process(
     import asyncio
 
     engine, container_name = killable_engine
+    host_port = engine.url.port
+    assert host_port is not None
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     _stop_container(container_name)
 
@@ -190,4 +212,4 @@ async def test_scheduled_task_survives_db_outage_without_crashing_the_process(
     await watchdog
 
     assert attempts >= 2
-    _start_container(container_name)
+    _start_container(container_name, host_port)
