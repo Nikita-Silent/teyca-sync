@@ -28,7 +28,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     heartbeat_task = _start_heartbeat_task("app", interval_seconds=15)
     try:
-        await write_heartbeat("app")
+        # Best-effort like every other heartbeat write: a stalled disk must not
+        # keep the app from starting, and the loop above rewrites it in 15s.
+        await _write_heartbeat_safely("app")
         yield
     finally:
         heartbeat_task.cancel()
@@ -53,18 +55,22 @@ async def read_root() -> dict:
     return {"message": "Hello, World!"}
 
 
+async def _write_heartbeat_safely(service_name: str) -> None:
+    try:
+        await write_heartbeat(service_name)
+    except Exception as exc:
+        logger.error(
+            "heartbeat_write_failed",
+            service_name=service_name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
 def _start_heartbeat_task(service_name: str, *, interval_seconds: int) -> asyncio.Task[None]:
     async def _run() -> None:
         while True:
-            try:
-                await write_heartbeat(service_name)
-            except Exception as exc:
-                logger.error(
-                    "heartbeat_write_failed",
-                    service_name=service_name,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
+            await _write_heartbeat_safely(service_name)
             await asyncio.sleep(interval_seconds)
 
     return asyncio.create_task(_run())

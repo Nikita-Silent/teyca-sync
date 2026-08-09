@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+# Every task loop awaits a heartbeat write before and after each run, so a
+# heartbeat that blocks on a stalled disk stalls the work itself: the app's
+# 15s heartbeat drifted to 50-180s and the worker's task loops nearly stopped
+# during a host I/O stall. Give up on the write instead of waiting it out —
+# callers log the failure and keep working, and the next tick writes again.
+HEARTBEAT_WRITE_TIMEOUT_SECONDS = 5.0
+
 
 def heartbeat_path(service_name: str) -> Path:
     return HEARTBEAT_DIR / f"{service_name}.json"
@@ -22,7 +29,10 @@ async def write_heartbeat(service_name: str, *, extra: dict[str, Any] | None = N
     }
     if extra:
         payload.update(extra)
-    await asyncio.to_thread(_write_json, heartbeat_path(service_name), payload)
+    await asyncio.wait_for(
+        asyncio.to_thread(_write_json, heartbeat_path(service_name), payload),
+        timeout=HEARTBEAT_WRITE_TIMEOUT_SECONDS,
+    )
 
 
 async def heartbeat_status(service_name: str, *, max_age_seconds: int) -> dict[str, Any]:
@@ -111,13 +121,16 @@ async def all_worker_heartbeats_fresh() -> bool:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    # No fsync: a heartbeat is liveness state, not durable data — a timestamp
+    # lost to a crash is worthless anyway, since the crash is exactly what the
+    # reader needs to notice. os.replace still makes readers see whole files.
+    # The fsync was the expensive part under I/O pressure and cost far more
+    # than it bought (see HEARTBEAT_WRITE_TIMEOUT_SECONDS).
     _ensure_directory(path.parent)
     temp_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
     try:
         with temp_path.open("w", encoding="utf-8") as file_obj:
             json.dump(payload, file_obj)
-            file_obj.flush()
-            os.fsync(file_obj.fileno())
         os.replace(temp_path, path)
     except Exception:
         if temp_path.exists():

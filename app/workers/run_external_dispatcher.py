@@ -8,7 +8,11 @@ from collections.abc import Sequence
 import httpx
 import structlog
 
-from app.clients.listmonk import ListmonkClientError, httpx2_network_exceptions
+from app.clients.listmonk import (
+    ListmonkClientError,
+    httpx2_network_exceptions,
+    httpx2_status_exceptions,
+)
 from app.clients.teyca import TeycaAPIError
 from app.config import get_settings
 from app.db.session import wait_for_database
@@ -75,6 +79,7 @@ async def _run(
             TeycaAPIError,
             httpx.HTTPError,
             *httpx2_network_exceptions(),
+            *httpx2_status_exceptions(),
         ) as exc:
             await _safe_write_heartbeat(service_name, {"stage": "failed"})
             logger.error(

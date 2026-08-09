@@ -20,6 +20,11 @@ T = TypeVar("T")
 
 _TIMEOUT_PARAM_SUPPORTED: dict[Callable[..., Any], bool] = {}
 _HTTPX2_NETWORK_EXCEPTIONS: tuple[type[BaseException], ...] | None = None
+_HTTPX2_STATUS_EXCEPTIONS: tuple[type[BaseException], ...] | None = None
+
+# Listmonk error bodies are small JSON objects; cap what we copy into the
+# exception message so a stray HTML error page can't flood the logs.
+_RESPONSE_BODY_LIMIT = 500
 
 
 def _supports_timeout_config(func: Callable[..., Any]) -> bool:
@@ -54,8 +59,64 @@ def httpx2_network_exceptions() -> tuple[type[BaseException], ...]:
     return _HTTPX2_NETWORK_EXCEPTIONS
 
 
+def httpx2_status_exceptions() -> tuple[type[BaseException], ...]:
+    """httpx2.HTTPStatusError, for the same reason httpx2_network_exceptions()
+    exists: it doesn't subclass httpx.HTTPError, so an error status from
+    Listmonk slipped past every `except (ListmonkClientError, httpx.HTTPError)`
+    in the workers and crashed the whole dispatcher batch instead of failing
+    just its own outbox row. Cached; empty tuple if httpx2 isn't installed."""
+    global _HTTPX2_STATUS_EXCEPTIONS
+    if _HTTPX2_STATUS_EXCEPTIONS is None:
+        try:
+            import httpx2  # type: ignore
+
+            _HTTPX2_STATUS_EXCEPTIONS = (httpx2.HTTPStatusError,)
+        except ModuleNotFoundError:
+            _HTTPX2_STATUS_EXCEPTIONS = ()
+    return _HTTPX2_STATUS_EXCEPTIONS
+
+
 class ListmonkClientError(Exception):
     """Raised when listmonk SDK is unavailable or returns unexpected payload."""
+
+
+class ListmonkHTTPStatusError(ListmonkClientError):
+    """An error status from Listmonk, normalized into ListmonkClientError.
+
+    Carries the response body because that is the only place some failures are
+    visible: Listmonk answers an update that would duplicate another
+    subscriber's email with a 500 whose body holds the unique violation, while
+    the exception message says nothing but "Server error '500 ...'".
+    """
+
+    def __init__(self, message: str, *, status_code: int | None, body: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+
+
+def _response_body_text(response: object) -> str:
+    """Best-effort read of an httpx/httpx2 response body, never raising."""
+    if response is None:
+        return ""
+    try:
+        text = getattr(response, "text", "")
+    except Exception:
+        return ""
+    if not isinstance(text, str):
+        return ""
+    return text.strip()[:_RESPONSE_BODY_LIMIT]
+
+
+def _wrap_http_status_error(exc: BaseException, *, action: str) -> ListmonkHTTPStatusError:
+    response = getattr(exc, "response", None)
+    raw_status_code = getattr(response, "status_code", None)
+    status_code = raw_status_code if isinstance(raw_status_code, int) else None
+    body = _response_body_text(response)
+    message = f"Listmonk returned HTTP {status_code} for action={action}: {exc}"
+    if body:
+        message = f"{message} body={body}"
+    return ListmonkHTTPStatusError(message, status_code=status_code, body=body)
 
 
 def _safe_info(event: str, **kwargs: object) -> None:
@@ -261,6 +322,13 @@ class ListmonkSDKClient:
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
+            except (httpx.HTTPStatusError, *httpx2_status_exceptions()) as exc:
+                # Not retried here: the write calls that hit this are the
+                # non-idempotent ones (create/update_subscriber). Normalizing
+                # into ListmonkClientError is what matters — it puts an error
+                # status back on the outbox retry path instead of unwinding
+                # the whole dispatcher run.
+                raise _wrap_http_status_error(exc, action=action) from exc
             attempt += 1
             if retry_backoff_seconds > 0:
                 await asyncio.sleep(retry_backoff_seconds * attempt)
@@ -1092,18 +1160,31 @@ def _is_after_watermark(
     return subscriber_id > (watermark_subscriber_id or 0)
 
 
+_EMAIL_CONFLICT_MARKERS = (
+    "duplicate key value violates unique constraint",
+    "subscribers_email_key",
+    "e-mail already exists",
+    "email already exists",
+)
+
+
 def _is_conflict_error(exc: Exception) -> bool:
+    """Whether `exc` means "this email already belongs to another subscriber".
+
+    Listmonk is not consistent about how it reports that: an update whose email
+    collides comes back as a 500 whose *body* carries the Postgres unique
+    violation, so the body is matched too, not just the status and the
+    exception message (teyca-sync: subscriber 19295 looped on this for hours).
+    """
     response = getattr(exc, "response", None)
     if response is not None and getattr(response, "status_code", None) == httpx.codes.CONFLICT:
         return True
-    text = str(exc).lower()
+    if isinstance(exc, ListmonkHTTPStatusError) and exc.status_code == httpx.codes.CONFLICT:
+        return True
+    text = f"{exc} {_response_body_text(response)}".lower()
     if "409" in text and "conflict" in text:
         return True
-    if "duplicate key value violates unique constraint" in text:
-        return True
-    if "subscribers_email_key" in text:
-        return True
-    return False
+    return any(marker in text for marker in _EMAIL_CONFLICT_MARKERS)
 
 
 def _normalize_status_for_restore(status: str | None) -> str | None:

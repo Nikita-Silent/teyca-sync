@@ -11,6 +11,7 @@ import pytest
 
 from app.clients.listmonk import (
     ListmonkClientError,
+    ListmonkHTTPStatusError,
     ListmonkSDKClient,
     SubscriberState,
     _build_subscriber_name,
@@ -28,6 +29,7 @@ from app.clients.listmonk import (
     _normalize_list_ids,
     _normalize_status_for_restore,
     _to_utc,
+    _wrap_http_status_error,
 )
 from app.config import Settings
 
@@ -1041,3 +1043,100 @@ async def test_upsert_subscriber_does_not_retry_mutating_call_after_timeout() ->
             )
 
     assert create_attempts == 1
+
+
+def _httpx2_status_error(*, status_code: int, body: str) -> Exception:
+    """A real httpx2.HTTPStatusError as the listmonk SDK's raise_for_status()
+    produces it: the message names only the status, never the body."""
+    import httpx2
+
+    url = "https://listmonk.example/api/subscribers/19295"
+    request = httpx2.Request("PUT", url)
+    response = httpx2.Response(status_code, request=request, text=body)
+    return httpx2.HTTPStatusError(
+        f"Server error '{status_code} Internal Server Error' for url '{url}'",
+        request=request,
+        response=response,
+    )
+
+
+_DUPLICATE_EMAIL_BODY = (
+    '{"message":"error updating subscriber: pq: duplicate key value violates '
+    'unique constraint \\"subscribers_email_key\\""}'
+)
+
+
+def test_is_conflict_error_reads_the_response_body_of_a_500() -> None:
+    """Listmonk answers an update that would duplicate another subscriber's
+    email with a 500 whose body — not its message — carries the unique
+    violation, so a body-blind check missed it and the email fallback never
+    ran."""
+    raw = _httpx2_status_error(status_code=500, body=_DUPLICATE_EMAIL_BODY)
+    assert _is_conflict_error(raw)
+    assert _is_conflict_error(_wrap_http_status_error(raw, action="update_subscriber"))
+
+    unrelated = _httpx2_status_error(status_code=500, body='{"message":"db is down"}')
+    assert not _is_conflict_error(unrelated)
+    assert not _is_conflict_error(_wrap_http_status_error(unrelated, action="update_subscriber"))
+
+
+@pytest.mark.asyncio
+async def test_sdk_call_wraps_http_status_error_as_client_error() -> None:
+    """httpx2.HTTPStatusError doesn't subclass httpx.HTTPError, so it slipped
+    past every `except (ListmonkClientError, httpx.HTTPError)` in the workers
+    and unwound the whole dispatcher run instead of failing one outbox row."""
+    client = ListmonkSDKClient(_settings())
+
+    def always_500() -> None:
+        raise _httpx2_status_error(status_code=500, body='{"message":"db is down"}')
+
+    with pytest.raises(ListmonkHTTPStatusError) as exc_info:
+        await client._sdk_call(always_500, action="update_subscriber", retryable=False)
+
+    assert isinstance(exc_info.value, ListmonkClientError)
+    assert exc_info.value.status_code == 500
+    assert "db is down" in exc_info.value.body
+    assert "action=update_subscriber" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_upsert_subscriber_falls_back_to_email_on_500_duplicate() -> None:
+    """Regression for the outbox row that looped for hours: updating
+    subscriber 19295 with an email another subscriber already owns got a 500,
+    which was neither recognized as a conflict nor caught by the dispatcher —
+    so the job crashed the batch and its attempts never grew. It must take the
+    same by-email fallback a 409 takes."""
+    fake = SimpleNamespace()
+    fake.set_url_base = MagicMock()
+    fake.login = MagicMock(return_value=True)
+    fake.subscriber_by_id = MagicMock(
+        side_effect=[
+            SimpleNamespace(id=19295, status="enabled", email="other@example.com"),
+            SimpleNamespace(id=18426, status="enabled", email="dup@example.com"),
+        ]
+    )
+    fake.subscriber_by_email = MagicMock(
+        return_value=SimpleNamespace(id=18426, status="enabled", email="dup@example.com")
+    )
+    fake.update_subscriber = MagicMock(
+        side_effect=[
+            _httpx2_status_error(status_code=500, body=_DUPLICATE_EMAIL_BODY),
+            {"status": "enabled"},
+        ]
+    )
+
+    with (
+        patch.dict("sys.modules", {"listmonk": fake}),
+        patch("app.clients.listmonk.asyncio.to_thread", new=AsyncMock(side_effect=_run_to_thread)),
+    ):
+        client = ListmonkSDKClient(_settings())
+        state = await client.upsert_subscriber(
+            email="dup@example.com",
+            list_ids=[2],
+            attributes={"fio": "User Name"},
+            subscriber_id=19295,
+        )
+
+    assert state.subscriber_id == 18426
+    assert fake.subscriber_by_email.call_count == 1
+    assert fake.update_subscriber.call_count == 2

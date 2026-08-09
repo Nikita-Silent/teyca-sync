@@ -17,6 +17,7 @@ from app.clients.listmonk import (
     ListmonkSDKClient,
     SubscriberState,
     httpx2_network_exceptions,
+    httpx2_status_exceptions,
 )
 from app.clients.teyca import (
     BonusOperation,
@@ -338,6 +339,7 @@ class ExternalDispatcherWorker:
             httpx.HTTPError,
             RuntimeError,
             *httpx2_network_exceptions(),
+            *httpx2_status_exceptions(),
         ) as exc:
             status = await self._mark_retry(
                 outbox_id=claim.id,

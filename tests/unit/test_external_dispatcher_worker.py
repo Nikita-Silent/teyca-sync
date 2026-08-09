@@ -1505,3 +1505,52 @@ async def test_external_dispatcher_process_claim_routes_email_repair_sync() -> N
 def test_default_outbox_operations_include_email_repair_sync() -> None:
     assert OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC in DEFAULT_OUTBOX_OPERATIONS
     assert EMAIL_REPAIR_SYNC_OUTBOX_OPERATIONS == (OUTBOX_OP_TEYCA_EMAIL_REPAIR_SYNC,)
+
+
+@pytest.mark.asyncio
+async def test_external_dispatcher_process_claim_schedules_retry_on_http_status_error() -> None:
+    """Defense in depth for the row that looped for hours: even a raw
+    httpx2.HTTPStatusError — which subclasses neither httpx.HTTPError nor
+    ListmonkClientError — must fail just its own outbox row. Escaping here
+    unwound the whole run_once batch and left attempts frozen, so the job
+    never dead-lettered and came back every few minutes."""
+    import httpx2
+
+    worker = _worker()
+    claim = OutboxClaim(
+        id=977586,
+        operation=OUTBOX_OP_LISTMONK_UPSERT,
+        dedupe_key="listmonk-upsert:4677346",
+        user_id=4677346,
+        payload={"email": "dup@example.com", "list_ids": [2]},
+        attempts=1,
+        trace_id="trace-977586",
+        source_event_id="event-977586",
+        queue_name="queue-update",
+    )
+    metrics = ExternalDispatcherMetrics(batch_size=10)
+    url = "https://listmonk.example/api/subscribers/19295"
+    request = httpx2.Request("PUT", url)
+    status_error = httpx2.HTTPStatusError(
+        f"Server error '500 Internal Server Error' for url '{url}'",
+        request=request,
+        response=httpx2.Response(500, request=request, text='{"message":"boom"}'),
+    )
+
+    with (
+        patch.object(
+            ExternalDispatcherWorker,
+            "_process_listmonk_upsert",
+            new=AsyncMock(side_effect=status_error),
+        ),
+        patch.object(
+            ExternalDispatcherWorker, "_mark_retry", new=AsyncMock(return_value="failed")
+        ) as mark_retry,
+    ):
+        await worker._process_claim(claim=claim, metrics=metrics)
+
+    mark_retry.assert_awaited_once()
+    assert mark_retry.await_args is not None
+    assert mark_retry.await_args.kwargs["outbox_id"] == 977586
+    assert mark_retry.await_args.kwargs["attempts"] == 2
+    assert metrics.retried == 1
