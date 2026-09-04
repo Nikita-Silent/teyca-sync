@@ -5,6 +5,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.teyca import TeycaAPIError
@@ -13,6 +14,18 @@ from app.repositories.old_db import OldDBRepository
 from app.repositories.users import UserLockNotAcquiredError
 from app.repositories.webhook_inbox import InboxClaim
 from app.workers.webhook_inbox_worker import InboxWorkerMetrics, WebhookInboxWorker
+
+
+class _Probe(BaseModel):
+    x: int
+
+
+def _validation_error() -> ValidationError:
+    try:
+        _Probe.model_validate({"x": "not-a-number"})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected ValidationError")
 
 
 def _settings(**overrides: object) -> Settings:
@@ -162,6 +175,30 @@ async def test_process_claim_retries_on_non_rate_limit_teyca_error() -> None:
     assert kwargs["max_attempts"] == 5
     assert kwargs["base_delay_ms"] == 1_000
     assert metrics.retried == 1
+
+
+@pytest.mark.asyncio
+async def test_process_claim_sends_validation_error_straight_to_dead() -> None:
+    """teyca-sync-iil.5: a schema mismatch isn't transient — the first failure
+    must go dead (max_attempts=1), not burn webhook_inbox_max_retries retries
+    on a payload that will fail the exact same way every time."""
+    worker = _worker()
+    metrics = InboxWorkerMetrics(batch_size=1)
+    with (
+        patch.object(
+            WebhookInboxWorker, "_dispatch", new=AsyncMock(side_effect=_validation_error())
+        ),
+        patch.object(
+            WebhookInboxWorker, "_mark_retry", new=AsyncMock(return_value="dead")
+        ) as mark_retry,
+    ):
+        await worker._process_claim(claim=_claim(attempts=0), metrics=metrics)
+    mark_retry.assert_awaited_once()
+    kwargs = mark_retry.call_args.kwargs
+    assert kwargs["max_attempts"] == 1
+    assert kwargs["attempts"] == 1
+    assert metrics.dead == 1
+    assert metrics.retried == 0
 
 
 @pytest.mark.asyncio

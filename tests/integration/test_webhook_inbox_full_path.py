@@ -16,10 +16,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from app.repositories.webhook_inbox import (
+    INBOX_STATUS_DEAD,
     INBOX_STATUS_DONE,
     INBOX_STATUS_PENDING,
     WebhookInboxRepository,
 )
+from service_workers.replay_dead_webhook_inbox import DeadWebhookInboxReplay
 
 AUTH_TOKEN = "36545925e92437d467ec8bef30b07bb2"
 
@@ -194,3 +196,78 @@ async def test_crashed_claim_is_recovered_exactly_once_by_a_restarted_worker(
     assert len(rows) == 1
     assert rows[0].status == INBOX_STATUS_DONE
     assert rows[0].locked_by is None
+
+
+@pytest.mark.asyncio
+async def test_dead_row_is_replayed_and_then_processed_to_done(
+    engine: AsyncEngine,
+) -> None:
+    """teyca-sync-iil.6: a row that died on a schema mismatch (teyca-sync-iil.5)
+    must be reachable again once the schema is fixed — replay_dead resets it to
+    pending with a clean retry slate, and the normal claim/mark_done path picks
+    it up from there exactly like a fresh event."""
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as seed_session:
+        repo = WebhookInboxRepository(seed_session)
+        await repo.enqueue(
+            source_event_id="replay-test-event",
+            event_type="UPDATE",
+            payload={"type": "UPDATE", "pass": {"user_id": 9003}},
+            trace_id="replay-test",
+        )
+        await seed_session.commit()
+
+    async with session_factory() as session:
+        repo = WebhookInboxRepository(session)
+        claims = await repo.claim_batch(limit=1, worker_id="worker-dying")
+        assert len(claims) == 1
+        inbox_id = claims[0].id
+        status = await repo.mark_retry(
+            inbox_id=inbox_id,
+            attempts=1,
+            error_text="1 validation error for PassData\nuser_id\n  Field required",
+            max_attempts=1,
+            base_delay_ms=1_000,
+            max_delay_ms=60_000,
+        )
+        await session.commit()
+    assert status == INBOX_STATUS_DEAD
+
+    replay = DeadWebhookInboxReplay(session_factory=session_factory)
+    dead_rows = await replay.collect(batch_size=10)
+    assert [row.id for row in dead_rows] == [inbox_id]
+    assert dead_rows[0].last_error is not None and "PassData" in dead_rows[0].last_error
+
+    summary = await replay.apply(rows=dead_rows)
+    assert summary.candidates == 1
+    assert summary.replayed == 1
+
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, attempts, last_error FROM webhook_inbox WHERE id = :id"
+                ),
+                {"id": inbox_id},
+            )
+        ).one()
+    assert row.status == INBOX_STATUS_PENDING
+    assert row.attempts == 0
+    assert row.last_error is None
+
+    async with session_factory() as session:
+        repo = WebhookInboxRepository(session)
+        claims = await repo.claim_batch(limit=1, worker_id="worker-after-fix")
+        assert len(claims) == 1
+        assert claims[0].id == inbox_id
+        await repo.mark_done(inbox_id=inbox_id)
+        await session.commit()
+
+    async with engine.connect() as conn:
+        final_status = (
+            await conn.execute(
+                text("SELECT status FROM webhook_inbox WHERE id = :id"), {"id": inbox_id}
+            )
+        ).scalar_one()
+    assert final_status == INBOX_STATUS_DONE

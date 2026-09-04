@@ -14,9 +14,10 @@ from sqlalchemy import text
 from starlette.requests import ClientDisconnect
 
 from app.api.auth import verify_webhook_token
+from app.config import get_settings
 from app.db.session import SessionLocal
 from app.repositories.webhook_inbox import WebhookInboxRepository
-from app.schemas.webhook import WebhookPayload
+from app.schemas.webhook import WebhookEnvelope
 from app.service_health import heartbeat_status
 
 logger = structlog.get_logger()
@@ -89,11 +90,33 @@ async def webhook(
     request: Request,
     _auth: None = Depends(verify_webhook_token),
 ) -> dict:
-    """Accept webhook, validate body, and persist event payload to the inbox."""
+    """Accept webhook, check it's routable, and persist the raw payload to the inbox.
+
+    Only `type` and `pass.user_id` are validated here (teyca-sync-iil.4): that's
+    the minimum the inbox needs to route/dedupe the event, and a rejection at
+    this stage is a genuine dead end — Teyca doesn't retry a 422, so anything
+    more here means a lost event, not a caught mistake. Everything else in
+    `pass` is stored as-is; `WebhookPayload` validates it downstream in the
+    consumer, where a failure is a retryable/inspectable `dead` row instead.
+    """
     trace_id = _extract_trace_id(request)
     source_event_id = _extract_source_event_id(request)
+
+    settings = get_settings()
+    content_length = request.headers.get("content-length")
+    if content_length is not None and content_length.isdigit():
+        if int(content_length) > settings.webhook_max_body_bytes:
+            logger.warning(
+                "webhook_body_too_large",
+                trace_id=trace_id,
+                source_event_id=source_event_id,
+                content_length=int(content_length),
+                limit=settings.webhook_max_body_bytes,
+            )
+            raise HTTPException(status_code=413, detail="Payload too large")
+
     try:
-        body = await request.json()
+        raw_body = await request.body()
     except ClientDisconnect:
         logger.debug(
             "webhook_client_disconnected",
@@ -101,6 +124,19 @@ async def webhook(
             source_event_id=source_event_id,
         )
         return {"ok": True}
+
+    if len(raw_body) > settings.webhook_max_body_bytes:
+        logger.warning(
+            "webhook_body_too_large",
+            trace_id=trace_id,
+            source_event_id=source_event_id,
+            content_length=len(raw_body),
+            limit=settings.webhook_max_body_bytes,
+        )
+        raise HTTPException(status_code=413, detail="Payload too large")
+
+    try:
+        body = json.loads(raw_body)
     except JSONDecodeError as exc:
         logger.warning(
             "webhook_invalid_json",
@@ -111,7 +147,7 @@ async def webhook(
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
 
     try:
-        payload = WebhookPayload.model_validate(body)
+        envelope = WebhookEnvelope.model_validate(body)
     except ValidationError as exc:
         logger.error(
             "webhook_validation_failed",
@@ -124,7 +160,7 @@ async def webhook(
         )
         raise HTTPException(status_code=422, detail="Invalid webhook payload") from exc
 
-    message = payload.model_dump(by_alias=True)
+    message = dict(body)
     message["trace_id"] = trace_id
     message["source_event_id"] = source_event_id
     message["received_at"] = datetime.now(UTC).isoformat()
@@ -132,14 +168,14 @@ async def webhook(
         "webhook_received",
         trace_id=trace_id,
         source_event_id=source_event_id,
-        type=payload.type,
-        user_id=payload.pass_data.user_id,
+        type=envelope.type,
+        user_id=envelope.pass_data.user_id,
     )
     async with SessionLocal() as session:
         repo = WebhookInboxRepository(session)
         inserted = await repo.enqueue(
             source_event_id=source_event_id,
-            event_type=payload.type,
+            event_type=envelope.type,
             payload=message,
             trace_id=trace_id,
         )

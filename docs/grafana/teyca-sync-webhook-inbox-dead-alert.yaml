@@ -1,0 +1,117 @@
+# Grafana Alerting provisioning file for teyca-sync-iil.9.
+#
+# Background (teyca-sync-iil): since teyca-sync-iil.4/iil.5, a webhook event
+# that fails schema validation in the consumer (or exhausts retries for any
+# other reason — Teyca errors, a stuck user lock, an unexpected exception) no
+# longer causes a lost 422 at ingress. It lands in webhook_inbox with
+# status='dead' instead: inspectable, and replayable via
+# service_workers/run_replay_dead_webhook_inbox.py once the underlying cause
+# is fixed (teyca-sync-iil.6). But nothing watches for that status without
+# this rule — dead rows would just accumulate silently, the same blindness
+# as before at a different layer.
+#
+# This covers ALL reasons a webhook_inbox row goes dead, not just schema
+# validation: app/workers/webhook_inbox_worker.py logs status="dead" from a
+# single call site (_process_claim) regardless of which except branch set it
+# (ValidationError, TeycaAPIError, UserLockNotAcquiredError, or a generic
+# exception after webhook_inbox_max_retries attempts), so one query on
+# logger="app.workers.webhook_inbox_worker" | status="dead" catches all of
+# them.
+#
+# Threshold is intentionally >0, same reasoning as
+# teyca-sync-webhook-validation-failed-alert.yaml: a dead row means an event
+# (CREATE/UPDATE/DELETE) never reached Teyca/Listmonk, which is a real gap
+# in synced state until someone looks at it.
+#
+# HOW TO APPLY (not automated by this repo — no Grafana provisioning
+# pipeline exists here, same as the other docs/grafana/*.yaml files):
+#   1. Replace REPLACE_WITH_LOKI_DATASOURCE_UID below with the actual
+#      Loki datasource UID from your Grafana instance (Connections ->
+#      Data sources -> Loki -> UID in the URL or Settings tab).
+#   2. Copy this file into Grafana's alerting provisioning directory
+#      (commonly /etc/grafana/provisioning/alerting/) and restart
+#      Grafana, OR paste the `rules` block into Alerting -> Alert rules
+#      -> New alert rule -> Import via the "code" / YAML view.
+#   3. Point the contact point / notification policy for the
+#      "teyca-sync" folder at wherever alerts should land (Slack,
+#      email, etc.) — not defined here since that's environment-specific.
+#
+# VERIFICATION (acceptance criteria: "проверено искусственным сбоем"):
+#   POST a webhook whose `pass` object fails PassData validation downstream
+#   (WebhookEnvelope only checks type + pass.user_id at ingress as of
+#   teyca-sync-iil.4, so this must fail in the consumer, not at /webhook) —
+#   e.g. a payload where `tags` is a non-list, non-null value pydantic can't
+#   coerce (a dict, say). The worker's ValidationError branch
+#   (teyca-sync-iil.5) sets max_attempts=1, so the row goes dead on its very
+#   first processing attempt. Confirm the alert fires within one evaluation
+#   interval (5m). This step needs a real Grafana/Loki instance and was not
+#   run from this session — do it once the rule is provisioned. The LogQL
+#   expression itself was checked against the real Loki instance during
+#   development (see teyca-sync-iil.9 comments) and executes without error;
+#   `logger="app.workers.webhook_inbox_worker"` was confirmed to be the
+#   actual field value emitted by this worker.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: teyca-sync-webhook-inbox-dead
+    folder: teyca-sync
+    interval: 5m
+    rules:
+      - uid: teyca-sync-iil-webhook-inbox-dead
+        title: "teyca-sync: webhook_inbox row(s) went dead"
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: REPLACE_WITH_LOKI_DATASOURCE_UID
+            model:
+              editorMode: code
+              expr: >-
+                sum(count_over_time(
+                  {service="teyca-sync", component="worker"}
+                  | json
+                  | logger="app.workers.webhook_inbox_worker"
+                  | status="dead"
+                  [15m]
+                )) or vector(0)
+              instant: true
+              queryType: instant
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+              refId: C
+        labels:
+          severity: warning
+          component: webhook-inbox
+        annotations:
+          summary: >-
+            webhook_inbox row(s) reached status=dead in the last 15m — an
+            incoming CREATE/UPDATE/DELETE event could not be processed after
+            exhausting retries (or failed schema validation immediately, see
+            teyca-sync-iil.5) and needs a human before it's replayed.
+          runbook: >-
+            SQL: SELECT id, source_event_id, event_type, attempts, last_error,
+            created_at FROM webhook_inbox WHERE status='dead' ORDER BY
+            created_at; — or Loki: {service="teyca-sync", component="worker"}
+            | json | logger="app.workers.webhook_inbox_worker" | status="dead".
+            Once the root cause (schema mismatch, Teyca outage, etc.) is
+            fixed, requeue with:
+            python -m service_workers.run_replay_dead_webhook_inbox --apply
+            (dry-run without --apply first).

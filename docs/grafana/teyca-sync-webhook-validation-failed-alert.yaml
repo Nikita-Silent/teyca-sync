@@ -1,0 +1,98 @@
+# Grafana Alerting provisioning file for teyca-sync-iil.8.
+#
+# Background (teyca-sync-iil): a webhook payload that fails ingress validation
+# gets a 422 that Teyca never retries — the event is gone the moment the
+# response leaves. 519 UPDATE events were dropped this way over 2026-08-28 to
+# 2026-09-03 (pass.tags null holes, teyca-sync-iil.1) before anyone but Teyca's
+# own engineers noticed, because nothing watched for event=webhook_validation_failed
+# in Loki. This rule closes that gap.
+#
+# Threshold is intentionally >0, not some tolerance N: a rejected event is a
+# lost event by construction (see app/api/webhook.py — 422 is only returned
+# for type/pass.user_id, i.e. genuinely unroutable input after
+# teyca-sync-iil.4), so a single occurrence already needs a human.
+#
+# HOW TO APPLY (not automated by this repo — no Grafana provisioning
+# pipeline exists here, same as teyca-sync-overview-dashboard.json and
+# teyca-sync-email-conflict-dead-alert.yaml):
+#   1. Replace REPLACE_WITH_LOKI_DATASOURCE_UID below with the actual
+#      Loki datasource UID from your Grafana instance (Connections ->
+#      Data sources -> Loki -> UID in the URL or Settings tab).
+#   2. Copy this file into Grafana's alerting provisioning directory
+#      (commonly /etc/grafana/provisioning/alerting/) and restart
+#      Grafana, OR paste the `rules` block into Alerting -> Alert rules
+#      -> New alert rule -> Import via the "code" / YAML view.
+#   3. Point the contact point / notification policy for the
+#      "teyca-sync" folder at wherever alerts should land (Slack,
+#      email, etc.) — not defined here since that's environment-specific.
+#
+# VERIFICATION (acceptance criteria: "проверено искусственным сбоем"):
+#   POST an unroutable payload to /webhook, e.g.
+#   {"type": "PATCH", "pass": {"user_id": 1}} or {"type": "UPDATE", "pass": {}}
+#   (missing user_id) with a valid Authorization token — app/api/webhook.py
+#   logs event=webhook_validation_failed and returns 422. Confirm the alert
+#   fires within one evaluation interval (5m). This step needs a real
+#   Grafana/Loki instance and was not run from this session — do it once the
+#   rule is provisioned.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: teyca-sync-webhook-validation-failed
+    folder: teyca-sync
+    interval: 5m
+    rules:
+      - uid: teyca-sync-iil-webhook-validation-failed
+        title: "teyca-sync: webhook rejected an event (validation failed)"
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: REPLACE_WITH_LOKI_DATASOURCE_UID
+            model:
+              editorMode: code
+              expr: >-
+                sum(count_over_time(
+                  {service="teyca-sync", component="app"}
+                  | json
+                  | event="webhook_validation_failed"
+                  [15m]
+                )) or vector(0)
+              instant: true
+              queryType: instant
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+              refId: C
+        labels:
+          severity: warning
+          component: webhook
+        annotations:
+          summary: >-
+            /webhook rejected at least one event in the last 15m with a 422 —
+            Teyca does not retry a 422, so this is a lost event, not a caught
+            mistake. Check invalid_fields in the log line to see which schema
+            change or Teyca data shift caused it.
+          runbook: >-
+            Loki: {service="teyca-sync", component="app"} | json |
+            event="webhook_validation_failed" — look at invalid_fields and
+            user_id per line. Compare against app/schemas/webhook.py
+            (WebhookEnvelope only checks type + pass.user_id as of
+            teyca-sync-iil.4, so a 422 here means one of those two is
+            genuinely missing/malformed, not a downstream PassData field).

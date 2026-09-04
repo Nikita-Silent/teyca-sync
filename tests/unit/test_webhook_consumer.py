@@ -187,9 +187,13 @@ async def test_webhook_allows_request_without_auth_when_disabled(
 async def test_webhook_logs_validation_failure_without_persisting(
     mock_inbox_repo: AsyncMock,
 ) -> None:
+    """Ingress only gates on type + pass.user_id (teyca-sync-iil.4) — an
+    unroutable event (missing user_id here) is the only kind of `pass` problem
+    that still 422s, because Teyca doesn't retry a 422 and we'd have nowhere
+    to route the event anyway without a user_id."""
     os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
     os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
-    payload = {"type": "UPDATE", "pass": {"user_id": 5757993, "tags": "1,2,3"}}
+    payload = {"type": "UPDATE", "pass": {"email": "a@b.c"}}
     with patch("app.api.webhook.logger") as logger:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             resp = await ac.post(
@@ -204,8 +208,65 @@ async def test_webhook_logs_validation_failure_without_persisting(
     logger.error.assert_called_once()
     call = logger.error.call_args
     assert call.args[0] == "webhook_validation_failed"
-    assert call.kwargs["user_id"] == 5757993
-    assert "pass.tags" in call.kwargs["invalid_fields"]
+    assert "pass.user_id" in call.kwargs["invalid_fields"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_accepts_malformed_pass_field_and_stores_it_raw(
+    mock_inbox_repo: AsyncMock,
+) -> None:
+    """A malformed `pass` field (here: tags as a string instead of a list, the
+    kind of thing WebhookPayload/PassData would reject) is no longer an
+    ingress concern — it's stored raw in the inbox and validated downstream by
+    the consumer (teyca-sync-iil.4), where a failure is a retryable/inspectable
+    `dead` row instead of a silently dropped event."""
+    os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
+    os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
+    payload = {"type": "UPDATE", "pass": {"user_id": 5757993, "tags": "1,2,3"}}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post(
+            "/webhook",
+            json=payload,
+            headers={"Authorization": AUTH_TOKEN},
+        )
+
+    assert resp.status_code == 200
+    mock_inbox_repo.enqueue.assert_awaited_once()
+    call_kwargs = mock_inbox_repo.enqueue.call_args.kwargs
+    assert call_kwargs["payload"]["pass"]["tags"] == "1,2,3"
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_unsupported_type(mock_inbox_repo: AsyncMock) -> None:
+    os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
+    os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
+    payload = {"type": "PATCH", "pass": {"user_id": 1}}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post(
+            "/webhook",
+            json=payload,
+            headers={"Authorization": AUTH_TOKEN},
+        )
+    assert resp.status_code == 422
+    mock_inbox_repo.enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_body_over_size_limit(mock_inbox_repo: AsyncMock) -> None:
+    os.environ["WEBHOOK_AUTH_TOKEN"] = AUTH_TOKEN
+    os.environ["WEBHOOK_AUTH_ENABLED"] = "true"
+    from app.config import get_settings
+
+    limit = get_settings().webhook_max_body_bytes
+    oversized = {"type": "UPDATE", "pass": {"user_id": 1, "fio": "x" * (limit + 1)}}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post(
+            "/webhook",
+            json=oversized,
+            headers={"Authorization": AUTH_TOKEN},
+        )
+    assert resp.status_code == 413
+    mock_inbox_repo.enqueue.assert_not_awaited()
 
 
 @pytest.mark.asyncio

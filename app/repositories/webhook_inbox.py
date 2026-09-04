@@ -30,6 +30,18 @@ class InboxClaim:
     trace_id: str | None
 
 
+@dataclass(slots=True)
+class DeadInboxRow:
+    """Summary of a dead webhook_inbox row, for the replay CLI (teyca-sync-iil.6)."""
+
+    id: int
+    source_event_id: str
+    event_type: str
+    attempts: int
+    last_error: str | None
+    created_at: datetime
+
+
 class WebhookInboxRepository:
     """Data access helpers for webhook_inbox."""
 
@@ -156,6 +168,63 @@ class WebhookInboxRepository:
         )
         await self._session.execute(stmt)
         return status
+
+    async def get_dead_batch(
+        self,
+        *,
+        limit: int,
+        since: datetime | None = None,
+        event_type: str | None = None,
+    ) -> list[DeadInboxRow]:
+        """List dead rows for inspection/replay, newest first. `since` filters on
+        `created_at` (when the original event arrived, not when it died)."""
+        stmt: Select[tuple[WebhookInbox]] = (
+            select(WebhookInbox)
+            .where(WebhookInbox.status == INBOX_STATUS_DEAD)
+            .order_by(WebhookInbox.created_at.desc())
+            .limit(limit)
+        )
+        if since is not None:
+            stmt = stmt.where(WebhookInbox.created_at >= since)
+        if event_type is not None:
+            stmt = stmt.where(WebhookInbox.event_type == event_type)
+        result = await self._session.execute(stmt)
+        rows = list(result.scalars().all())
+        return [
+            DeadInboxRow(
+                id=int(row.id),
+                source_event_id=str(row.source_event_id),
+                event_type=str(row.event_type),
+                attempts=int(row.attempts),
+                last_error=row.last_error,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+    async def replay_dead(self, *, inbox_ids: list[int]) -> int:
+        """Reset dead rows back to pending with a clean retry slate. Only rows
+        still `dead` are touched — a row already reclaimed by the normal worker
+        loop (e.g. released from a stale `processing` claim) is left alone."""
+        if not inbox_ids:
+            return 0
+        stmt = (
+            update(WebhookInbox)
+            .where(
+                WebhookInbox.id.in_(inbox_ids),
+                WebhookInbox.status == INBOX_STATUS_DEAD,
+            )
+            .values(
+                status=INBOX_STATUS_PENDING,
+                attempts=0,
+                next_retry_at=None,
+                last_error=None,
+                locked_at=None,
+                locked_by=None,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def release_stale_processing_claims(
         self,

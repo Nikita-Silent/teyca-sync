@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog import contextvars as log_contextvars
 
@@ -171,6 +172,18 @@ class WebhookInboxWorker:
                 max_attempts = self.settings.webhook_inbox_max_retries
                 base_delay_ms = self.settings.webhook_inbox_retry_base_delay_ms
                 max_delay_ms = self.settings.webhook_inbox_retry_max_delay_ms
+        except ValidationError as exc:
+            # teyca-sync-iil.5: a schema mismatch (e.g. a PassData field Teyca
+            # sends in a shape we don't expect yet) is not transient — retrying
+            # the same payload webhook_inbox_max_retries times just delays
+            # noticing it. Go straight to dead so the row stays inspectable and
+            # replayable (see replay tooling, teyca-sync-iil.6) once the schema
+            # is fixed, instead of burning ~25 retries with backoff first.
+            error_text = str(exc)
+            log_event = "webhook_inbox_validation_failed"
+            max_attempts = 1
+            base_delay_ms = self.settings.webhook_inbox_retry_base_delay_ms
+            max_delay_ms = self.settings.webhook_inbox_retry_max_delay_ms
         except Exception as exc:
             error_text = str(exc)
             log_event = "webhook_inbox_job_retry_scheduled"

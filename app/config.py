@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # Teyca sends this value in Authorization header (no JWT)
     webhook_auth_token: str = ""
     webhook: str = "/webhook"
+    # teyca-sync-iil.4: ingress accepts any well-formed pass payload (raw body
+    # goes to webhook_inbox, schema validation moved to the consumer where a
+    # failure is a retryable/inspectable `dead` row instead of a lost 422).
+    # This is the only remaining ingress-side guard against abuse.
+    webhook_max_body_bytes: int = 1_000_000
 
     # Teyca API (outgoing)
     teyca_base_url: str = "https://api.teyca.ru"
